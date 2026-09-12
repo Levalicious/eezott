@@ -1,0 +1,5 @@
+-- compPath at U: composition of type paths through the lifted definition
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def pq : Path U Bool Bool := compPath U Bool Bool Bool (ua Bool Bool notEquiv) (ua Bool Bool notEquiv)
+def main : Bool := transport Bool Bool pq true

@@ -1,0 +1,5 @@
+-- sym and cong are written at U; used at U 1 they lift uniformly (universe polymorphism by level shifting)
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def q : Path U Bool Bool := sym U Bool Bool (ua Bool Bool notEquiv)
+def main : Bool := transport Bool Bool q false

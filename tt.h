@@ -74,6 +74,7 @@ struct Term {
     int isi;            /* T_PI/T_LAM: the binder is an interval variable */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
     int n;              /* T_VAR index; T_U level; T_DEF/T_DATA/T_CON/T_ELIM global id */
+    int lv;             /* T_DEF/T_DATA/T_CON/T_ELIM: universe shift of the global (every U n lifted to U n+lv) */
     Term *a, *b, *c, *d;/* T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
                            T_IAND/T_IOR: a b; T_INEG: a; T_PATHP: a=line b=x c=y; T_PAPP: a=path b=r c=x d=y;
                            T_PARTIAL: a=phi b=A; T_TRANSP: a=line b=phi c=u0; T_HCOMP: a=A b=phi c=u d=u0;
@@ -84,7 +85,8 @@ struct Term {
 };
 Term *mk_var(int i); Term *mk_u(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
 Term *mk_lam(const char *x, Term *body, int irr); Term *mk_app(Term *f, Term *a, int irr);
-Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id);
+Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id); Term *mk_ref_lv(TKind k, int id, int lv);
+Term *shift_univ(Term *t, int k);                   /* lift every universe level by k (globals: shift += k) */
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d);
 Term *shift(Term *t, int cut, int by);              /* free vars >= cut get +by */
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2); /* vars in [cut1,cut2) get +by1, vars >= cut2 get +by2 */
@@ -127,6 +129,7 @@ typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
+    int lv;             /* V_DATA/V_CON/H_ELIM: universe shift; V_GLUE: the universe level */
     HKind h;
     Clo clo;            /* V_LAM body; V_PI / V_SIGMA codomain */
     Val *dom;           /* V_PI / V_SIGMA domain */
@@ -164,7 +167,8 @@ int val_mentions_ivar(int depth, Val *v, int level);
 
 /* ---------------- globals ---------------- */
 
-typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; } Def;
+typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_lv, **vval_lv; int nlv; int poly; } Def;
+/* poly: the global mentions a universe (directly or through another polymorphic global); only then does a universe shift change it */
 typedef struct {
     const char *name; Term *ty; int irr;   /* type of the argument, under [params, previous args] */
     int isrec, npi;                        /* recursive: type is (y_1..y_npi) -> D params idx */
@@ -182,7 +186,13 @@ typedef struct {
     Term **itys;                           /* index types, each under [params, previous indices] */
     Term *ty;                              /* the type of the data constant: params -> indices -> U lvl */
     int *cons; int ncons;
+    int poly;
 } Data;
+
+Val *def_val(int id, int lv); Val *def_ty(int id, int lv);   /* a definition at a universe shift (memoised) */
+Term *con_arg_ty(Con *C, int j, int lv);                     /* a constructor argument's type at a shift */
+Term *data_ty(int d, int lv); Term *con_ty(int c, int lv);
+int term_poly(Term *t);                                      /* does the term mention a universe (or a polymorphic global)? */
 
 extern Def *defs; extern int ndefs;
 extern Data *datas; extern int ndatas;
