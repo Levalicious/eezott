@@ -126,6 +126,26 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
     }
 }
 Term *shift(Term *t, int cut, int by) { return shift2(t, cut, by, cut, by); }
+Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
+    if (!t) return NULL;
+    Term *r;
+    switch (t->k) {
+    case T_VAR: if (t->n == idx) return v; if (t->n > idx) return mk_var(t->n - 1); return t;
+    case T_U: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_PI:  r = mk_pi(t->name, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), t->irr); r->isi = t->isi; return r;
+    case T_LAM: r = mk_lam(t->name, subst_term(t->a, idx + 1, v), t->irr); r->isi = t->isi; return r;
+    case T_SIGMA: r = mk_term(T_SIGMA, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), NULL, NULL); r->name = t->name; return r;
+    case T_LET: return mk_let(t->name, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx + 1, v), t->irr);
+    case T_SYS: {
+        r = mk(T_SYS); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = subst_term(t->br[i].face, idx, v); r->br[i].body = subst_term(t->br[i].body, idx, v); }
+        return r;
+    }
+    default:
+        r = mk_term(t->k, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx, v), subst_term(t->d, idx, v));
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; return r;
+    }
+}
 
 int term_eq(Term *a, Term *b) {
     if (a == b) return 1;
@@ -423,7 +443,8 @@ static Val *fresh_ivar(void) { return vivar(fresh_level++); }
 enum { N_IH = 1, N_LINE_DOM, N_LINE_COD_V, N_TRANSP_V, N_LINE_IOR, N_LINE_IAND, N_HCOMP_PI_SIDES, N_PATH_HCOMP_SIDES,
        N_LINE_PATH_AT, N_PATH_TRANSP_SIDES, N_FWD_SIDES, N_FILL, N_FILL_SIDES, N_TFILL, N_DATA_ARG_LINE, N_SYS_PROJ,
        N_CONST, N_ELIM_MOTIVE_LINE, N_ELIM_SIDES,
-       N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES };
+       N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES,
+       N_ELIM_PATH_IH, N_TRANSP_MAP };
 typedef struct { int code; int i1, i2, i3; VList cap; } Native;
 typedef struct { int n; Val *v[8]; } Caps;
 
@@ -487,16 +508,30 @@ static Val *ih_apply(Native *c, Val *y) {
 }
 
 /* iota: the eliminator's full spine ends in a constructor */
+static int elim_data_cur;
+static Val *elim_of_branch(Val *b, void *data);
+static Val *vsys(VBranch *br, int n);
+static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 static Val *elim_reduce(int data, VList *args) {
-    Data *D = &datas[data];
+    Data *D = &datas[data]; elim_data_cur = data;
     int np = D->nparams, k = D->ncons;
     Val *target = args->a[args->n - 1].v;
     if (target->k != V_CON) return NULL;
     Con *c = &cons[target->n];
-    if (c->data != data || target->args.n != np + c->nargs) return NULL;
+    if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
     Val *res = args->a[np + 1 + c->ci].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
     for (int j = 0; j < c->nargs; j++) {
+        if (c->args[j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. (p k) */
+            Native *ih = xalloc(sizeof *ih); ih->code = N_ELIM_PATH_IH; ih->i1 = data;
+            for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
+            Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, target->args.a[i].v);
+            vl_push(&ih->cap, target->args.a[np + j].v, 0);
+            vl_push(&ih->cap, eval(e, c->args[j].px), 0); vl_push(&ih->cap, eval(e, c->args[j].py), 0);
+            Val *ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "k"; ihv->isi = 1;
+            res = vapp(res, ihv, 0);
+            continue;
+        }
         if (!c->args[j].isrec) continue;
         Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = data; ih->i2 = target->n; ih->i3 = j;
         for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
@@ -514,8 +549,37 @@ static Val *elim_reduce(int data, VList *args) {
         } else { ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "y"; }
         res = vapp(res, ihv, 0);
     }
+    if (c->nint > 0) {   /* a path constructor: the method is a cube with the prescribed boundary */
+        Env *env = NULL;
+        for (int i = 0; i < target->args.n; i++) env = env_push(env, target->args.a[i].v);
+        if (c->pathmethod) {   /* PathP (i. P (c a i)) (elim .. b0) (elim .. b1) */
+            Val *r = target->args.a[np + c->nargs].v;
+            Val *ends[2];
+            for (int end = 0; end < 2; end++) {
+                Env *e0 = NULL;
+                for (int i = 0; i < np + c->nargs; i++) e0 = env_push(e0, target->args.a[i].v);
+                e0 = env_push(e0, vi(end ? iv_one() : iv_zero()));
+                Val *b = eval(e0, c->boundary);
+                if (b->k == V_SYS) die("internal: boundary of %s not total at an endpoint", c->name);
+                VList a2 = vl_copy(args); a2.n = np + 1 + k;
+                vl_push(&a2, b, 0);
+                ends[end] = elim_apply_list(data, &a2);
+            }
+            return vpapp(res, r, ends[0], ends[1]);
+        }
+        /* (is : I) -> Sub (P (c a is)) phi [faces -> elim .. boundary] */
+        for (int q = 0; q < c->nint; q++) res = vapp(res, target->args.a[np + c->nargs + q].v, 0);
+        Val *bsys = c->boundary ? eval(env, c->boundary) : vsys(NULL, 0);
+        VList base = vl_copy(args); base.n = np + 1 + k;
+        Val *img = vsys_map(bsys, elim_of_branch, &base);
+        IVal phi = iv_zero();
+        if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) phi = iv_or(phi, bsys->br[i].phi->iv); } else phi = iv_one();
+        Val *P = args->a[np].v;
+        return vouts(vapp(P, target, 0), vi(phi), img, res);
+    }
     return res;
 }
+static Val *elim_of_branch(Val *b, void *data) { VList a2 = vl_copy((VList *)data); vl_push(&a2, b, 0); return elim_apply_list(elim_data_cur, &a2); }
 
 /* the eliminator through a formal composition (a normal form on indexed families, and on HITs later):
      elim D p P m idx (hcomp A phi u u0) = comp (\k. P idx (hfill A phi u u0 k)) phi (\k. elim .. (u k)) (elim .. u0)   */
@@ -586,7 +650,18 @@ Val *vapp(Val *f, Val *a, int irr) {
             return v;
         }
         return neu_app(f, ar);
-    case V_DATA: case V_CON: return neu_app(f, ar);
+    case V_DATA: return neu_app(f, ar);
+    case V_CON: {
+        Val *v = neu_app(f, ar);
+        Con *C = &cons[f->n]; int np = datas[C->data].nparams;
+        if (C->nint > 0 && v->args.n == np + C->nargs + C->nint) {   /* a path constructor on a face of its boundary is the boundary */
+            Env *env = NULL;
+            for (int i = 0; i < v->args.n; i++) env = env_push(env, v->args.a[i].v);
+            Val *b = C->boundary ? eval(env, C->boundary) : NULL;
+            if (b && b->k != V_SYS) return b;
+        }
+        return v;
+    }
     case V_SYS: { /* a partial function applied pointwise */
         VBranch *br = xalloc((f->nbr + 1) * sizeof(VBranch));
         for (int i = 0; i < f->nbr; i++) { br[i].phi = f->br[i].phi; br[i].v = vapp(f->br[i].v, a, irr); }
@@ -723,7 +798,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
     }
     case V_DATA: case V_CON: {
         Val *r = mkval(v->k); r->n = v->n; r->lv = v->lv; r->args = (VList){0};
-        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } vl_push_arg(&r->args, a); }
+        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } a.irr = 0; if (v->k == V_CON) r = vapp(r, a.v, 0); else vl_push_arg(&r->args, a); }
         return r;
     }
     case V_GLUE: { Val *g = vglue(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s)); if (g->k == V_GLUE) g->lv = v->lv; return g; }
@@ -766,6 +841,7 @@ static Val *vcomp(Val *line, Val *phi, Val *u, Val *u0) {
 static Val *vtfill(Val *line, Val *phi, Val *u0) { return vnative(N_TFILL, 0, 0, 0, 3, line, phi, u0); }     /* λi. transp (λj. line (i∧j)) (φ ∨ ~i) u0 */
 static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL, 0, 0, 0, 4, line, phi, u, u0); } /* λi. comp (λj. line (i∧j)) (φ ∨ ~i) [..] u0 */
 
+static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
 static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; if (k < 0) return vproj(v, -k); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
 static Val *native_apply(Native *nt, Val *arg) {
@@ -875,6 +951,13 @@ static Val *native_apply(Native *nt, Val *arg) {
         Val *phis[2] = { CAP(nt, 1), ineg(CAP(nt, 1)) };
         return vsys_faces(2, phis, gcomp_body, &c);
     }
+    case N_ELIM_PATH_IH: {       /* λk. elim base.. (p @ k); cap: base (np+1+ncons values), p, x, y; i1 = data */
+        int nb = nt->cap.n - 3;
+        VList a2 = {0}; for (int i = 0; i < nb; i++) vl_push(&a2, CAP(nt, i), 0);
+        vl_push(&a2, vpapp(CAP(nt, nb), arg, CAP(nt, nb + 1), CAP(nt, nb + 2)), 0);
+        return elim_apply_list(nt->i1, &a2);
+    }
+    case N_TRANSP_MAP: return vsys_map(vapp(CAP(nt, 2), arg, 0), transp_branch, nt);   /* λi. transp line phi (u i) over the partial element; cap: line, phi, u */
     case N_SYS_PROJ: {           /* λi. proj_k (u i) over the partial element; cap: u; i1 = k */
         Val *ui = vapp(CAP(nt, 0), arg, 0);
         int k = nt->i1;
@@ -934,6 +1017,10 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
     case V_DATA: {
         Data *D = &datas[Ai->n];
         if (D->nparams + D->nidx == 0) return u0;
+        if (D->hit && u0->k == V_NEU && u0->h == H_HCOMP && u0->a->k == V_DATA) {   /* transp of a formal composition: the composition of the transports */
+            Val *D1 = vapp(line, ione(), 0);
+            return vhcomp(D1, u0->b, vnative(N_TRANSP_MAP, 0, 0, 0, 3, line, phi, u0->c), vtransp(line, phi, u0->dom));
+        }
         if (u0->k != V_CON) return neu_transp(line, phi, u0);
         Con *C = &cons[u0->n];
         int np = D->nparams;
@@ -954,6 +1041,13 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
             Env *e = NULL; for (int i = 0; i < res->args.n; i++) e = env_push(e, res->args.a[i].v);
             for (int j = 0; j < D->nidx; j++)
                 if (!conv(fresh_level, eval(e, C->ridx[j]), D1->args.a[np + j].v)) return neu_transp(line, phi, u0);
+        }
+        if (C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r); boundaries with parameters: M4b */
+            if (C->bparams) die("transport of the path constructor %s, whose boundary mentions the parameters, is not implemented yet", C->name);
+            Val *r = mkval(V_CON); r->n = res->n; r->lv = res->lv;
+            for (int i = 0; i < res->args.n; i++) vl_push_arg(&r->args, res->args.a[i]);
+            for (int q = 0; q < C->nint; q++) vl_push(&r->args, u0->args.a[np + C->nargs + q].v, 0);
+            return r;
         }
         return res;
     }
@@ -1010,7 +1104,7 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
     }
     case V_DATA: {
         Data *D = &datas[A->n];
-        if (D->nidx > 0) return neu_hcomp(A, phi, u, u0);
+        if (D->nidx > 0 || D->hit) return neu_hcomp(A, phi, u, u0);
         if (u0->k != V_CON || !sides_all_con(u, u0->n)) return neu_hcomp(A, phi, u, u0);
         Con *C = &cons[u0->n]; int np = D->nparams;
         Val *res = mkval(V_CON); res->n = u0->n; res->lv = u0->lv;

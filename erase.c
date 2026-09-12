@@ -81,10 +81,13 @@ static void erase(Term *t, int depth) {
 static void emit_con(Data *D, int ci) {
     Con *C = &cons[D->cons[ci]];
     fprintf(out, "tt_c_%s := ", C->name);
+    if (C->bparams) for (int p = 0; p < D->nparams; p++) fprintf(out, "p%d -> ", p);   /* parameters kept when the boundary needs them */
     for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "a%d -> ", j);
+    for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
     for (int i = 0; i < D->ncons; i++) fprintf(out, "h%d -> ", i);
     fprintf(out, "h%d", ci);
     for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "(a%d)", j);
+    for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
     fputc('\n', out);
 }
 
@@ -97,10 +100,17 @@ static void emit_rec(Data *D) {
         Con *C = &cons[D->cons[ci]];
         fputc('(', out);
         for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "a%d -> ", j);
+        for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
         fprintf(out, "m%d", ci);
         for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "(a%d)", j);
         for (int j = 0; j < C->nargs; j++) {
             ConArg *A = &C->args[j];
+            if (A->isrecpath) {   /* the induction hypothesis over a path argument: k -> rec m.. (a_j k) */
+                fputs("(k -> rec", out);
+                for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
+                fprintf(out, "(a%d(k)))", j);
+                continue;
+            }
             if (!A->isrec) continue;
             /* induction hypothesis: \y_rel.. -> rec m.. (a_j y_rel..) */
             fputc('(', out);
@@ -113,6 +123,7 @@ static void emit_rec(Data *D) {
             for (Term *p = w; p->k == T_PI && yt < A->npi; p = p->b, yt++) if (!p->irr) fprintf(out, "(y%d)", yt);
             fputs("))", out);
         }
+        for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
         fputc(')', out);
     }
     fputs(")\n", out);
@@ -153,10 +164,17 @@ static void emit_codes(Data *D) {
         for (int j = 0; j < C->nargs; j++) fprintf(out, "a%d -> ", j);
         /* bind the fillers of every argument but the last, in order */
         for (int j = 0; j + 1 < C->nargs; j++) fprintf(out, "(fl%d -> ", j);
+        for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
         fprintf(out, "tt_c_%s", C->name);
+        if (C->bparams) for (int p = 0; p < np; p++) {   /* parameters kept by the constructor: those of the type at the end of the line */
+            fputs("(line(tt_i1)(m -> ", out);
+            for (int q = 0; q < np; q++) fprintf(out, "p%d -> ", q);
+            fprintf(out, "p%d))", p);
+        }
         for (int j = 0; j < C->nargs; j++) {
             fputs("(tt_transp", out); emit_arg_line(D, C, j); fprintf(out, "(phi)(a%d))", j);
         }
+        for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
         for (int j = C->nargs - 2; j >= 0; j--) {
             /* fl_j := i -> transp (k -> A_j(i /\ k)) (phi \/ ~i) a_j */
             fputs(")(i -> tt_transp(k -> ", out); emit_arg_line(D, C, j); fprintf(out, "(tt_iand(i)(k)))(tt_ior(phi)(tt_ineg(i)))(a%d))", j);

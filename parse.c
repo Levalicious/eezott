@@ -3,7 +3,7 @@
  *
  *   program  := decl*
  *   decl     := 'def' name binder* ':' term ':=' term
- *             | 'data' name binder* ':' term 'where' ('|' name ':' term)*
+ *             | 'data' name binder* ':' term 'where' ('|' name ':' term system?)*   (a system: the boundary of a path constructor)
  *   binder   := '(' name+ ':' term ')'
  *   term     := binder+ '->' term            dependent function type
  *             | '\' name+ '->' term          lambda / path abstraction
@@ -32,6 +32,7 @@ typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
+static int in_con_type;   /* while parsing a constructor's type: a following system is its boundary, not an argument */
 
 static void addtok(TokKind k, const char *s, int n, int line) {
     if (ntoks == tcap) { tcap = tcap ? 2 * tcap : 256; toks = realloc(toks, tcap * sizeof(Tok)); if (!toks) die("out of memory"); }
@@ -183,6 +184,7 @@ static STerm *parse_app(void) {
     STerm *f = parse_atom();
     while (atom_ahead()) {
         if (peek()->k == TK_LP && binder_ahead()) break;
+        if (peek()->k == TK_LB && in_con_type) break;
         STerm *a = parse_atom();
         STerm *r = st(S_APP, f->line); r->a = f; r->b = a; f = r;
     }
@@ -273,7 +275,10 @@ SDecl *parse_program(const char *src, const char *fname) {
             while (peek()->k == TK_BAR) {
                 next(); Tok *c = expect(TK_NAME); expect(TK_COLON);
                 if (d->ncons == cap) { cap = cap ? 2 * cap : 4; d->cons = realloc(d->cons, cap * sizeof(SCon)); if (!d->cons) die("out of memory"); }
-                d->cons[d->ncons].name = tokstr(c); d->cons[d->ncons].line = c->line; d->cons[d->ncons].ty = parse_term(); d->ncons++;
+                d->cons[d->ncons].name = tokstr(c); d->cons[d->ncons].line = c->line;
+                in_con_type = 1; d->cons[d->ncons].ty = parse_term(); in_con_type = 0;
+                d->cons[d->ncons].boundary = peek()->k == TK_LB ? parse_system() : NULL;   /* path constructor: its boundary */
+                d->ncons++;
             }
         } else die("%s:%d: expected 'def' or 'data', found %s", file, t->line, tokname(t->k));
         *tail = d; tail = &d->next;

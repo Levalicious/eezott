@@ -48,7 +48,7 @@ struct STerm {
                                          S_TRANSP: a=line b=phi c=u0; S_HCOMP: a=A b=phi c=u d=u0; S_PAIR: a b */
     SBranch *br; int nbr;             /* S_SYS */
 };
-typedef struct { const char *name; STerm *ty; int line; } SCon;
+typedef struct { const char *name; STerm *ty; STerm *boundary; int line; } SCon;   /* boundary: a system, for path constructors */
 typedef struct SDecl {
     int isdata; const char *name; int line;
     SBinder *params; int nparams;     /* data: parameters; def: binder sugar folded into ty/val */
@@ -87,6 +87,7 @@ Term *mk_var(int i); Term *mk_u(int l); Term *mk_pi(const char *x, Term *a, Term
 Term *mk_lam(const char *x, Term *body, int irr); Term *mk_app(Term *f, Term *a, int irr);
 Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id); Term *mk_ref_lv(TKind k, int id, int lv);
 Term *shift_univ(Term *t, int k);                   /* lift every universe level by k (globals: shift += k) */
+Term *subst_term(Term *t, int idx, Term *v);         /* substitute a closed term for a variable */
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d);
 Term *shift(Term *t, int cut, int by);              /* free vars >= cut get +by */
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2); /* vars in [cut1,cut2) get +by1, vars >= cut2 get +by2 */
@@ -173,11 +174,16 @@ typedef struct {
     const char *name; Term *ty; int irr;   /* type of the argument, under [params, previous args] */
     int isrec, npi;                        /* recursive: type is (y_1..y_npi) -> D params idx */
     Term **idx; int nidx;                  /* index terms of the recursive occurrence, under [params, prev args, y's] */
+    int isrecpath; Term *px, *py;          /* recursive path argument: type is Path (D params) px py (endpoints under [params, prev args]) */
 } ConArg;
 typedef struct {
     const char *name; int data, ci; Term *ty; int line;
     ConArg *args; int nargs; int nrec;
     Term **ridx;                           /* return index terms, under [params, args] */
+    int nint;                              /* path constructor: number of interval binders after the arguments */
+    Term *boundary;                        /* its boundary: a system under [params, args, intervals] (NULL: none) */
+    int bparams;                           /* the boundary mentions the parameters (they are then kept at run time) */
+    int pathmethod;                        /* the eliminator's method is a PathP (one interval, boundary at both ends) */
 } Con;
 typedef struct {
     const char *name; int line;
@@ -187,6 +193,7 @@ typedef struct {
     Term *ty;                              /* the type of the data constant: params -> indices -> U lvl */
     int *cons; int ncons;
     int poly;
+    int hit;                               /* has path constructors: hcomp is a normal form */
 } Data;
 
 Val *def_val(int id, int lv); Val *def_ty(int id, int lv);   /* a definition at a universe shift (memoised) */

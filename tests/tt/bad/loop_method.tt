@@ -1,0 +1,4 @@
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def bad : S1 -> Bool := \x -> elim S1 (\_ -> Bool) true (\i -> not (elim I (\_ -> Bool) true false i)) x

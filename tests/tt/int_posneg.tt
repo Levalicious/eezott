@@ -1,0 +1,9 @@
+-- the integers as a HIT (CHM 2018 / Cubical Agda): pos, neg and the path posneg; a function respecting it
+data Z : U where
+  | pos : Nat -> Z
+  | neg : Nat -> Z
+  | posneg : (i : I) -> Z [ ~ i -> pos zero | i -> neg zero ]
+def sucZ : Z -> Z := \z -> elim Z (\_ -> Z) (\n -> pos (suc n)) (\n -> elim Nat (\_ -> Z) (pos one) (\k ih -> neg k) n) (\i -> pos one) z
+def toNat : Z -> Nat := \z -> elim Z (\_ -> Nat) (\n -> n) (\n -> n) (\i -> zero) z
+def p : Path Nat one one := \i -> toNat (sucZ (posneg i))
+def main : Nat := add (toNat (sucZ (posneg i1))) (p i0)

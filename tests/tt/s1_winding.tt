@@ -1,0 +1,8 @@
+-- the universal cover of the circle by the not-equivalence: transport along the loop flips the fibre
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def Cover : S1 -> U := \x -> elim S1 (\_ -> U) Bool (ua Bool Bool notEquiv) x
+def main : Bool := transport Bool Bool (\i -> Cover (loop i)) true
