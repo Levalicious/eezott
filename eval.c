@@ -444,7 +444,7 @@ enum { N_IH = 1, N_LINE_DOM, N_LINE_COD_V, N_TRANSP_V, N_LINE_IOR, N_LINE_IAND, 
        N_LINE_PATH_AT, N_PATH_TRANSP_SIDES, N_FWD_SIDES, N_FILL, N_FILL_SIDES, N_TFILL, N_DATA_ARG_LINE, N_SYS_PROJ,
        N_CONST, N_ELIM_MOTIVE_LINE, N_ELIM_SIDES,
        N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES,
-       N_ELIM_PATH_IH, N_TRANSP_MAP };
+       N_ELIM_PATH_IH, N_TRANSP_MAP, N_HITTR_SIDES };
 typedef struct { int code; int i1, i2, i3; VList cap; } Native;
 typedef struct { int n; Val *v[8]; } Caps;
 
@@ -522,10 +522,11 @@ static Val *elim_reduce(int data, VList *args) {
     Val *res = args->a[np + 1 + c->ci].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
     for (int j = 0; j < c->nargs; j++) {
-        if (c->args[j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. (p k) */
+        if (c->args[j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. idx (p k) */
             Native *ih = xalloc(sizeof *ih); ih->code = N_ELIM_PATH_IH; ih->i1 = data;
             for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
             Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, target->args.a[i].v);
+            for (int q = 0; q < c->args[j].nidx; q++) vl_push(&ih->cap, eval(e, c->args[j].idx[q]), 1);
             vl_push(&ih->cap, target->args.a[np + j].v, 0);
             vl_push(&ih->cap, eval(e, c->args[j].px), 0); vl_push(&ih->cap, eval(e, c->args[j].py), 0);
             Val *ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "k"; ihv->isi = 1;
@@ -561,7 +562,7 @@ static Val *elim_reduce(int data, VList *args) {
                 e0 = env_push(e0, vi(end ? iv_one() : iv_zero()));
                 Val *b = eval(e0, c->boundary);
                 if (b->k == V_SYS) die("internal: boundary of %s not total at an endpoint", c->name);
-                VList a2 = vl_copy(args); a2.n = np + 1 + k;
+                VList a2 = vl_copy(args); a2.n = np + 1 + k + D->nidx;   /* the boundary lives at the target's indices */
                 vl_push(&a2, b, 0);
                 ends[end] = elim_apply_list(data, &a2);
             }
@@ -569,12 +570,14 @@ static Val *elim_reduce(int data, VList *args) {
         }
         /* (is : I) -> Sub (P (c a is)) phi [faces -> elim .. boundary] */
         for (int q = 0; q < c->nint; q++) res = vapp(res, target->args.a[np + c->nargs + q].v, 0);
-        Val *bsys = c->boundary ? eval(env, c->boundary) : vsys(NULL, 0);
-        VList base = vl_copy(args); base.n = np + 1 + k;
+        if (!c->boundary) return res;
+        Val *bsys = eval(env, c->boundary);
+        VList base = vl_copy(args); base.n = np + 1 + k + D->nidx;
         Val *img = vsys_map(bsys, elim_of_branch, &base);
         IVal phi = iv_zero();
         if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) phi = iv_or(phi, bsys->br[i].phi->iv); } else phi = iv_one();
         Val *P = args->a[np].v;
+        for (int j = 0; j < D->nidx; j++) P = vapp(P, args->a[np + 1 + k + j].v, 1);
         return vouts(vapp(P, target, 0), vi(phi), img, res);
     }
     return res;
@@ -951,9 +954,28 @@ static Val *native_apply(Native *nt, Val *arg) {
         Val *phis[2] = { CAP(nt, 1), ineg(CAP(nt, 1)) };
         return vsys_faces(2, phis, gcomp_body, &c);
     }
-    case N_ELIM_PATH_IH: {       /* λk. elim base.. (p @ k); cap: base (np+1+ncons values), p, x, y; i1 = data */
+    case N_HITTR_SIDES: {        /* λj. [ psi_k -> squeeze of the boundary at stage ~j, phi -> u0 ]; cap: line, phi, u0, fills..; i1 = con */
+        Con *C = &cons[nt->i1]; int np = datas[C->data].nparams;
+        Val *line = CAP(nt, 0), *phi = CAP(nt, 1), *u0 = CAP(nt, 2);
+        Val *stage = ineg(arg);
+        Val *Dst = vapp(line, stage, 0);   /* the type at the stage: its parameters */
+        Env *env = NULL;
+        for (int i = 0; i < np; i++) env = env_push(env, Dst->args.a[i].v);
+        for (int j = 0; j < C->nargs; j++) env = env_push(env, vapp(CAP(nt, 3 + j), stage, 0));
+        for (int q = 0; q < C->nint; q++) env = env_push(env, u0->args.a[np + C->nargs + q].v);
+        Val *bsys = eval(env, C->boundary);
+        Native *sq = xalloc(sizeof *sq); sq->code = 0;
+        vl_push(&sq->cap, vnative(N_LINE_IOR, 0, 0, 0, 2, line, stage), 0); vl_push(&sq->cap, ior(stage, phi), 0);
+        Val *sqz = vsys_map(bsys, transp_branch, sq);
+        VBranch br[2]; int n = 0;
+        if (sqz->k == V_SYS) { VBranch *b2 = xalloc((sqz->nbr + 2) * sizeof(VBranch)); memcpy(b2, sqz->br, sqz->nbr * sizeof(VBranch)); n = sqz->nbr; b2[n].phi = phi; b2[n].v = u0; return vsys(b2, n + 1); }
+        br[n].phi = ione(); br[n].v = sqz; n++;
+        br[n].phi = phi; br[n].v = u0; n++;
+        return vsys(br, n);
+    }
+    case N_ELIM_PATH_IH: {       /* λk. elim base.. idx.. (p @ k); cap: base (np+1+ncons values), idx.., p, x, y; i1 = data */
         int nb = nt->cap.n - 3;
-        VList a2 = {0}; for (int i = 0; i < nb; i++) vl_push(&a2, CAP(nt, i), 0);
+        VList a2 = {0}; for (int i = 0; i < nb; i++) vl_push(&a2, CAP(nt, i), nt->cap.a[i].irr);
         vl_push(&a2, vpapp(CAP(nt, nb), arg, CAP(nt, nb + 1), CAP(nt, nb + 2)), 0);
         return elim_apply_list(nt->i1, &a2);
     }
@@ -1037,17 +1059,35 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
             vl_push(&res->args, vtransp(aline, phi, aj), C->args[j].irr);
             fills[j] = vtfill(aline, phi, aj);
         }
+        if (C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r) */
+            Val *r = mkval(V_CON); r->n = res->n; r->lv = res->lv;
+            for (int i = 0; i < res->args.n; i++) vl_push_arg(&r->args, res->args.a[i]);
+            for (int q = 0; q < C->nint; q++) vl_push(&r->args, u0->args.a[np + C->nargs + q].v, 0);
+            res = r;
+            if (C->bparams) {
+                /* the boundary mentions the parameters (CHM 3.3.5, pushouts): the naive result's boundary b(p1, a', r) is not the
+                   transported boundary; correct it with a composition whose sides squeeze the boundary at every stage:
+                     hcomp^j (D p1) [ psi_k -> transp (i. D (p (i \/ ~j))) (~j \/ phi) (b_k (p (~j), fill_a (~j), r)),  phi -> c a r ] (c a' r) */
+                Native *nt = xalloc(sizeof *nt); nt->code = N_HITTR_SIDES; nt->i1 = u0->n;
+                vl_push(&nt->cap, line, 0); vl_push(&nt->cap, phi, 0); vl_push(&nt->cap, u0, 0);
+                for (int j = 0; j < C->nargs; j++) vl_push(&nt->cap, fills[j], 0);
+                Val *sides = mkval(V_LAM); sides->clo.fn = nfn; sides->clo.data = nt; sides->isi = 1; sides->name = "j";
+                Env *env = NULL; for (int i = 0; i < u0->args.n; i++) env = env_push(env, u0->args.a[i].v);
+                Val *bsys = eval(env, C->boundary);
+                IVal psi = iv_zero();
+                if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) psi = iv_or(psi, bsys->br[i].phi->iv); } else psi = iv_one();
+                if (D->nidx > 0) {   /* the composition lives at the line's index, which the transported constructor must reach */
+                    Env *e2 = NULL; for (int i = 0; i < res->args.n; i++) e2 = env_push(e2, res->args.a[i].v);
+                    for (int j = 0; j < D->nidx; j++)
+                        if (!conv(fresh_level, eval(e2, C->ridx[j]), D1->args.a[np + j].v)) return neu_transp(line, phi, u0);
+                }
+                return vhcomp(D1, vi(iv_or(psi, phi->iv)), sides, res);
+            }
+        }
         if (D->nidx > 0) {   /* the transported constructor's indices must agree with the line's */
             Env *e = NULL; for (int i = 0; i < res->args.n; i++) e = env_push(e, res->args.a[i].v);
             for (int j = 0; j < D->nidx; j++)
                 if (!conv(fresh_level, eval(e, C->ridx[j]), D1->args.a[np + j].v)) return neu_transp(line, phi, u0);
-        }
-        if (C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r); boundaries with parameters: M4b */
-            if (C->bparams) die("transport of the path constructor %s, whose boundary mentions the parameters, is not implemented yet", C->name);
-            Val *r = mkval(V_CON); r->n = res->n; r->lv = res->lv;
-            for (int i = 0; i < res->args.n; i++) vl_push_arg(&r->args, res->args.a[i]);
-            for (int q = 0; q < C->nint; q++) vl_push(&r->args, u0->args.a[np + C->nargs + q].v, 0);
-            return r;
         }
         return res;
     }
