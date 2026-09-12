@@ -1,0 +1,3 @@
+-- a level-polymorphic identity, applied at level 0: the level argument is erased
+def idL (l : Level) (A : U {l}) (x : A) : A := x
+def main : Nat := idL 0 Nat 3

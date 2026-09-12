@@ -1,0 +1,3 @@
+-- Level is a pretype: not an element of U
+def bad : U := Level
+def main : Nat := one

@@ -1,0 +1,14 @@
+-- level parameters on data types: an indexed family, a higher inductive type, motives into U {l}
+data Vec2 (l : Level) (A : U {l}) : Nat -> U {l} where
+  | vnil2 : Vec2 l A zero
+  | vcons2 : (n : Nat) -> A -> Vec2 l A n -> Vec2 l A (suc n)
+def vlen (l : Level) (A : U {l}) (n : Nat) (v : Vec2 l A n) : Nat := elim Vec2 l A (\_ _ -> Nat) zero (\n x xs ih -> suc ih) n v
+def vtypes : Vec2 1 (U) 2 := vcons2 1 (U) 1 Nat (vcons2 1 (U) 0 Bool (vnil2 1 U))   -- (U) 2: U followed by a numeral is a universe level
+data S1L (l : Level) : U {l} where
+  | baseL : S1L l
+  | loopL : (i : I) -> S1L l [ ~ i -> baseL l | i -> baseL l ]
+def collapse (l : Level) (x : S1L l) : Nat := elim S1L l (\_ -> Nat) zero (\i -> zero) x
+def Lift (l : Level) (A : U) : U {l} := A
+def Cov (l : Level) (x : Bool) : U {l} := elim Bool (\_ -> U {l}) (Lift l Nat) (Lift l Bool) x
+def inCov : Cov 0 true := two
+def main : Nat := vlen 1 (U) 2 vtypes

@@ -1,0 +1,7 @@
+-- levels inferred at every use: a polymorphic definition is taken at a fresh level solved at the end of the definition
+def T : U 2 := Equiv Nat U
+def K (l : Level) : Nat := 3
+def useK : Nat := K 0
+def idAtOne : U -> U := id U
+def twoIds : Sigma (Nat -> Nat) (\_ -> U -> U) := (id Nat , id U)
+def main : Nat := 0

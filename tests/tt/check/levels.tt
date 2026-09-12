@@ -1,0 +1,17 @@
+-- levels as values: Level binders, U {l}, lsuc, lmax, cumulativity U {l} <= U {lsuc l}, numerals as levels,
+-- normal forms (lmax l m = lmax m l, lmax 1 (lsuc lzero) = 1), braces around a level argument
+def idL (l : Level) (A : U {l}) (x : A) : A := x
+def Lift (l : Level) (A : U {l}) : U {lsuc l} := A
+def Pair (l m : Level) (A : U {l}) (B : U {m}) : U {lmax l m} := Sigma A (\_ -> B)
+def p : Pair 0 0 Nat Bool := (one , true)
+def q : Pair lzero (lsuc lzero) Nat U := (two , Nat)
+def T : U {lmax 1 (lsuc lzero)} := U
+def fam (l : Level) (A : U {l}) (B : U) : U := B -> B
+def useFam : fam 1 U Nat := \n -> n
+def viaBrace : Nat := idL {lzero} Nat two
+def symL (l m : Level) (A : U {lmax l m}) : U {lmax m l} := A
+def main : Nat := idL 0 Nat 3
+-- a summand below a max of several: accepted when one choice is derivable (l <= l; 1 <= 1)
+def underMax (l : Level) (A : U {l}) : U {lmax l 1} := A
+def constUnderMax (l : Level) (A : U 1) : U {lmax l 1} := A
+def sucUnderMax (l : Level) (A : U {lsuc l}) : U {lmax (lsuc l) 3} := A
