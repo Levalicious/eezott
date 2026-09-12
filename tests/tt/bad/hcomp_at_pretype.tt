@@ -1,0 +1,3 @@
+-- no Kan operation at a pretype
+def h : (i : I) -> Nat := hcomp ((i : I) -> Nat) i0 (\j -> []) (\i -> zero)
+def main : Nat := one
