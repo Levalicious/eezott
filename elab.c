@@ -19,7 +19,10 @@
  */
 #include "tt.h"
 
-typedef struct { const char **names; Val **tys; int n, cap; Env *env; } Ctx;
+typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; } Ctx;
+/* abs: the global being elaborated declares Level binders, so its constant levels are absolute (U is U 0);
+   otherwise constants are relative to the hidden level L (U n is U {L + n}) */
+#define BASE_LEVEL(c) ((c)->abs ? lv_const(0) : lv_hidden())
 
 static void ctx_push(Ctx *c, const char *name, Val *ty, Val *val) {
     if (c->n == c->cap) {
@@ -667,9 +670,9 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
             Term *lt = check(c, s->a, vlevel()); LVal L = eval_level(c->env, lt);
             Term *u = mk_u(0); u->a = lt; *ty = vu_l(lv_add(L, 1)); return u;
         }
-        *ty = vu_l(lv_add(lv_hidden(), s->lvl + 1)); return mk_u_l(lv_add(lv_hidden(), s->lvl));   /* U n is U {L + n}: L the hidden level */
+        *ty = vu_l(lv_add(BASE_LEVEL(c), s->lvl + 1)); return mk_u_l(lv_add(BASE_LEVEL(c), s->lvl));   /* U n is U {L + n}, or U n when level-explicit */
     case S_LEVEL: *ty = vupre(0); return mk_term(T_LEVEL, NULL, NULL, NULL, NULL);   /* a pretype: no Kan structure, not inductive */
-    case S_LZERO: *ty = vlevel(); return mk_lval(lv_hidden());   /* constants are relative to the hidden level */
+    case S_LZERO: *ty = vlevel(); return mk_lval(BASE_LEVEL(c));   /* constants are relative to the hidden level unless level-explicit */
     case S_LSUC: { Term *a = check(c, s->a, vlevel()); Term *r = mk_term(T_LSUC, a, NULL, NULL, NULL); r->n = 1; *ty = vlevel(); return r; }
     case S_LMAX: { Term *a = check(c, s->a, vlevel()), *b = check(c, s->b, vlevel()); *ty = vlevel(); return mk_term(T_LMAX, a, b, NULL, NULL); }
     case S_I: die("line %d: I is the type of interval variables; it is not itself a term of a universe", s->line);
@@ -741,7 +744,7 @@ static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
     int zi, si;
     if (ty->k == V_LEVEL) {   /* a numeral is also a constant level */
         if (s->num > 1000000) die("line %d: the level %llu is too large", s->line, s->num);
-        return mk_lval(lv_add(lv_hidden(), (int)s->num));
+        return mk_lval(lv_add(BASE_LEVEL(c), (int)s->num));
     }
     if (ty->k != V_DATA || ty->args.n != 0 || !peano_shape(ty->n, &zi, &si))
         die("line %d: the numeral %llu needs a type shaped like the naturals (a nullary constructor and one with a single recursive argument), not %s", s->line, s->num, show(c, ty));
@@ -845,6 +848,12 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
 
 /* ---- declarations ---- */
 
+/* does the declared type (binder sugar folded into a Pi chain) bind a Level? */
+static int declares_level(STerm *t) {
+    for (; t && t->k == S_PI; t = t->a) if (t->binders[0].ty && t->binders[0].ty->k == S_LEVEL) return 1;
+    return 0;
+}
+
 /* does the term mention the hidden level, other than as the level of an occurrence of data type d itself? */
 static int mentions_hidden_but_self(Term *t, int d) {
     if (!t) return 0;
@@ -926,11 +935,13 @@ static int mentions_essentially(Term *t, int idx) {
 static void elab_data(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
+    for (int i = 0; i < s->nparams; i++) if (s->params[i].ty->k == S_LEVEL) c.abs = 1;   /* level-explicit: absolute constants */
     int m0 = lstore_nmetas(); LMark mark = lstore_mark();
     Data D = {0}; D.name = s->name; D.line = s->line; D.nparams = s->nparams;
     D.ptys = xalloc((s->nparams + 1) * sizeof(Term *));
     for (int i = 0; i < s->nparams; i++) {
-        LVal l; D.ptys[i] = check_type(&c, s->params[i].ty, &l);
+        LVal l; int p; D.ptys[i] = check_type_sort(&c, s->params[i].ty, &l, &p);   /* a parameter may be a Level */
+        if (p && D.ptys[i]->k != T_LEVEL) die("line %d: parameter %s of data %s: a type in a universe (or Level) is needed, but the term is a pretype", s->line, s->params[i].name, s->name);
         ctx_bind(&c, s->params[i].name, eval(c.env, D.ptys[i]));
     }
     LVal l; Term *ity = check_type(&c, s->ty, &l);
@@ -939,7 +950,11 @@ static void elab_data(SDecl *s) {
     D.nidx = m; D.itys = xalloc((m + 1) * sizeof(Term *));
     for (int j = 0; j < m; j++) { D.itys[j] = w->a; w = w->b; }
     if (w->k != T_U) die("line %d: the type of data %s must end in a universe", s->line, s->name);
-    D.lvl = w->a ? eval_level(c.env, w->a) : lv_const(w->n);
+    {   /* the universe sits under the index binders: read its level there, and it may not depend on an index */
+        Env *ie = c.env; for (int j = 0; j < m; j++) ie = env_push(ie, vvar(c.n + j));
+        D.lvl = w->a ? eval_level(ie, w->a) : lv_const(w->n);
+        for (int i = 0; i < D.lvl.n; i++) if (!D.lvl.t[i].meta && D.lvl.t[i].var >= c.n) die("line %d: the universe level of data %s may not depend on an index", s->line, s->name);
+    }
     Term *full = ity;
     for (int i = s->nparams - 1; i >= 0; i--) full = mk_pi(s->params[i].name, D.ptys[i], full, 0);
     { Term *x = ity; for (int j = 0; j < m; j++) { x->irr = 1; x = x->b; } }
@@ -1067,6 +1082,7 @@ static void elab_data(SDecl *s) {
 static void elab_def(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
+    c.abs = declares_level(s->ty);   /* level-explicit: absolute constants */
     int m0 = lstore_nmetas(); LMark mark = lstore_mark();
     LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);

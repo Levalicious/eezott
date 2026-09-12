@@ -102,6 +102,7 @@ check literal.tt       nat 42
 check literal_fold.tt  nat 200
 check level_id.tt      nat 3
 check level_fam.tt     nat 3
+check level_list.tt    nat 2
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

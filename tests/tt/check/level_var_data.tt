@@ -1,4 +1,4 @@
--- data types with level parameters come with levels, stage L3: refused until then
+-- a data type with a level parameter (level-explicit: its constants are absolute)
 data D (l : Level) (A : U {l}) : U {l} where
   | c : A -> D l A
 def main : Nat := one
