@@ -100,6 +100,7 @@ check torus_nat.tt     nat 4
 check torus_s1.tt      bool false
 check literal.tt       nat 42
 check literal_fold.tt  nat 200
+check level_id.tt      nat 3
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

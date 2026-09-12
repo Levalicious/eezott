@@ -29,7 +29,8 @@ typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK
                TK_TILDE, TK_AND, TK_OR,
                TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U, TK_I, TK_I0, TK_I1,
                TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS,
-               TK_COMMA, TK_SIGMA, TK_FST, TK_SND, TK_GLUE, TK_GLUEEL, TK_UNGLUE } TokKind;
+               TK_COMMA, TK_SIGMA, TK_FST, TK_SND, TK_GLUE, TK_GLUEEL, TK_UNGLUE,
+               TK_LBRACE, TK_RBRACE, TK_LEVEL, TK_LZERO, TK_LSUC, TK_LMAX } TokKind;
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
@@ -55,6 +56,8 @@ static void lex(const char *src) {
         if (*p == '(') { addtok(TK_LP, p, 1, line); p++; continue; }
         if (*p == ')') { addtok(TK_RP, p, 1, line); p++; continue; }
         if (*p == '[') { addtok(TK_LB, p, 1, line); p++; continue; }
+        if (*p == '{') { addtok(TK_LBRACE, p, 1, line); p++; continue; }
+        if (*p == '}') { addtok(TK_RBRACE, p, 1, line); p++; continue; }
         if (*p == ']') { addtok(TK_RB, p, 1, line); p++; continue; }
         if (*p == '\\') { addtok(TK_LAM, p, 1, line); p++; continue; }
         if (*p == '|') { addtok(TK_BAR, p, 1, line); p++; continue; }
@@ -67,6 +70,7 @@ static void lex(const char *src) {
             #define KW(str, kind) if (n == (int)strlen(str) && !strncmp(s, str, n)) { addtok(kind, s, n, line); continue; }
             KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM)
             KW("U", TK_U) KW("I", TK_I) KW("i0", TK_I0) KW("i1", TK_I1)
+            KW("Level", TK_LEVEL) KW("lzero", TK_LZERO) KW("lsuc", TK_LSUC) KW("lmax", TK_LMAX)
             KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS) KW("Sigma", TK_SIGMA) KW("fst", TK_FST) KW("snd", TK_SND) KW("Glue", TK_GLUE) KW("glue", TK_GLUEEL) KW("unglue", TK_UNGLUE)
             #undef KW
             addtok(TK_NAME, s, n, line); continue;
@@ -83,7 +87,8 @@ static const char *tokname(TokKind k) {
     static const char *n[] = { "end of file", "name", "number", "'('", "')'", "'['", "']'", "':'", "':='", "'->'", "'\\'", "'|'",
                                "'~'", "'/\\'", "'\\/'",
                                "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'", "'I'", "'i0'", "'i1'",
-                               "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'", "','", "'Sigma'", "'fst'", "'snd'", "'Glue'", "'glue'", "'unglue'" };
+                               "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'", "','", "'Sigma'", "'fst'", "'snd'", "'Glue'", "'glue'", "'unglue'",
+                               "'{'", "'}'", "'Level'", "'lzero'", "'lsuc'", "'lmax'" };
     return n[k];
 }
 static Tok *expect(TokKind k) {
@@ -150,7 +155,14 @@ static STerm *parse_atom(void) {
         if (errno == ERANGE) die("%s:%d: the numeral %s is too large", file, t->line, tokstr(t));
         return r; }
     case TK_U: { next(); STerm *r = st(S_U, t->line); r->lvl = 0;
-                 if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); } return r; }
+                 if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); }
+                 else if (peek()->k == TK_LBRACE) { next(); r->a = parse_term(); expect(TK_RBRACE); }   /* U {l}: a level expression */
+                 return r; }
+    case TK_LBRACE: { next(); STerm *r = parse_term(); expect(TK_RBRACE); return r; }   /* {e}: a level argument, grouped */
+    case TK_LEVEL: next(); return st(S_LEVEL, t->line);
+    case TK_LZERO: next(); return st(S_LZERO, t->line);
+    case TK_LSUC: { next(); STerm *r = st(S_LSUC, t->line); r->a = parse_atom(); return r; }
+    case TK_LMAX: { next(); STerm *r = st(S_LMAX, t->line); r->a = parse_atom(); r->b = parse_atom(); return r; }
     case TK_I: next(); return st(S_I, t->line);
     case TK_I0: next(); return st(S_I0, t->line);
     case TK_I1: next(); return st(S_I1, t->line);
@@ -181,7 +193,8 @@ static STerm *parse_atom(void) {
 }
 static int atom_ahead(void) {
     TokKind k = peek()->k;
-    return k == TK_NAME || k == TK_NUM || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_I || k == TK_I0 || k == TK_I1 ||
+    return k == TK_NAME || k == TK_NUM || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_LBRACE || k == TK_I || k == TK_I0 || k == TK_I1 ||
+           k == TK_LEVEL || k == TK_LZERO || k == TK_LSUC || k == TK_LMAX ||
            k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS ||
            k == TK_SIGMA || k == TK_FST || k == TK_SND || k == TK_GLUE || k == TK_GLUEEL || k == TK_UNGLUE;
 }

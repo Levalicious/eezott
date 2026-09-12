@@ -18,6 +18,11 @@
  * with a single recursive argument) and elaborates to a term of size
  * O(log n) that doubles the successor along its bits; closed values of such a
  * type print as decimals.
+ * M7 (L1): universe levels are values. A level is an element of the free
+ * max-plus algebra on the context's level variables (lzero, lsuc, lmax);
+ * U {l} and Pre {l} carry one; Level itself is a pretype, so a function
+ * type over it is a pretype (Agda's Setomega). Level binders and level
+ * arguments have no run-time meaning and are erased.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,
@@ -45,7 +50,7 @@ void die(const char *fmt, ...);
 
 /* ---------------- surface syntax ---------------- */
 
-typedef enum { S_VAR, S_U, S_NUM, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
+typedef enum { S_VAR, S_U, S_NUM, S_LEVEL, S_LZERO, S_LSUC, S_LMAX, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
                S_I, S_I0, S_I1, S_IAND, S_IOR, S_INEG,
                S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
                S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE } SKind;
@@ -55,10 +60,11 @@ typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
     const char *name;                 /* S_VAR name; S_ELIM data name; S_LET bound name */
-    int lvl;                          /* S_U */
+    int lvl;                          /* S_U: a constant level (when a is NULL) */
     unsigned long long num;           /* S_NUM: a numeral, checked against a type shaped like the naturals */
     SBinder *binders; int nbinders;   /* S_PI, S_LAM (one binder each after desugaring) */
-    STerm *a, *b, *c, *d;             /* S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body;
+    STerm *a, *b, *c, *d;             /* S_U: a=level expression; S_LSUC: a; S_LMAX: a b;
+                                         S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body;
                                          S_IAND/S_IOR: a b; S_INEG: a; S_PATHP: a=line b=x c=y; S_PARTIAL: a=phi b=A;
                                          S_TRANSP: a=line b=phi c=u0; S_HCOMP: a=A b=phi c=u d=u0; S_PAIR: a b */
     SBranch *br; int nbr;             /* S_SYS */
@@ -80,7 +86,8 @@ SDecl *parse_program(const char *src, const char *fname);
 typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_ELIM,
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
                T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
-               T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE } TKind;
+               T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE,
+               T_LEVEL, T_LZERO, T_LSUC, T_LMAX } TKind;
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -89,9 +96,11 @@ struct Term {
     int isi;            /* T_PI/T_LAM: the binder is an interval variable */
     int pre;            /* T_U: the sort Pre l of pretypes; T_PI: the domain is a pretype */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
-    int n;              /* T_VAR index; T_U level; T_DEF/T_DATA/T_CON/T_ELIM global id */
+    int n;              /* T_VAR index; T_U constant level (a NULL); T_LZERO the constant; T_LSUC how many; T_GLUE constant level (d NULL);
+                           T_DEF/T_DATA/T_CON/T_ELIM global id */
     int lv;             /* T_DEF/T_DATA/T_CON/T_ELIM: universe shift of the global (every U n lifted to U n+lv) */
-    Term *a, *b, *c, *d;/* T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
+    Term *a, *b, *c, *d;/* T_U: a=level term (NULL: constant n); T_LSUC: a + n; T_LMAX: a b; T_GLUE: d=level term (NULL: constant n);
+                           T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
                            T_IAND/T_IOR: a b; T_INEG: a; T_PATHP: a=line b=x c=y; T_PAPP: a=path b=r c=x d=y;
                            T_PARTIAL: a=phi b=A; T_TRANSP: a=line b=phi c=u0; T_HCOMP: a=A b=phi c=u d=u0;
                            T_SUB: a=A b=phi c=u; T_INS: a=x; T_OUTS: a=A b=phi c=u d=s;
@@ -132,9 +141,22 @@ int iv_faces(IVal phi, Face **out);           /* the faces on which phi = 1 (one
 Face face_join(const Face *a, const Face *b);  /* returns n = -1 if inconsistent */
 int iv_mentions(IVal a, int level);
 
+/* ---------------- universe levels ---------------- */
+
+/* An element of the free max-plus algebra on the context's level variables,
+ * max(c, l_1 + n_1, ..., l_k + n_k), in normal form: variables by de Bruijn
+ * level, each at most once, sorted; the constant only when no summand
+ * dominates it. */
+typedef struct { int var, off; } LAtom;
+typedef struct { int c; LAtom *t; int n; } LVal;
+LVal lv_const(int n); LVal lv_var(int level); LVal lv_add(LVal a, int k); LVal lv_max(LVal a, LVal b);
+int lv_eq(LVal a, LVal b); int lv_leq(LVal a, LVal b); int lv_is_const(LVal a, int *n);
+LVal lv_subst(LVal a, int var, LVal s);
+
 /* ---------------- values ---------------- */
 
-typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS, V_SIGMA, V_PAIR, V_GLUE, V_GLUEEL } VKind;
+typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS, V_SIGMA, V_PAIR, V_GLUE, V_GLUEEL,
+               V_LEVEL, V_L } VKind;
 typedef struct Val Val;
 typedef struct Env { Val *v; struct Env *next; } Env;
 typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y; proj: 1 fst, 2 snd */
@@ -146,6 +168,7 @@ typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
     int pre;            /* V_U: the sort Pre l of pretypes */
+    LVal lvl;           /* V_U: the level; V_L: the level value; V_GLUE: the universe level */
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
     int lv;             /* V_DATA/V_CON/H_ELIM: universe shift; V_GLUE: the universe level */
     HKind h;
@@ -165,6 +188,9 @@ VList vl_copy(const VList *l);
 Env *env_push(Env *e, Val *v);
 Val *env_get(Env *e, int idx);
 Val *vvar(int level); Val *vu(int l); Val *vupre(int l); Val *vi(IVal iv); Val *vivar(int level);
+Val *vu_l(LVal l); Val *vupre_l(LVal l); Val *vl(LVal l); Val *vlvar(int level); Val *vlevel(void);
+LVal eval_level(Env *env, Term *t);          /* a level term to its value */
+Term *quote_level(int depth, LVal l);        /* and back: lmax of lsuc^n applied to variables and a constant */
 Val *mkval(VKind k);
 Val *eval(Env *env, Term *t);
 Val *vapp(Val *f, Val *a, int irr);

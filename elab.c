@@ -32,7 +32,7 @@ static void ctx_push(Ctx *c, const char *name, Val *ty, Val *val) {
     c->env = env_push(c->env, val);
 }
 static void ctx_pop(Ctx *c) { c->n--; c->env = c->env->next; }
-static void ctx_bind(Ctx *c, const char *name, Val *ty) { ctx_push(c, name, ty, vvar(c->n)); }
+static void ctx_bind(Ctx *c, const char *name, Val *ty) { ctx_push(c, name, ty, ty->k == V_LEVEL ? vlvar(c->n) : vvar(c->n)); }
 static void ctx_bind_i(Ctx *c, const char *name) { ctx_push(c, name, mkval(V_INTERVAL), vivar(c->n)); }
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
@@ -76,7 +76,7 @@ static void expect_conv(Ctx *c, int line, Val *got, Val *want, const char *what)
 
 int is_type_like(int depth, Val *ty) {
     switch (ty->k) {
-    case V_U: return 1;
+    case V_U: case V_LEVEL: return 1;
     case V_PI: return is_type_like(depth + 1, inst(&ty->clo, ty->isi ? vivar(depth) : vvar(depth)));
     case V_PATHP: return is_type_like(depth + 1, vapp(ty->a, vivar(depth), 0));
     case V_PARTIAL: return is_type_like(depth, ty->b);
@@ -91,19 +91,19 @@ static Term *infer(Ctx *c, STerm *s, Val **ty);
 static Term *check(Ctx *c, STerm *s, Val *ty);
 
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
-static Term *check_type_sort(Ctx *c, STerm *s, int *lvl, int *pre) {
+static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) {
     Val *ty; Term *t = infer(c, s, &ty);
     if (ty->k != V_U) die("line %d: expected a type, but %s : %s", s->line, "the term", show(c, ty));
-    *lvl = ty->n; *pre = ty->pre; return t;
+    *lvl = ty->lvl; *pre = ty->pre; return t;
 }
 /* a term must be a type in a universe (with Kan structure): pretypes are refused */
-static Term *check_type(Ctx *c, STerm *s, int *lvl) {
+static Term *check_type(Ctx *c, STerm *s, LVal *lvl) {
     int pre; Term *t = check_type_sort(c, s, lvl, &pre);
-    if (pre) die("line %d: a type in a universe is needed here, but the term is a pretype (Partial, Sub, or a function from I) and has no Kan structure", s->line);
+    if (pre) die("line %d: a type in a universe is needed here, but the term is a pretype (Partial, Sub, Level, or a function from I) and has no Kan structure", s->line);
     return t;
 }
 /* a line of types  (i : I) -> U l : either a lambda over an interval variable, or a term whose type is such a function */
-static Term *check_line(Ctx *c, STerm *s, int *lvl) {
+static Term *check_line(Ctx *c, STerm *s, LVal *lvl) {
     if (s->k == S_LAM) {
         ctx_bind_i(c, s->binders[0].name);
         Term *body = check_type(c, s->a, lvl);
@@ -115,7 +115,7 @@ static Term *check_line(Ctx *c, STerm *s, int *lvl) {
     Val *cod = inst(&ty->clo, vivar(c->n));
     if (cod->k != V_U) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
     if (cod->pre) die("line %d: expected a line of types (i : I) -> U, but the line yields pretypes: %s", s->line, show(c, ty));
-    *lvl = cod->n; return t;
+    *lvl = cod->lvl; return t;
 }
 static Val *vinterval(void) { return mkval(V_INTERVAL); }
 static Term *check_interval(Ctx *c, STerm *s) { return check(c, s, vinterval()); }
@@ -149,7 +149,7 @@ static Term *inst_tele(Term *t, int n, Term **vs, int k) {
         if (t->n < k) return t;
         if (t->n - k < n) return shift(vs[t->n - k], 0, k);
         return mk_var(t->n - n);
-    case T_U: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_PI:  r = mk_pi(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), t->irr); r->isi = t->isi; r->pre = t->pre; return r;
     case T_LAM: r = mk_lam(t->name, inst_tele(t->a, n, vs, k + 1), t->irr); r->isi = t->isi; return r;
     case T_SIGMA: r = mk_term(T_SIGMA, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), NULL, NULL); r->name = t->name; return r;
@@ -161,7 +161,7 @@ static Term *inst_tele(Term *t, int n, Term **vs, int k) {
     }
     default:
         r = mk_term(t->k, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k), inst_tele(t->d, n, vs, k));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; r->pre = t->pre; return r;
     }
 }
 static Term *E_con_spine(Term *t, EInfo *I, int depth) {
@@ -224,7 +224,7 @@ static Term *E(Term *t, EInfo *I, int depth) {
     }
     case T_APP: { Term *m = E_con_spine(t, I, depth); if (m) return m; return mk_app(E(t->a, I, depth), E(t->b, I, depth), t->irr); }
     case T_CON: { Term *m = E_con_spine(t, I, depth); if (m) return m; return t; }
-    case T_U: case T_DEF: case T_DATA: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: return t;
+    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: return t;
     case T_PI: r = mk_pi(t->name, E(t->a, I, depth), E(t->b, I, depth + 1), t->irr); r->isi = t->isi; return r;
     case T_LAM: r = mk_lam(t->name, E(t->a, I, depth + 1), t->irr); r->isi = t->isi; return r;
     case T_LET: return mk_let(t->name, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth + 1), t->irr);
@@ -236,7 +236,7 @@ static Term *E(Term *t, EInfo *I, int depth) {
     }
     default:
         r = mk_term(t->k, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth), E(t->d, I, depth));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; r->pre = t->pre; return r;
     }
 }
 /* the boundary of C at an endpoint of its single interval: the body of the branch whose face holds there (under [params, args]) */
@@ -356,8 +356,10 @@ static Val *global_type(Term *head, int lv) {
 static int universe_excess(Ctx *c, STerm *arg, Val *dom) {
     if (dom->k != V_U) return 0;
     if (arg->k == S_LAM || arg->k == S_PAIR || arg->k == S_SYS || arg->k == S_LET) return 0;
+    int dn, an;
+    if (!lv_is_const(dom->lvl, &dn)) return 0;
     Val *aty; infer(c, arg, &aty);
-    return aty->k == V_U && !aty->pre && aty->n > dom->n ? aty->n - dom->n : 0;
+    return aty->k == V_U && !aty->pre && lv_is_const(aty->lvl, &an) && an > dn ? an - dn : 0;
 }
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
     Term *head0 = head; Val *hty0 = hty;
@@ -444,7 +446,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             }
             #undef TARGET_TYPE
             if (cur->k != V_U || cur->pre) die("line %d: motive for %s must land in a universe, not %s", ms->line, D->name, show(c, cur));
-            lvl = cur->n;
+            if (!lv_is_const(cur->lvl, &lvl)) die("line %d: the motive for %s lands in a universe at a level with variables; not supported until levels, stage L3", ms->line, D->name);
             Val *fib = eval(c->env, rt);
             for (int j = nb; j <= m; j++) fib = vapp(fib, vvar(c->n + (j - nb)), 0);
             (void)fib; res_irr = 0;
@@ -454,7 +456,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         return app_spine(c, args, n, mk_ref_lv(T_ELIM, d, dl), eval(NULL, ety), ty);
     }
     case S_PATHP: {
-        int lvl; Term *line, *x, *y;
+        LVal lvl; Term *line, *x, *y;
         if (h->lvl == 0) {   /* PathP line x y */
             need_args(h, n, 3, "PathP");
             line = check_line(c, args[0], &lvl);
@@ -466,17 +468,17 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         Val *lv = eval(c->env, line);
         x = check(c, args[1], vapp(lv, vi(iv_zero()), 0));
         y = check(c, args[2], vapp(lv, vi(iv_one()), 0));
-        return app_spine(c, args + 3, n - 3, mk_term(T_PATHP, line, x, y, NULL), vu(lvl), ty);
+        return app_spine(c, args + 3, n - 3, mk_term(T_PATHP, line, x, y, NULL), vu_l(lvl), ty);
     }
     case S_PARTIAL: {
         need_args(h, n, 2, "Partial");
         Term *phi = check_interval(c, args[0]);
-        int lvl; Term *A = check_type(c, args[1], &lvl);
-        return app_spine(c, args + 2, n - 2, mk_term(T_PARTIAL, phi, A, NULL, NULL), vupre(lvl), ty);
+        LVal lvl; Term *A = check_type(c, args[1], &lvl);
+        return app_spine(c, args + 2, n - 2, mk_term(T_PARTIAL, phi, A, NULL, NULL), vupre_l(lvl), ty);
     }
     case S_TRANSP: {
         need_args(h, n, 3, "transp");
-        int lvl; Term *line = check_line(c, args[0], &lvl);
+        LVal lvl; Term *line = check_line(c, args[0], &lvl);
         Val *lv = eval(c->env, line);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         Term *u0 = check(c, args[2], vapp(lv, vi(iv_zero()), 0));
@@ -492,7 +494,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_HCOMP: {
         need_args(h, n, 4, "hcomp");
-        int lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         /* u : (i : I) -> Partial phi A */
         Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
@@ -515,7 +517,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
            Elaborated to its definition in terms of hcomp and transp (Cohen-Huber-Mortberg):
              hcomp (A i1) phi (\i -> [ phi -> transp (\j -> A (i \/ j)) i (u i) ]) (transp A i0 u0)   */
         need_args(h, n, 4, "comp");
-        int lvl; Term *line = check_line(c, args[0], &lvl); Val *lv = eval(c->env, line);
+        LVal lvl; Term *line = check_line(c, args[0], &lvl); Val *lv = eval(c->env, line);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
         uty->clo.env = c->env; uty->clo.t = mk_term(T_PARTIAL, shift(phi, 0, 1), mk_app(shift(line, 0, 1), mk_var(0), 0), NULL, NULL);
@@ -543,15 +545,15 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_SUB: {   /* Sub A phi u : U,  u : Partial phi A */
         need_args(h, n, 3, "Sub");
-        int lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = Av;
         Term *u = check(c, args[2], pty);
-        return app_spine(c, args + 3, n - 3, mk_term(T_SUB, A, phi, u, NULL), vupre(lvl), ty);
+        return app_spine(c, args + 3, n - 3, mk_term(T_SUB, A, phi, u, NULL), vupre_l(lvl), ty);
     }
     case S_SIGMA: {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
         need_args(h, n, 2, "Sigma");
-        int la, lb; Term *A = check_type(c, args[0], &la); Val *Av = eval(c->env, A);
+        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = eval(c->env, A);
         Term *B;
         if (args[1]->k == S_LAM) {
             ctx_bind(c, args[1]->binders[0].name, Av);
@@ -559,16 +561,16 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             ctx_pop(c);
             B = body;
             Term *t = mk_term(T_SIGMA, A, B, NULL, NULL); t->name = args[1]->binders[0].name;
-            return app_spine(c, args + 2, n - 2, t, vu(la > lb ? la : lb), ty);
+            return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
         }
         Val *bty; Term *bt = infer(c, args[1], &bty);
         if (bty->k != V_PI) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
         expect_conv(c, args[1]->line, bty->dom, Av, "family domain");
         Val *cod = inst(&bty->clo, vvar(c->n));
         if (cod->k != V_U || cod->pre) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
-        lb = cod->n;
+        lb = cod->lvl;
         Term *t = mk_term(T_SIGMA, A, mk_app(shift(bt, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x";
-        return app_spine(c, args + 2, n - 2, t, vu(la > lb ? la : lb), ty);
+        return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
     }
     case S_FST: case S_SND: {
         need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
@@ -580,16 +582,18 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
         need_args(h, n, 3, "Glue");
-        int lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
-        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu(lvl);
+        int lvn; if (!lv_is_const(lvl, &lvn)) die("line %d: Glue at a level with variables needs the level-polymorphic Equiv (levels, stage L2)", h->line);
+        lvl = lv_const(lvn);
+        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu(lvn);
         sig->clo.env = env_push(c->env, Av);   /* under [.., A]: Equiv^lvl T A with T the bound variable */
-        sig->clo.t = mk_app(mk_app(mk_ref_lv(T_DEF, eq, lvl), mk_var(0), 0), mk_var(1), 0);
+        sig->clo.t = mk_app(mk_app(mk_ref_lv(T_DEF, eq, lvn), mk_var(0), 0), mk_var(1), 0);
         Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = sig;
         Term *Te = check(c, args[2], pty);
-        Term *g = mk_term(T_GLUE, A, phi, Te, NULL); g->n = lvl;   /* the level, for the rules' equivProof */
-        return app_spine(c, args + 3, n - 3, g, vu(lvl), ty);
+        Term *g = mk_term(T_GLUE, A, phi, Te, NULL); g->n = lvn;   /* the level, for the rules' equivProof */
+        return app_spine(c, args + 3, n - 3, g, vu(lvn), ty);
     }
     case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
     case S_UNGLUE: {
@@ -675,7 +679,16 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         if ((id = find_data(s->name)) >= 0) { *ty = eval(NULL, datas[id].ty); return mk_ref(T_DATA, id); }
         die("line %d: unbound name '%s'", s->line, s->name);
     }
-    case S_U: *ty = vu(s->lvl + 1); return mk_u(s->lvl);
+    case S_U:
+        if (s->a) {   /* U {l}: a universe at a level expression */
+            Term *lt = check(c, s->a, vlevel()); LVal L = eval_level(c->env, lt);
+            Term *u = mk_u(0); u->a = lt; *ty = vu_l(lv_add(L, 1)); return u;
+        }
+        *ty = vu(s->lvl + 1); return mk_u(s->lvl);
+    case S_LEVEL: *ty = vupre(0); return mk_term(T_LEVEL, NULL, NULL, NULL, NULL);   /* a pretype: no Kan structure, not inductive */
+    case S_LZERO: *ty = vlevel(); return mk_term(T_LZERO, NULL, NULL, NULL, NULL);
+    case S_LSUC: { Term *a = check(c, s->a, vlevel()); Term *r = mk_term(T_LSUC, a, NULL, NULL, NULL); r->n = 1; *ty = vlevel(); return r; }
+    case S_LMAX: { Term *a = check(c, s->a, vlevel()), *b = check(c, s->b, vlevel()); *ty = vlevel(); return mk_term(T_LMAX, a, b, NULL, NULL); }
     case S_I: die("line %d: I is the type of interval variables; it is not itself a term of a universe", s->line);
     case S_I0: *ty = vinterval(); return mk_term(T_I0, NULL, NULL, NULL, NULL);
     case S_I1: *ty = vinterval(); return mk_term(T_I1, NULL, NULL, NULL, NULL);
@@ -690,18 +703,19 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         SBinder *b = &s->binders[0];
         if (b->ty->k == S_I) {   /* a function from the interval is a pretype: it has no Kan structure */
             ctx_bind_i(c, b->name);
-            int lb, pb; Term *cod = check_type_sort(c, s->a, &lb, &pb);
+            LVal lb; int pb; Term *cod = check_type_sort(c, s->a, &lb, &pb);
             ctx_pop(c);
-            *ty = vupre(lb);
+            *ty = vupre_l(lb);
             Term *t = mk_pi(b->name, mk_term(T_INTERVAL, NULL, NULL, NULL, NULL), cod, 0); return t;
         }
-        int la, lb, pa, pb; Term *dom = check_type_sort(c, b->ty, &la, &pa);
-        Val *dv = eval(c->env, dom); int irr = 0;   /* types are run-time codes: every binder is relevant */
+        LVal la, lb; int pa, pb; Term *dom = check_type_sort(c, b->ty, &la, &pa);
+        Val *dv = eval(c->env, dom);
+        int irr = dom->k == T_LEVEL;   /* types are run-time codes, so every binder is relevant; levels are not */
         ctx_bind(c, b->name, dv);
         Term *cod = check_type_sort(c, s->a, &lb, &pb);
         ctx_pop(c);
-        int l = la > lb ? la : lb;
-        *ty = (pa || pb) ? vupre(l) : vu(l);   /* a function type from or into a pretype is a pretype */
+        LVal l = lv_max(la, lb);
+        *ty = (pa || pb) ? vupre_l(l) : vu_l(l);   /* a function type from or into a pretype is a pretype */
         Term *t = mk_pi(b->name, dom, cod, irr); t->pre = pa; return t;
     }
     case S_LAM: die("line %d: cannot infer the type of a lambda; add an annotation", s->line);
@@ -709,7 +723,7 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     case S_PAIR: die("line %d: cannot infer the type of a pair; it must be checked against a Sigma type", s->line);
     case S_APP: case S_ELIM: case S_PATHP: case S_PARTIAL: case S_TRANSP: case S_HCOMP: case S_COMP: case S_SUB: case S_INS: case S_OUTS: case S_SIGMA: case S_FST: case S_SND: case S_GLUE: case S_GLUEEL: case S_UNGLUE: return infer_app(c, s, ty);
     case S_LET: {
-        int l, p; Term *tyt = check_type_sort(c, s->a, &l, &p);   /* a let may bind a line or a partial element */
+        LVal l; int p; Term *tyt = check_type_sort(c, s->a, &l, &p);   /* a let may bind a line or a partial element */
         Val *tv = eval(c->env, tyt);
         Term *v = check(c, s->b, tv);
         int irr = 0;
@@ -742,6 +756,10 @@ int peano_shape(int d, int *zero, int *suc) {
    one let per bit of n, applied along the bits that are set */
 static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
     int zi, si;
+    if (ty->k == V_LEVEL) {   /* a numeral is also a constant level */
+        if (s->num > 1000000) die("line %d: the level %llu is too large", s->line, s->num);
+        Term *z = mk_term(T_LZERO, NULL, NULL, NULL, NULL); z->n = (int)s->num; return z;
+    }
     if (ty->k != V_DATA || ty->args.n != 0 || !peano_shape(ty->n, &zi, &si))
         die("line %d: the numeral %llu needs a type shaped like the naturals (a nullary constructor and one with a single recursive argument), not %s", s->line, s->num, show(c, ty));
     Term *zero = mk_ref_lv(T_CON, zi, ty->lv), *suc = mk_ref_lv(T_CON, si, ty->lv), *D = mk_ref_lv(T_DATA, ty->n, ty->lv);
@@ -786,7 +804,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         return mk_lam(b->name, body, ty->irr);
     }
     if (s->k == S_LET) {
-        int l, p; Term *tyt = check_type_sort(c, s->a, &l, &p);
+        LVal l; int p; Term *tyt = check_type_sort(c, s->a, &l, &p);
         Val *tv = eval(c->env, tyt);
         Term *v = check(c, s->b, tv);
         int irr = 0;
@@ -831,7 +849,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
     }
     if (s->k == S_SYS) return check_system(c, s, ty);
     Val *got; Term *t = infer(c, s, &got);
-    if (got->k == V_U && ty->k == V_U && got->n <= ty->n && got->pre <= ty->pre) return t;   /* cumulativity; a universe type is also a pretype */
+    if (got->k == V_U && ty->k == V_U && lv_leq(got->lvl, ty->lvl) && got->pre <= ty->pre) return t;   /* cumulativity; a universe type is also a pretype */
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
     if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
     return t;
@@ -882,7 +900,7 @@ static int mentions_essentially(Term *t, int idx) {
         }
         return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx);
     }
-    case T_U: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
+    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
     case T_PI: case T_SIGMA: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx + 1);
     case T_LAM: return mentions_essentially(t->a, idx + 1);
     case T_LET: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx + 1);
@@ -896,15 +914,16 @@ static void elab_data(SDecl *s) {
     Data D = {0}; D.name = s->name; D.line = s->line; D.nparams = s->nparams;
     D.ptys = xalloc((s->nparams + 1) * sizeof(Term *));
     for (int i = 0; i < s->nparams; i++) {
-        int l; D.ptys[i] = check_type(&c, s->params[i].ty, &l);
+        LVal l; D.ptys[i] = check_type(&c, s->params[i].ty, &l);
         ctx_bind(&c, s->params[i].name, eval(c.env, D.ptys[i]));
     }
-    int l; Term *ity = check_type(&c, s->ty, &l);
+    LVal l; Term *ity = check_type(&c, s->ty, &l);
     Term *w = ity; int m = 0;
     for (Term *x = ity; x->k == T_PI; x = x->b) m++;
     D.nidx = m; D.itys = xalloc((m + 1) * sizeof(Term *));
     for (int j = 0; j < m; j++) { D.itys[j] = w->a; w = w->b; }
     if (w->k != T_U) die("line %d: the type of data %s must end in a universe", s->line, s->name);
+    if (w->a) die("line %d: data %s lands in a universe at a level with variables; level parameters of data types come with levels, stage L3", s->line, s->name);
     D.lvl = w->n;
     Term *full = ity;
     for (int i = s->nparams - 1; i >= 0; i--) full = mk_pi(s->params[i].name, D.ptys[i], full, 0);
@@ -916,7 +935,8 @@ static void elab_data(SDecl *s) {
     for (int ci = 0; ci < s->ncons; ci++) {
         SCon *sc = &s->cons[ci];
         check_fresh(sc->name, sc->line);
-        int lc, pc; Term *cty = check_type_sort(&c, sc->ty, &lc, &pc);   /* a pretype only through its interval binders */
+        LVal lcv; int lc, pc; Term *cty = check_type_sort(&c, sc->ty, &lcv, &pc);   /* a pretype only through its interval binders */
+        if (!lv_is_const(lcv, &lc)) die("line %d: constructor %s : its type lives at a level with variables; not supported until levels, stage L3", sc->line, sc->name);
         if (lc > D.lvl) die("line %d: constructor %s : %s lives in U %d, above data %s : U %d", sc->line, sc->name, "its type", lc, s->name, D.lvl);
         Con C = {0}; C.name = sc->name; C.data = d; C.ci = ci; C.line = sc->line;
         int r = 0; for (Term *x = cty; x->k == T_PI && x->a->k != T_INTERVAL; x = x->b) r++;
@@ -1011,7 +1031,7 @@ static void elab_data(SDecl *s) {
 static void elab_def(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
-    int l, p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
+    LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);
     Term *val = check(&c, s->val, vty);
     Def D = {0}; D.name = s->name; D.ty = ty; D.val = val; D.vty = vty; D.vval = eval(NULL, val); D.irr = is_type_like(0, vty); D.line = s->line;

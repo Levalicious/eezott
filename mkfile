@@ -8,6 +8,7 @@ OFILES=\
 	eval.$O\
 	elab.$O\
 	erase.$O\
+	level.$O\
 
 HFILES=\
 	tt.h\

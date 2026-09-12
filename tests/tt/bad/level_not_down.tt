@@ -1,0 +1,3 @@
+-- U {l} : U {lsuc l}, and lsuc l is not below l
+def bad (l : Level) (A : U {l}) : U {l} := U {l}
+def main : Nat := one

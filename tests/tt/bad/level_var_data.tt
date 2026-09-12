@@ -1,0 +1,4 @@
+-- data types with level parameters come with levels, stage L3: refused until then
+data D (l : Level) (A : U {l}) : U {l} where
+  | c : A -> D l A
+def main : Nat := one
