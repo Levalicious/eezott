@@ -1,0 +1,2 @@
+def fe : Path (Nat -> Nat) (\x -> x) (\x -> x) := funExt Nat Nat (\x -> x) (\x -> x) (\x -> prefl Nat x)
+def main : Nat := fe i1 three

@@ -1,0 +1,5 @@
+-- hcomp on an indexed family is a normal form; the eliminator computes through it
+def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec Nat (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
+def v : Vec Nat one := cons Nat zero one (nil Nat)
+def h (i : I) : Path Nat (vsum one (hcomp (Vec Nat one) (i \/ ~ i) (\j -> [ i -> v | ~ i -> v ]) v)) (vsum one v) := \_ -> vsum one v
+def main : Nat := h i0 i0

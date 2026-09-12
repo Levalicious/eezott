@@ -1,0 +1,1 @@
+def main : Nat := (sym Nat one one (prefl Nat one)) i1

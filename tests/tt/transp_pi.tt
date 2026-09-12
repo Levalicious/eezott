@@ -1,0 +1,1 @@
+def main : Nat := (transp (\i -> Nat -> Nat) i0 suc) one

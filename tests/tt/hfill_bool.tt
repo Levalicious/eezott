@@ -1,0 +1,3 @@
+-- hfill at i1 is the composite; with the constant system it is the base
+def sq : (i : I) -> Bool := hfill Bool i0 (\j -> []) (inS false)
+def main : Bool := not (sq i1)

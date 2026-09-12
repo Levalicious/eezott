@@ -1,0 +1,4 @@
+def length : (A : U) -> List A -> Nat := \A l -> elim List A (\_ -> Nat) zero (\x xs ih -> suc ih) l
+def l1 : List Nat := lcons Nat one (lnil Nat)
+def f (i : I) : List Nat := hcomp (List Nat) (i \/ ~ i) (\j -> [ i -> l1 | ~ i -> l1 ]) l1
+def main : Nat := length Nat (f i1)
