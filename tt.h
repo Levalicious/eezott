@@ -33,7 +33,8 @@ void die(const char *fmt, ...);
 
 typedef enum { S_VAR, S_U, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
                S_I, S_I0, S_I1, S_IAND, S_IOR, S_INEG,
-               S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS } SKind;
+               S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
+               S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE } SKind;
 typedef struct STerm STerm;
 typedef struct { const char *name; STerm *ty; int line; } SBinder;   /* ty NULL for lambda binders */
 typedef struct { STerm *face, *body; } SBranch;
@@ -44,7 +45,7 @@ struct STerm {
     SBinder *binders; int nbinders;   /* S_PI, S_LAM (one binder each after desugaring) */
     STerm *a, *b, *c, *d;             /* S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body;
                                          S_IAND/S_IOR: a b; S_INEG: a; S_PATHP: a=line b=x c=y; S_PARTIAL: a=phi b=A;
-                                         S_TRANSP: a=line b=phi c=u0; S_HCOMP: a=A b=phi c=u d=u0 */
+                                         S_TRANSP: a=line b=phi c=u0; S_HCOMP: a=A b=phi c=u d=u0; S_PAIR: a b */
     SBranch *br; int nbr;             /* S_SYS */
 };
 typedef struct { const char *name; STerm *ty; int line; } SCon;
@@ -63,7 +64,8 @@ SDecl *parse_program(const char *src, const char *fname);
 
 typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_ELIM,
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
-               T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS } TKind;
+               T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
+               T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE } TKind;
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -75,7 +77,9 @@ struct Term {
     Term *a, *b, *c, *d;/* T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
                            T_IAND/T_IOR: a b; T_INEG: a; T_PATHP: a=line b=x c=y; T_PAPP: a=path b=r c=x d=y;
                            T_PARTIAL: a=phi b=A; T_TRANSP: a=line b=phi c=u0; T_HCOMP: a=A b=phi c=u d=u0;
-                           T_SUB: a=A b=phi c=u; T_INS: a=x; T_OUTS: a=A b=phi c=u d=s */
+                           T_SUB: a=A b=phi c=u; T_INS: a=x; T_OUTS: a=A b=phi c=u d=s;
+                           T_SIGMA: a=dom b=cod (under the binder); T_PAIR: a b; T_FST/T_SND: a;
+                           T_GLUE: a=A b=phi c=Te; T_GLUEEL: a=ts b=a c=the Glue type; T_UNGLUE: a=b b=A c=phi d=Te */
     TBranch *br; int nbr; /* T_SYS */
 };
 Term *mk_var(int i); Term *mk_u(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
@@ -103,31 +107,34 @@ int iv_is_one(IVal a); int iv_is_zero(IVal a); int iv_eq(IVal a, IVal b);
 /* a face: a partial assignment of interval variables to endpoints */
 typedef struct { int *var; int *val; int n; } Face;
 IVal iv_restrict(IVal a, const Face *f);
+IVal iv_subst(IVal a, int var, IVal s);      /* substitute s for the variable */
+IVal iv_forall(IVal a, int var);             /* the largest face below a not mentioning var */
 int iv_faces(IVal phi, Face **out);           /* the faces on which phi = 1 (one per consistent conjunct) */
 Face face_join(const Face *a, const Face *b);  /* returns n = -1 if inconsistent */
 int iv_mentions(IVal a, int level);
 
 /* ---------------- values ---------------- */
 
-typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS } VKind;
+typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS, V_SIGMA, V_PAIR, V_GLUE, V_GLUEEL } VKind;
 typedef struct Val Val;
 typedef struct Env { Val *v; struct Env *next; } Env;
-typedef struct { Val *v; int irr; int papp; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y */
+typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y; proj: 1 fst, 2 snd */
 typedef struct { Arg *a; int n, cap; } VList;
 typedef struct Clo Clo;
 struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
-typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS } HKind;
+typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE } HKind;
 typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
     HKind h;
-    Clo clo;            /* V_LAM body; V_PI codomain */
-    Val *dom;           /* V_PI domain */
+    Clo clo;            /* V_LAM body; V_PI / V_SIGMA codomain */
+    Val *dom;           /* V_PI / V_SIGMA domain */
     VList args;         /* V_NEU spine; V_DATA/V_CON arguments (params first) */
     IVal iv;            /* V_I */
     Val *a, *b, *c;     /* V_PATHP: a=line b=x c=y; V_PARTIAL: a=phi b=A; V_NEU/H_TRANSP: a=line b=phi c=u0 (then spine); V_NEU/H_HCOMP: a=A b=phi c=u, dom=u0;
-                           V_SUB: a=A b=phi c=u; V_INS: a=x; V_NEU/H_OUTS: a=A b=phi c=u dom=s */
+                           V_SUB: a=A b=phi c=u; V_INS: a=x; V_NEU/H_OUTS: a=A b=phi c=u dom=s; V_PAIR: a b;
+                           V_GLUE: a=A b=phi c=Te; V_GLUEEL: a=ts b=a c=the Glue type; V_NEU/H_UNGLUE: a=A b=phi c=Te dom=b */
     VBranch *br; int nbr; /* V_SYS */
 };
 
@@ -141,11 +148,14 @@ Val *mkval(VKind k);
 Val *eval(Env *env, Term *t);
 Val *vapp(Val *f, Val *a, int irr);
 Val *vpapp(Val *p, Val *r, Val *x, Val *y);
+Val *vproj(Val *p, int which);
 Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data);
 Term *quote(int depth, Val *v);
 int conv(int depth, Val *a, Val *b);
 Val *inst(Clo *c, Val *v);          /* instantiate a closure */
 Val *restrict_val(Val *v, const Face *f);
+Val *subst_val(Val *v, int level, IVal s);   /* substitute an interval value for an interval variable */
+Val *vglue(Val *A, Val *phi, Val *Te); Val *vglueel(Val *ts, Val *a, Val *G); Val *vunglue(Val *A, Val *phi, Val *Te, Val *b);
 Val *vtransp(Val *line, Val *phi, Val *u0);
 Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0);
 Val *vsys_at(Val *sys, const Face *f);   /* the branch of a system that is total on f (NULL if none) */

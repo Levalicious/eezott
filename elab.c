@@ -81,6 +81,8 @@ int is_type_like(int depth, Val *ty) {
     case V_PATHP: return is_type_like(depth + 1, vapp(ty->a, vivar(depth), 0));
     case V_PARTIAL: return is_type_like(depth, ty->b);
     case V_SUB: return is_type_like(depth, ty->a);
+    case V_SIGMA: return is_type_like(depth, ty->dom) && is_type_like(depth + 1, inst(&ty->clo, vvar(depth)));
+    case V_GLUE: return 0;
     default: return 0;
     }
 }
@@ -356,6 +358,56 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         Term *u = check(c, args[2], pty);
         return app_spine(c, args + 3, n - 3, mk_term(T_SUB, A, phi, u, NULL), vu(lvl), ty);
     }
+    case S_SIGMA: {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
+        need_args(h, n, 2, "Sigma");
+        int la, lb; Term *A = check_type(c, args[0], &la); Val *Av = eval(c->env, A);
+        Term *B;
+        if (args[1]->k == S_LAM) {
+            ctx_bind(c, args[1]->binders[0].name, Av);
+            Term *body = check_type(c, args[1]->a, &lb);
+            ctx_pop(c);
+            B = body;
+            Term *t = mk_term(T_SIGMA, A, B, NULL, NULL); t->name = args[1]->binders[0].name;
+            return app_spine(c, args + 2, n - 2, t, vu(la > lb ? la : lb), ty);
+        }
+        Val *bty; Term *bt = infer(c, args[1], &bty);
+        if (bty->k != V_PI) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
+        expect_conv(c, args[1]->line, bty->dom, Av, "family domain");
+        Val *cod = inst(&bty->clo, vvar(c->n));
+        if (cod->k != V_U) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
+        lb = cod->n;
+        Term *t = mk_term(T_SIGMA, A, mk_app(shift(bt, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x";
+        return app_spine(c, args + 2, n - 2, t, vu(la > lb ? la : lb), ty);
+    }
+    case S_FST: case S_SND: {
+        need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
+        Val *pty; Term *p = infer(c, args[0], &pty);
+        if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", args[0]->line, show(c, pty));
+        Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
+        Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
+        return app_spine(c, args + 1, n - 1, t, rty, ty);
+    }
+    case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
+        need_args(h, n, 3, "Glue");
+        int lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        if (lvl != 0) die("line %d: Glue is available at U 0 only for now (Equiv lives there)", h->line);
+        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
+        int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
+        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu(0);
+        sig->clo.env = env_push(c->env, Av);   /* under [.., A]: Equiv T A with T the bound variable */
+        sig->clo.t = mk_app(mk_app(mk_ref(T_DEF, eq), mk_var(0), 0), mk_var(1), 0);
+        Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = sig;
+        Term *Te = check(c, args[2], pty);
+        return app_spine(c, args + 3, n - 3, mk_term(T_GLUE, A, phi, Te, NULL), vu(0), ty);
+    }
+    case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
+    case S_UNGLUE: {
+        need_args(h, n, 1, "unglue");
+        Val *bty; Term *b = infer(c, args[0], &bty);
+        if (bty->k != V_GLUE) die("line %d: unglue applied to a term of type %s, expected a Glue type", args[0]->line, show(c, bty));
+        Term *t = mk_term(T_UNGLUE, b, quote(c->n, bty->a), quote(c->n, bty->b), quote(c->n, bty->c));
+        return app_spine(c, args + 1, n - 1, t, bty->a, ty);
+    }
     case S_INS: die("line %d: inS must be checked against a Sub type", h->line);
     case S_OUTS: {  /* outS s : A  for s : Sub A phi u */
         need_args(h, n, 1, "outS");
@@ -373,9 +425,19 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
 
 /* ---- systems ---- */
 
+typedef Val *(*TypeAt)(const Face *f, void *data);
+static Val *partial_type_at(const Face *f, void *data) { return restrict_val((Val *)data, f); }
+static Val *glue_type_at(const Face *f, void *data) {   /* the glued type T on a face: fst of the (T, e) there */
+    Val *Te = vsys_at((Val *)data, f);
+    if (!Te) die("internal: glue: no glued type on this face");
+    return vproj(Te, 1);
+}
+static Term *check_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data);
 static Term *check_system(Ctx *c, STerm *s, Val *ty) {
     if (ty->k != V_PARTIAL) die("line %d: a system must be checked against a Partial type, not %s", s->line, show(c, ty));
-    Val *phi = ty->a, *A = ty->b;
+    return check_system_at(c, s, ty->a, partial_type_at, ty->b);
+}
+static Term *check_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data) {
     Term *t = mk_term(T_SYS, NULL, NULL, NULL, NULL); t->nbr = s->nbr; t->br = xalloc((s->nbr + 1) * sizeof(TBranch));
     Val **psi = xalloc((s->nbr + 1) * sizeof(Val *)), **bv = xalloc((s->nbr + 1) * sizeof(Val *));
     IVal cover = iv_zero();
@@ -391,7 +453,7 @@ static Term *check_system(Ctx *c, STerm *s, Val *ty) {
         Term *body = NULL;
         for (int i = 0; i < nf; i++) {
             Ctx rc = ctx_restrict(c, &fs[i]);
-            Term *b = check(&rc, s->br[k].body, restrict_val(A, &fs[i]));
+            Term *b = check(&rc, s->br[k].body, tyat(&fs[i], data));
             if (!body) body = b;
         }
         t->br[k].body = body; bv[k] = eval(c->env, body);
@@ -447,7 +509,8 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     }
     case S_LAM: die("line %d: cannot infer the type of a lambda; add an annotation", s->line);
     case S_SYS: die("line %d: cannot infer the type of a system; it must be checked against a Partial type", s->line);
-    case S_APP: case S_ELIM: case S_PATHP: case S_PARTIAL: case S_TRANSP: case S_HCOMP: case S_COMP: case S_SUB: case S_INS: case S_OUTS: return infer_app(c, s, ty);
+    case S_PAIR: die("line %d: cannot infer the type of a pair; it must be checked against a Sigma type", s->line);
+    case S_APP: case S_ELIM: case S_PATHP: case S_PARTIAL: case S_TRANSP: case S_HCOMP: case S_COMP: case S_SUB: case S_INS: case S_OUTS: case S_SIGMA: case S_FST: case S_SND: case S_GLUE: case S_GLUEEL: case S_UNGLUE: return infer_app(c, s, ty);
     case S_LET: {
         int l; Term *tyt = check_type(c, s->a, &l);
         Val *tv = eval(c->env, tyt);
@@ -509,6 +572,29 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
                 die("line %d: inS: the element does not agree with the subtype's sides on a face of %s", s->line, show(c, ty->b));
         }
         return mk_term(T_INS, x, NULL, NULL, NULL);
+    }
+    if (s->k == S_APP && s->a->k == S_APP && s->a->a->k == S_GLUEEL) {   /* glue ts a : Glue A phi Te */
+        if (ty->k != V_GLUE) die("line %d: glue checked against %s, expected a Glue type", s->line, show(c, ty));
+        STerm *tss = s->a->b, *as = s->b;
+        if (tss->k != S_SYS) die("line %d: the first argument of glue must be a system", tss->line);
+        Term *tst = check_system_at(c, tss, ty->b, glue_type_at, ty->c);
+        Val *tsv = eval(c->env, tst);
+        Term *a = check(c, as, ty->a); Val *av = eval(c->env, a);
+        Face *fs; int nf = faces_of(ty->b, &fs);
+        for (int i = 0; i < nf; i++) {
+            Val *Te = vsys_at(ty->c, &fs[i]), *t = vsys_at(tsv, &fs[i]);
+            if (!Te || !t) die("line %d: glue: the sides do not cover their face", s->line);
+            Val *ea = vapp(vproj(vproj(Te, 2), 1), t, 0);
+            if (!conv(c->n, restrict_val(av, &fs[i]), ea))
+                die("line %d: glue: the base does not agree with the equivalence applied to the sides on a face of %s", s->line, show(c, ty->b));
+        }
+        return mk_term(T_GLUEEL, tst, a, quote(c->n, ty), NULL);
+    }
+    if (s->k == S_PAIR) {
+        if (ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", s->line, show(c, ty));
+        Term *a = check(c, s->a, ty->dom);
+        Term *b = check(c, s->b, inst(&ty->clo, eval(c->env, a)));
+        return mk_term(T_PAIR, a, b, NULL, NULL);
     }
     if (s->k == S_SYS) return check_system(c, s, ty);
     Val *got; Term *t = infer(c, s, &got);

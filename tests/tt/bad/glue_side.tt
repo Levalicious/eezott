@@ -1,0 +1,1 @@
+def f (i : I) : Glue Nat (~ i) [ ~ i -> (Nat , idEquiv Nat) ] := glue [ ~ i -> one ] two

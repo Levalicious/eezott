@@ -1,0 +1,5 @@
+-- building an element of a Glue type directly and ungluing it (under a generic interval variable)
+def G (i : I) : U := Glue Nat (~ i) [ ~ i -> (Nat , idEquiv Nat) ]
+def g (i : I) : G i := glue [ ~ i -> two ] two
+def h (i : I) : Nat := unglue (g i)
+def main : Nat := add (h i0) (h i1)
