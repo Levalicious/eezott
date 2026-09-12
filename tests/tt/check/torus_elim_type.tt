@@ -1,0 +1,11 @@
+-- the torus's induction principle, stated: the square's method is a cube whose sides are the loop methods
+-- applied to the intervals; conversion compares this with the synthesized eliminator type
+data T2 : U where
+  | pt : T2
+  | l1 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | l2 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | sq : (i j : I) -> T2 [ ~ i -> l2 j | i -> l2 j | ~ j -> l1 i | j -> l1 i ]
+def elimT2 (P : T2 -> U) (p : P pt) (m1 : PathP (\i -> P (l1 i)) p p) (m2 : PathP (\i -> P (l2 i)) p p)
+  (m3 : (i j : I) -> Sub (P (sq i j)) (~ i \/ i \/ ~ j \/ j) [ ~ i -> m2 j | i -> m2 j | ~ j -> m1 i | j -> m1 i ])
+  (t : T2) : P t := elim T2 P p m1 m2 m3 t
+def main : Nat := one

@@ -1,0 +1,15 @@
+-- the torus mapped onto the circle: l1 to the loop, l2 to the constant path, the square to the loop's square;
+-- transport in the cover along the image of l1 flips the fibre
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+data T2 : U where
+  | pt : T2
+  | l1 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | l2 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | sq : (i j : I) -> T2 [ ~ i -> l2 j | i -> l2 j | ~ j -> l1 i | j -> l1 i ]
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def Cover : S1 -> U := \x -> elim S1 (\_ -> U) Bool (ua Bool Bool notEquiv) x
+def f : T2 -> S1 := \t -> elim T2 (\_ -> S1) base (\i -> loop i) (\i -> base) (\i j -> inS (loop i)) t
+def main : Bool := transport Bool Bool (\i -> Cover (f (l1 i))) true

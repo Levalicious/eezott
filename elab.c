@@ -138,15 +138,40 @@ static Term *data_applied(int d, int pbase, int ibase) {
    Context: [params, P, mth(ci), a(r), ih(htot), iv(n)] (+ depth under binders). */
 typedef struct { Con *C; int n, r, htot, ci, np, dl; int *record; } EInfo;
 static Term *E(Term *t, EInfo *I, int depth);
+static Term *boundary_at(Con *C, int end);
+
+/* instantiate a term under a telescope of n binders (vs[0] the innermost) with terms of the outer context */
+static Term *inst_tele(Term *t, int n, Term **vs, int k) {
+    if (!t) return NULL;
+    Term *r;
+    switch (t->k) {
+    case T_VAR:
+        if (t->n < k) return t;
+        if (t->n - k < n) return shift(vs[t->n - k], 0, k);
+        return mk_var(t->n - n);
+    case T_U: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_PI:  r = mk_pi(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), t->irr); r->isi = t->isi; r->pre = t->pre; return r;
+    case T_LAM: r = mk_lam(t->name, inst_tele(t->a, n, vs, k + 1), t->irr); r->isi = t->isi; return r;
+    case T_SIGMA: r = mk_term(T_SIGMA, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), NULL, NULL); r->name = t->name; return r;
+    case T_LET: return mk_let(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k + 1), t->irr);
+    case T_SYS: {
+        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = inst_tele(t->br[i].face, n, vs, k); r->br[i].body = inst_tele(t->br[i].body, n, vs, k); }
+        return r;
+    }
+    default:
+        r = mk_term(t->k, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k), inst_tele(t->d, n, vs, k));
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; return r;
+    }
+}
 static Term *E_con_spine(Term *t, EInfo *I, int depth) {
-    /* t = c' p.. a'.. (a constructor of the same data type applied): returns the method applied, or NULL */
+    /* t = c' p.. a'.. is.. (a constructor of the same data type applied): returns the method applied, or NULL */
     int nargs = 0; Term *w = t;
     while (w->k == T_APP) { nargs++; w = w->a; }
     if (w->k != T_CON || cons[w->n].data != I->C->data) return NULL;
     Con *Cp = &cons[w->n]; int np = I->np;
     if (Cp->ci >= I->ci) die("the boundary of %s uses the later constructor %s; boundaries may only use earlier constructors", I->C->name, Cp->name);
-    if (Cp->nint > 0) die("the boundary of %s applies the path constructor %s; not supported yet", I->C->name, Cp->name);
-    if (nargs != np + Cp->nargs) die("internal: constructor %s applied to %d arguments in a boundary", Cp->name, nargs);
+    if (nargs != np + Cp->nargs + Cp->nint) die("internal: constructor %s applied to %d arguments in a boundary", Cp->name, nargs);
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
     for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
     Term *m = mk_var(depth + I->n + I->htot + I->r + (I->ci - 1 - Cp->ci));
@@ -156,7 +181,30 @@ static Term *E_con_spine(Term *t, EInfo *I, int depth) {
         if (ih == args[np + j] || term_eq(ih, args[np + j])) die("the boundary of %s: no induction hypothesis for the argument of %s", I->C->name, Cp->name);
         m = mk_app(m, ih, 0);
     }
-    return m;
+    if (Cp->nint == 0) return m;
+    /* a path constructor: its own boundary, instantiated along the spine ([params, args]: vs[0] is the last argument) */
+    int tn = np + Cp->nargs; Term **vs = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
+    for (int j = 0; j < Cp->nargs; j++) vs[j] = args[np + Cp->nargs - 1 - j];
+    for (int i = 0; i < np; i++) vs[Cp->nargs + i] = args[np - 1 - i];
+    if (Cp->pathmethod) {   /* the method is a path: apply it, with the images of the boundary as endpoints */
+        Term *x = E(inst_tele(boundary_at(Cp, 0), tn, vs, 0), I, depth);
+        Term *y = E(inst_tele(boundary_at(Cp, 1), tn, vs, 0), I, depth);
+        return mk_term(T_PAPP, m, args[np + Cp->nargs], x, y);
+    }
+    /* the method is a cube  (is : I) -> Sub (P idx (c p a is)) phi [faces -> E(boundary)]: apply it and take the element out */
+    for (int q = 0; q < Cp->nint; q++) m = mk_app(m, args[np + Cp->nargs + q], 0);
+    if (!Cp->boundary) return m;
+    Term **vs2 = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
+    for (int q = 0; q < Cp->nint; q++) vs2[q] = args[np + Cp->nargs + Cp->nint - 1 - q];
+    for (int i = 0; i < tn; i++) vs2[Cp->nint + i] = vs[i];
+    Term *sys = E(inst_tele(Cp->boundary, tn + Cp->nint, vs2, 0), I, depth);
+    Term *phi = NULL;
+    for (int i = 0; i < sys->nbr; i++) phi = phi ? mk_term(T_IOR, phi, sys->br[i].face, NULL, NULL) : sys->br[i].face;
+    Term *A = mk_var(depth + I->n + I->htot + I->r + I->ci);   /* P idx (c p a is) */
+    Data *D = &datas[Cp->data];
+    for (int j = 0; j < D->nidx; j++) A = mk_app(A, inst_tele(Cp->ridx[j], tn, vs, 0), 1);
+    A = mk_app(A, t, 0);
+    return mk_term(T_OUTS, A, phi ? phi : mk_term(T_I0, NULL, NULL, NULL, NULL), sys, m);
 }
 static Term *E(Term *t, EInfo *I, int depth) {
     if (!t) return NULL;
@@ -912,6 +960,9 @@ static void elab_data(SDecl *s) {
         DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die("out of memory");
         DD->cons[DD->ncons++] = cid;
     }
+    /* every higher inductive type must have an induction principle: build it now, so that a boundary the
+       eliminator cannot image is refused at the declaration rather than at the first elimination */
+    if (D.hit) (void)elim_type(d, D.lvl, 0, 0);
     /* polymorphic if any parameter, index or constructor type mentions a universe */
     Data *DD = &datas[d]; DD->poly = 0; DD->hit = D.hit;
     for (int i = 0; i < DD->nparams; i++) if (term_poly(DD->ptys[i])) DD->poly = 1;

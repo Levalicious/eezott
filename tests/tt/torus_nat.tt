@@ -1,0 +1,8 @@
+-- the torus: a 2-cell whose boundary applies the two loops; its eliminator computes at run time
+data T2 : U where
+  | pt : T2
+  | l1 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | l2 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | sq : (i j : I) -> T2 [ ~ i -> l2 j | i -> l2 j | ~ j -> l1 i | j -> l1 i ]
+def g (t : T2) : Nat := elim T2 (\_ -> Nat) two (\i -> two) (\i -> two) (\i j -> inS two) t
+def main : Nat := add (g pt) (g (sq i1 i0))
