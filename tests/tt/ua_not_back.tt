@@ -1,0 +1,4 @@
+-- and backwards, along the reversed path
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def main : Bool := transp (\i -> ua Bool Bool notEquiv (~ i)) i0 false

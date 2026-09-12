@@ -456,14 +456,17 @@ static Term *check_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data
             Term *b = check(&rc, s->br[k].body, tyat(&fs[i], data));
             if (!body) body = b;
         }
-        t->br[k].body = body; bv[k] = eval(c->env, body);
+        t->br[k].body = body;
     }
-    /* overlapping branches must agree */
+    (void)bv;
+    /* overlapping branches must agree: both evaluated under the restriction to the common face */
     for (int k = 0; k < s->nbr; k++) for (int l = k + 1; l < s->nbr; l++) {
         Face *fs; int nf = faces_of(vi(iv_and(psi[k]->iv, psi[l]->iv)), &fs);
-        for (int i = 0; i < nf; i++)
-            if (!conv(c->n, restrict_val(bv[k], &fs[i]), restrict_val(bv[l], &fs[i])))
+        for (int i = 0; i < nf; i++) {
+            Ctx rc = ctx_restrict(c, &fs[i]);
+            if (!conv(c->n, eval(rc.env, t->br[k].body), eval(rc.env, t->br[l].body)))
                 die("line %d: system branches %d and %d disagree where their faces overlap", s->line, k + 1, l + 1);
+        }
     }
     return t;
 }

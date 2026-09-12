@@ -384,6 +384,8 @@ static Val *glue_hc_body(int k, const Face *f, void *data);
 static Val *gcomp_body(int k, const Face *f, void *data);
 static Val *transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv);
 static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0);
+static Val *hcompU_body(int k, const Face *f, void *data);
+static Val *builtin_val(const char *name);
 static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
 Val *inst(Clo *c, Val *v) {
@@ -567,6 +569,8 @@ Val *vproj(Val *p, int which) {
 static Val *apply_arg(Val *f, Arg *a) { return a->proj ? vproj(f, a->proj) : a->papp ? vpapp(f, a->v, a->x, a->y) : vapp(f, a->v, a->irr); }
 
 /* ---- evaluation ---- */
+static Env *subst_env(Env *e, int lv, IVal s);
+static IVal face_iv(const Face *f);
 Val *eval(Env *env, Term *t) {
     switch (t->k) {
     case T_VAR: return env_get(env, t->n);
@@ -588,10 +592,19 @@ Val *eval(Env *env, Term *t) {
     case T_PATHP: { Val *v = mkval(V_PATHP); v->a = eval(env, t->a); v->b = eval(env, t->b); v->c = eval(env, t->c); return v; }
     case T_PAPP: return vpapp(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
     case T_PARTIAL: { Val *v = mkval(V_PARTIAL); v->a = eval(env, t->a); v->b = eval(env, t->b); return v; }
-    case T_SYS: {
-        VBranch *br = xalloc((t->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < t->nbr; i++) { br[i].phi = eval(env, t->br[i].face); br[i].v = eval(env, t->br[i].body); }
-        return vsys(br, t->nbr);
+    case T_SYS: {   /* each branch is evaluated under the restriction to its face (per conjunct): a branch is only meaningful there */
+        int cap = 4, n = 0; VBranch *br = xalloc(cap * sizeof(VBranch));
+        for (int i = 0; i < t->nbr; i++) {
+            Val *phi = eval(env, t->br[i].face);
+            Face *fs; int nf = iv_faces(phi->iv, &fs);
+            for (int j = 0; j < nf; j++) {
+                if (n == cap) { cap *= 2; VBranch *b2 = xalloc(cap * sizeof(VBranch)); memcpy(b2, br, n * sizeof(VBranch)); br = b2; }
+                Env *env_f = env;
+                for (int k = 0; k < fs[j].n; k++) env_f = subst_env(env_f, fs[j].var[k], fs[j].val[k] ? iv_one() : iv_zero());
+                br[n].phi = vi(face_iv(&fs[j])); br[n].v = eval(env_f, t->br[i].body); n++;
+            }
+        }
+        return vsys(br, n);
     }
     case T_TRANSP: return vtransp(eval(env, t->a), eval(env, t->b), eval(env, t->c));
     case T_HCOMP: return vhcomp(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
@@ -932,7 +945,10 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
         return res;
     }
     case V_GLUE: return hcomp_glue(A, phi, u, u0);
-    case V_U: return neu_hcomp(A, phi, u, u0);      /* a normal form: formal composition in the universe */
+    case V_U: {   /* hcomp in the universe is the Glue type of the lid, glued along transport back down the sides (CCHM 6) */
+        Val *Te = vsys_faces(1, &phi, hcompU_body, u);
+        return vglue(u0, phi, Te);
+    }
     case V_DATA: {
         Data *D = &datas[A->n];
         if (D->nidx > 0) return neu_hcomp(A, phi, u, u0);
@@ -1093,6 +1109,13 @@ static Val *glue_hc_body(int k, const Face *f, void *data) {
     Val *t = vsys_at(vapp(R(d->tfs), i, 0), NULL); if (!t) die("internal: Glue hcomp: filler not total on its face");
     return vapp(equiv_fun(Te), t, 0);
 }
+static Val *hcompU_body(int k, const Face *f, void *data) {
+    (void)k; Val *u = restrict_val((Val *)data, f);
+    Val *p = mkval(V_PAIR);
+    p->a = vapp(u, ione(), 0);                                        /* the type at the lid */
+    p->b = vapp(builtin_val("transpEquiv"), vnative(N_LINE_IOR, 1, 0, 0, 2, u, izero()), 0);   /* λi. u (i0 ∨ ~i) = u (~i): from the lid back to the base */
+    return p;
+}
 static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0) {
     Val *Ab = A->a, *phi = A->b, *Te = A->c;
     Val *tfs = vnative(N_GLUE_HF, 0, 0, 0, 4, Te, psi, u, u0);
@@ -1172,7 +1195,7 @@ int val_mentions_ivar(int depth, Val *v, int level) { return term_mentions_var(q
 static int conv_spine(int depth, VList *a, VList *b) {
     if (a->n != b->n) return 0;
     for (int i = 0; i < a->n; i++) {
-        if (a->a[i].papp != b->a[i].papp || a->a[i].proj != b->a[i].proj) return 0;
+        if (a->a[i].proj != b->a[i].proj) return 0;   /* path and plain application to an interval coincide */
         if (a->a[i].proj) continue;
         if (!conv(depth, a->a[i].v, b->a[i].v)) return 0;
     }
@@ -1195,8 +1218,9 @@ int conv(int depth, Val *a, Val *b) {
     if (a->k == V_LAM || b->k == V_LAM) {          /* eta */
         int isi = (a->k == V_LAM ? a->isi : b->isi);
         Val *x = isi ? vivar(depth) : vvar(depth);
-        Val *fa = a->k == V_LAM ? inst(&a->clo, x) : (isi ? vpapp(a, x, NULL, NULL) : vapp(a, x, 0));
-        Val *fb = b->k == V_LAM ? inst(&b->clo, x) : (isi ? vpapp(b, x, NULL, NULL) : vapp(b, x, 0));
+        /* a neutral applied to an interval is the same application whether it was formed as a path or as a function of I */
+        Val *fa = a->k == V_LAM ? inst(&a->clo, x) : vapp(a, x, 0);
+        Val *fb = b->k == V_LAM ? inst(&b->clo, x) : vapp(b, x, 0);
         return conv(depth + 1, fa, fb);
     }
     if (a->k == V_PAIR || b->k == V_PAIR) return conv(depth, vproj(a, 1), vproj(b, 1)) && conv(depth, vproj(a, 2), vproj(b, 2));   /* eta */

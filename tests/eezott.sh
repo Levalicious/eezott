@@ -82,6 +82,10 @@ check hcomp_sigma.tt   nat 3
 check ua_id.tt         nat 2
 check ua_unglue.tt     nat 2
 check glue_elem.tt     nat 4
+check ua_not.tt        bool false
+check ua_not_back.tt   bool true
+check hcomp_u_transport.tt nat 1
+check ua_not_comp.tt   bool false
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
@@ -89,6 +93,7 @@ for f in "$TT"/bad/*.tt; do
 done
 
 for f in "$TT"/unerasable/*.tt; do
+    [ -e "$f" ] || continue
     name=unerasable/$(basename "$f")
     if ! cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
     elif cat "$TT/prelude.tt" "$f" | "$EEZOTT" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"

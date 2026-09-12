@@ -60,7 +60,7 @@ static void erase(Term *t, int depth) {
         for (int i = 0; i < t->nbr; i++) fputc(')', out);
         break;
     case T_HCOMP:
-        if (t->n) die("hcomp in the universe reaches run time; it has no run-time meaning before Glue (M3)");
+        if (t->n) { fputs("tt_hcompU(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break; }
         fputs("tt_hcomp(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break;
     case T_TRANSP:
         if (!keep_kan && (t->n || t->b->k == T_I1)) { erase(t->c, depth); break; }     /* a constant line: the identity */
@@ -179,7 +179,9 @@ static void mark(Term *t) {
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
     case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
     case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
-    case T_HCOMP: mark(t->b); mark(t->c); mark(t->d); break;
+    case T_HCOMP: mark(t->b); mark(t->c); mark(t->d);
+        if (t->n) for (int i = 0; i < ndefs; i++) if ((!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
+        break;
     case T_GLUE: mark(t->a); mark(t->b); mark(t->c);
         for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof") && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
         break;
@@ -196,7 +198,11 @@ static void emit_glue_runtime(void) {
     fputs("tt_gphi := c -> c(m -> a -> phi -> te -> phi)\n", out);
     fputs("tt_gte := c -> c(m -> a -> phi -> te -> te)\n", out);
     fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(tt_ior(phi)(tt_ineg(phi)))(i -> phi(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
-    /* transport along a line of Glue types, as in the checker: at run time every interval value is an endpoint */
+    /* transport along a line of Glue types, as in the checker. At run time every interval value is an endpoint, so the
+       face "forall i. phi" cannot be read off phi's values (i \/ ~ i and i1 are the same boolean function): it is taken
+       to be i0, i.e. the glued types at the two ends are never assumed to form a line. That is the checker's generic
+       route (transport in the base, then the equivalence's contraction at i1); it agrees with every other route on
+       closed data, and is the only one that is always meaningful. */
     fputs("tt_transp_glue := a -> phi -> te -> line -> psi -> u0 -> "
           "(fa -> (ungl -> (tf -> (a1 -> (phi1 -> (te1 -> "
           "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_ior(phi1)(psi))(j -> phi1(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
@@ -206,7 +212,7 @@ static void emit_glue_runtime(void) {
           "(tt_gcomp(i -> tt_gA(line(i)))(tt_ior(psi)(fa))(i -> psi(ungl(i))(fa(tt_fst(tt_snd(tt_gte(line(i))))(tf(i)))(tt_absurd)))(ungl(tt_i0))))"
           "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
-          "(tt_iand(tt_gphi(line(tt_i0)))(tt_gphi(line(tt_i1))))\n", out);
+          "(tt_i0)\n", out);
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(a)(phi)(te)\n", out);
 }
 
@@ -264,6 +270,8 @@ void erase_program(FILE *f) {
             if (!def_used[d - defs]) continue;
             fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
             if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
+            if (!strcmp(d->name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
+                fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(phi(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
         }
     }
     fclose(out);

@@ -51,3 +51,24 @@ def equivProof (T A : U) (w : Equiv T A) (a : A) (psi : I) (f : Partial psi (fib
 def idIsEquiv (A : U) : isEquiv A A (\x -> x) := \y -> ((y , \i -> y) , \q -> \i -> (snd q (~ i) , \j -> snd q (~ i \/ j)))
 def idEquiv (A : U) : Equiv A A := (\x -> x , idIsEquiv A)
 def ua (A B : U) (e : Equiv A B) : Path U A B := \i -> Glue B (~ i \/ i) [ ~ i -> (A , e) | i -> (B , idEquiv B) ]
+-- transport along a line of types is an equivalence (Cubical.Foundations.Equiv.Base, isEquivTransp with phi = i0)
+def transpIsEquiv (L : I -> U) : isEquiv (L i0) (L i1) (\x -> transp L i0 x) :=
+  transp (\k -> isEquiv (L i0) (L k) (\x -> transp (\j -> L (j /\ k)) (~ k) x)) i0 (idIsEquiv (L i0))
+def transpEquiv (L : I -> U) : Equiv (L i0) (L i1) := (\x -> transp L i0 x , transpIsEquiv L)
+
+-- any isomorphism is an equivalence (Cubical.Foundations.Isomorphism, lemIso)
+def lemIso (A B : U) (f : A -> B) (g : B -> A) (s : (b : B) -> Path B (f (g b)) b) (t : (a : A) -> Path A (g (f a)) a)
+           (y : B) (x0 x1 : A) (p0 : Path B (f x0) y) (p1 : Path B (f x1) y) : Path (fiber A B f y) (x0 , p0) (x1 , p1) :=
+  let fill0 : (i : I) -> (k : I) -> A := \i -> hfill A (i \/ ~ i) (\k -> [ i -> t x0 k | ~ i -> g y ]) (inS (g (p0 (~ i)))) in
+  let fill1 : (i : I) -> (k : I) -> A := \i -> hfill A (i \/ ~ i) (\k -> [ i -> t x1 k | ~ i -> g y ]) (inS (g (p1 (~ i)))) in
+  let fill2 : (i : I) -> (k : I) -> A := \i -> hfill A (i \/ ~ i) (\k -> [ i -> fill1 k i1 | ~ i -> fill0 k i1 ]) (inS (g y)) in
+  let p : Path A x0 x1 := \i -> fill2 i i1 in
+  let sq : (i : I) -> (j : I) -> A := \i j -> hcomp A (i \/ ~ i \/ j \/ ~ j)
+        (\k -> [ i -> fill1 j (~ k) | ~ i -> fill0 j (~ k) | j -> t (fill2 i i1) (~ k) | ~ j -> g y ]) (fill2 i j) in
+  let sq1 : (i : I) -> (j : I) -> B := \i j -> hcomp B (i \/ ~ i \/ j \/ ~ j)
+        (\k -> [ i -> s (p1 (~ j)) k | ~ i -> s (p0 (~ j)) k | j -> s (f (p i)) k | ~ j -> s y k ]) (f (sq i j)) in
+  \i -> (p i , \j -> sq1 i (~ j))
+def isoToIsEquiv (A B : U) (f : A -> B) (g : B -> A) (s : (b : B) -> Path B (f (g b)) b) (t : (a : A) -> Path A (g (f a)) a) : isEquiv A B f :=
+  \y -> ((g y , s y) , \z -> lemIso A B f g s t y (g y) (fst z) (s y) (snd z))
+def isoToEquiv (A B : U) (f : A -> B) (g : B -> A) (s : (b : B) -> Path B (f (g b)) b) (t : (a : A) -> Path A (g (f a)) a) : Equiv A B :=
+  (f , isoToIsEquiv A B f g s t)
