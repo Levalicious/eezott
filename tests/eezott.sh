@@ -86,6 +86,10 @@ check ua_not.tt        bool false
 check ua_not_back.tt   bool true
 check hcomp_u_transport.tt nat 1
 check ua_not_comp.tt   bool false
+check sym_u.tt         bool true
+check comppath_u.tt    bool true
+check list_of_types.tt nat 2
+check id_u_cast.tt     bool true
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

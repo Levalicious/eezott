@@ -116,31 +116,35 @@ static Term *check_interval(Ctx *c, STerm *s) { return check(c, s, vinterval());
 /* ---- induction principles ---- */
 
 /* D p i, under a context where params start at index pbase (p_t = pbase + np-1-t) and indices at index ibase (i_j = ibase + m-1-j) */
+static int elim_dl;   /* the data shift while building an eliminator type */
 static Term *data_applied(int d, int pbase, int ibase) {
-    Data *D = &datas[d]; Term *t = mk_ref(T_DATA, d);
+    Data *D = &datas[d]; Term *t = mk_ref_lv(T_DATA, d, elim_dl);
     for (int i = 0; i < D->nparams; i++) t = mk_app(t, mk_var(pbase + D->nparams - 1 - i), 1);
     for (int j = 0; j < D->nidx; j++) t = mk_app(t, mk_var(ibase + D->nidx - 1 - j), 1);
     return t;
 }
 
 /* closed type of  elim D  for a motive into U lvl; res_irr says the motive's fibres are themselves types */
-static Term *elim_type(int d, int lvl, int res_irr) {
-    Data *D = &datas[d];
+static Term *elim_type(int d, int lvl, int res_irr, int dl) {
+    Data *D = &datas[d]; elim_dl = dl;
     int np = D->nparams, m = D->nidx, k = D->ncons;
+    #define ITY(j) shift_univ(D->itys[j], dl)
+    #define PTY(i) shift_univ(D->ptys[i], dl)
+    #define ATY(C, j) con_arg_ty(C, j, dl)
     /* body: P i x   under [params, P, mth(k), i(m), x] */
     Term *body = mk_var(1 + m + k);
     for (int j = 0; j < m; j++) body = mk_app(body, mk_var(1 + (m - 1 - j)), 1);
     body = mk_app(body, mk_var(0), 0);
     /* x : D p i */
     Term *t = mk_pi("x", data_applied(d, m + k + 1, 0), body, 0);
-    for (int j = m - 1; j >= 0; j--) t = mk_pi(xsprintf("i%d", j), shift(D->itys[j], j, k + 1), t, 1);
+    for (int j = m - 1; j >= 0; j--) t = mk_pi(xsprintf("i%d", j), shift(ITY(j), j, k + 1), t, 1);
     /* methods */
     for (int ci = k - 1; ci >= 0; ci--) {
         Con *C = &cons[D->cons[ci]]; int r = C->nargs, htot = C->nrec;
         /* return: P ridx (c p a)   under [params, P, mth(ci), a(r), ih(htot)] */
         Term *ret = mk_var(ci + r + htot);
         for (int j = 0; j < m; j++) ret = mk_app(ret, shift2(C->ridx[j], 0, htot, r, htot + ci + 1), 1);
-        Term *ct = mk_ref(T_CON, D->cons[ci]);
+        Term *ct = mk_ref_lv(T_CON, D->cons[ci], dl);
         for (int i = 0; i < np; i++) ct = mk_app(ct, mk_var(htot + r + ci + 1 + (np - 1 - i)), 1);
         for (int j = 0; j < r; j++) ct = mk_app(ct, mk_var(htot + (r - 1 - j)), C->args[j].irr);
         ret = mk_app(ret, ct, 0);
@@ -156,7 +160,7 @@ static Term *elim_type(int d, int lvl, int res_irr) {
             Term *ih = mk_var(ci + r + h + q);
             for (int i = 0; i < A->nidx; i++) ih = mk_app(ih, shift2(A->idx[i], q, h + (r - j), q + j, h + (r - j) + ci + 1), 1);
             Term *aj = mk_var((r - 1 - j) + h + q);
-            Term *aty = A->ty; int yt = 1;
+            Term *aty = ATY(C, j); int yt = 1;
             for (Term *w = aty; w->k == T_PI && yt <= q; w = w->b, yt++) aj = mk_app(aj, mk_var(q - yt), w->irr);
             ih = mk_app(ih, aj, 0);
             /* wrap the y binders, innermost first */
@@ -166,20 +170,43 @@ static Term *elim_type(int d, int lvl, int res_irr) {
                 ih = mk_pi(xsprintf("y%d", tt), shift2(ys[tt], tt, h + (r - j), tt + j, h + (r - j) + ci + 1), ih, yirr[tt]);
             mt = mk_pi(xsprintf("ih%d", j), ih, mt, res_irr);
         }
-        for (int j = r - 1; j >= 0; j--) mt = mk_pi(C->args[j].name, shift(C->args[j].ty, j, ci + 1), mt, C->args[j].irr);
+        for (int j = r - 1; j >= 0; j--) mt = mk_pi(C->args[j].name, shift(ATY(C, j), j, ci + 1), mt, C->args[j].irr);
         t = mk_pi(xsprintf("m_%s", C->name), mt, t, 0);
     }
     /* motive: (i..) -> D p i -> U lvl   under [params] */
     Term *P = mk_pi("x", data_applied(d, m, 0), mk_u(lvl), 0);
-    for (int j = m - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), D->itys[j], P, 1);
+    for (int j = m - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), ITY(j), P, 1);
     t = mk_pi("P", P, t, 1);
-    for (int i = np - 1; i >= 0; i--) t = mk_pi(xsprintf("p%d", i), D->ptys[i], t, 1);
+    for (int i = np - 1; i >= 0; i--) t = mk_pi(xsprintf("p%d", i), PTY(i), t, 1);
     return t;
+    #undef ITY
+    #undef PTY
+    #undef ATY
 }
 
 /* ---- applications ---- */
 
+/* the type of a global reference at a universe shift */
+static Val *global_type(Term *head, int lv) {
+    switch (head->k) {
+    case T_DEF: return def_ty(head->n, lv);
+    case T_DATA: return eval(NULL, data_ty(head->n, lv));
+    case T_CON: return eval(NULL, con_ty(head->n, lv));
+    default: return NULL;
+    }
+}
+/* if the argument is a type whose universe exceeds the domain's, how far must the head be lifted? */
+static int universe_excess(Ctx *c, STerm *arg, Val *dom) {
+    if (dom->k != V_U) return 0;
+    if (arg->k == S_LAM || arg->k == S_PAIR || arg->k == S_SYS || arg->k == S_LET) return 0;
+    Val *aty; infer(c, arg, &aty);
+    return aty->k == V_U && aty->n > dom->n ? aty->n - dom->n : 0;
+}
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
+    Term *head0 = head; Val *hty0 = hty;
+    int is_global = head->k == T_DEF || head->k == T_DATA || head->k == T_CON;
+  restart:
+    head = head0; hty = hty0;
     for (int i = 0; i < nargs; i++) {
         if (hty->k == V_PATHP) {
             Term *r = check_interval(c, args[i]);
@@ -188,6 +215,10 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             continue;
         }
         if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
+        if (is_global) {   /* universe polymorphism by uniform lifting: a type argument above the domain's universe lifts the whole global */
+            int k = universe_excess(c, args[i], hty->dom);
+            if (k > 0) { head0 = mk_ref_lv(head0->k, head0->n, head0->lv + k); hty0 = global_type(head0, head0->lv); goto restart; }
+        }
         Term *a = check(c, args[i], hty->dom);
         head = mk_app(head, a, hty->irr);
         hty = inst(&hty->clo, eval(c->env, a));
@@ -215,10 +246,13 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         if (d < 0) die("line %d: elim of unknown data type '%s'", h->line, h->name);
         Data *D = &datas[d]; int np = D->nparams, m = D->nidx;
         if (n < np + 1) die("line %d: elim %s needs its %d parameter%s and a motive", h->line, D->name, np, np == 1 ? "" : "s");
-        /* parameters */
+        /* parameters; a parameter above its universe lifts the data type (and its eliminator) uniformly */
+        int dl = 0;
         Env *pe = NULL; Val **pv = xalloc((np + 1) * sizeof(Val *));
         for (int i = 0; i < np; i++) {
-            Term *p = check(c, args[i], eval(pe, D->ptys[i]));
+            int k = universe_excess(c, args[i], eval(pe, shift_univ(D->ptys[i], dl)));
+            if (k > 0) { dl += k; pe = NULL; i = -1; continue; }
+            Term *p = check(c, args[i], eval(pe, shift_univ(D->ptys[i], dl)));
             pv[i] = eval(c->env, p); pe = env_push(pe, pv[i]);
         }
         /* motive: peel its lambdas against the expected binders (indices, then the target),
@@ -228,13 +262,13 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             STerm *ms = args[np]; Env *ie = pe; int nb = 0, depth = c->n;
             Val **iv = xalloc((m + 2) * sizeof(Val *));
             #define TARGET_TYPE(dst) do { \
-                Val *dv_ = mkval(V_DATA); dv_->n = d; \
+                Val *dv_ = mkval(V_DATA); dv_->n = d; dv_->lv = dl; \
                 for (int i_ = 0; i_ < np; i_++) { vl_push(&dv_->args, pv[i_], 1); } \
                 for (int j_ = 0; j_ < m; j_++) { vl_push(&dv_->args, iv[j_], 1); } \
                 (dst) = dv_; } while (0)
             while (nb <= m && ms->k == S_LAM) {
                 Val *dom;
-                if (nb < m) dom = eval(ie, D->itys[nb]); else TARGET_TYPE(dom);
+                if (nb < m) dom = eval(ie, shift_univ(D->itys[nb], dl)); else TARGET_TYPE(dom);
                 ctx_bind(c, ms->binders[0].name, dom);
                 Val *x = vvar(c->n - 1); depth = c->n;
                 if (nb < m) { iv[nb] = x; ie = env_push(ie, x); }
@@ -245,7 +279,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             for (int j = nb; j <= m; j++) {
                 if (cur->k != V_PI) die("line %d: motive for %s must abstract over %d index%s and the target", ms->line, D->name, m, m == 1 ? "" : "es");
                 Val *dom;
-                if (j < m) dom = eval(ie, D->itys[j]); else TARGET_TYPE(dom);
+                if (j < m) dom = eval(ie, shift_univ(D->itys[j], dl)); else TARGET_TYPE(dom);
                 expect_conv(c, ms->line, cur->dom, dom, "motive binder");
                 Val *x = vvar(depth++);
                 if (j < m) { iv[j] = x; ie = env_push(ie, x); }
@@ -259,8 +293,8 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             (void)fib; res_irr = 0;
             for (int i = 0; i < nb; i++) ctx_pop(c);
         }
-        Term *ety = elim_type(d, lvl, res_irr);
-        return app_spine(c, args, n, mk_ref(T_ELIM, d), eval(NULL, ety), ty);
+        Term *ety = elim_type(d, lvl, res_irr, dl);
+        return app_spine(c, args, n, mk_ref_lv(T_ELIM, d, dl), eval(NULL, ety), ty);
     }
     case S_PATHP: {
         int lvl; Term *line, *x, *y;
@@ -390,15 +424,15 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
         need_args(h, n, 3, "Glue");
         int lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
-        if (lvl != 0) die("line %d: Glue is available at U 0 only for now (Equiv lives there)", h->line);
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
-        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu(0);
-        sig->clo.env = env_push(c->env, Av);   /* under [.., A]: Equiv T A with T the bound variable */
-        sig->clo.t = mk_app(mk_app(mk_ref(T_DEF, eq), mk_var(0), 0), mk_var(1), 0);
+        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu(lvl);
+        sig->clo.env = env_push(c->env, Av);   /* under [.., A]: Equiv^lvl T A with T the bound variable */
+        sig->clo.t = mk_app(mk_app(mk_ref_lv(T_DEF, eq, lvl), mk_var(0), 0), mk_var(1), 0);
         Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = sig;
         Term *Te = check(c, args[2], pty);
-        return app_spine(c, args + 3, n - 3, mk_term(T_GLUE, A, phi, Te, NULL), vu(0), ty);
+        Term *g = mk_term(T_GLUE, A, phi, Te, NULL); g->n = lvl;   /* the level, for the rules' equivProof */
+        return app_spine(c, args + 3, n - 3, g, vu(lvl), ty);
     }
     case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
     case S_UNGLUE: {
@@ -695,6 +729,11 @@ static void elab_data(SDecl *s) {
         DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die("out of memory");
         DD->cons[DD->ncons++] = cid;
     }
+    /* polymorphic if any parameter, index or constructor type mentions a universe */
+    Data *DD = &datas[d]; DD->poly = 0;
+    for (int i = 0; i < DD->nparams; i++) if (term_poly(DD->ptys[i])) DD->poly = 1;
+    for (int j = 0; j < DD->nidx; j++) if (term_poly(DD->itys[j])) DD->poly = 1;
+    for (int ci = 0; ci < DD->ncons; ci++) for (int j = 0; j < cons[DD->cons[ci]].nargs; j++) if (term_poly(cons[DD->cons[ci]].args[j].ty)) DD->poly = 1;
 }
 
 static void elab_def(SDecl *s) {
@@ -704,6 +743,7 @@ static void elab_def(SDecl *s) {
     Val *vty = eval(NULL, ty);
     Term *val = check(&c, s->val, vty);
     Def D = {0}; D.name = s->name; D.ty = ty; D.val = val; D.vty = vty; D.vval = eval(NULL, val); D.irr = is_type_like(0, vty); D.line = s->line;
+    D.poly = term_poly(ty) || term_poly(val);
     defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die("out of memory");
     defs[ndefs++] = D;
 }
