@@ -214,7 +214,7 @@ static Term *elim_type(int d, int lvl, int res_irr, int dl) {
         int *record = xalloc((r + 1) * sizeof(int)); { int o = 0; for (int j = 0; j < r; j++) record[j] = (C->args[j].isrec || C->args[j].isrecpath) ? o++ : -1; }
         /* return: P ridx (c p a is)   under [params, P, mth(ci), a(r), ih(htot), iv(n)] */
         Term *ret = mk_var(n + ci + r + htot);
-        for (int j = 0; j < m; j++) ret = mk_app(ret, shift2(C->ridx[j], 0, htot, r, htot + ci + 1), 1);
+        for (int j = 0; j < m; j++) ret = mk_app(ret, shift2(C->ridx[j], n, htot, n + r, htot + ci + 1), 1);
         Term *ct = mk_ref_lv(T_CON, D->cons[ci], dl);
         for (int i = 0; i < np; i++) ct = mk_app(ct, mk_var(n + htot + r + ci + 1 + (np - 1 - i)), !C->bparams);
         for (int j = 0; j < r; j++) ct = mk_app(ct, mk_var(n + htot + (r - 1 - j)), C->args[j].irr);
@@ -248,7 +248,9 @@ static Term *elim_type(int d, int lvl, int res_irr, int dl) {
                 EInfo Ih = { C, 0, r, h, ci, np, dl, record };
                 Term *px = shift2(A->px, 0, h + (r - j), j, h + (r - j) + ci + 1), *py = shift2(A->py, 0, h + (r - j), j, h + (r - j) + ci + 1);
                 Term *pa = mk_term(T_PAPP, mk_var((r - 1 - j) + h + 1), mk_var(0), shift(px, 0, 1), shift(py, 0, 1));
-                Term *line = mk_lam("k", mk_app(mk_var(ci + r + h + 1), pa, 0), 0); line->isi = 1;
+                Term *Pk = mk_var(ci + r + h + 1);
+                for (int q = 0; q < A->nidx; q++) Pk = mk_app(Pk, shift(shift2(A->idx[q], 0, h + (r - j), j, h + (r - j) + ci + 1), 0, 1), 1);
+                Term *line = mk_lam("k", mk_app(Pk, pa, 0), 0); line->isi = 1;
                 Term *ih = mk_term(T_PATHP, line, E(px, &Ih, 0), E(py, &Ih, 0), NULL);
                 mt = mk_pi(xsprintf("ih%d", j), ih, mt, 0);
                 continue;
@@ -768,6 +770,32 @@ static int data_spine(Term *t, int d, int pbase, Term ***idx, int *nidx) {
     return 1;
 }
 
+
+/* does t mention the variable idx other than as a parameter argument of a constructor (which transport rewrites anyway)? */
+static int mentions_essentially(Term *t, int idx) {
+    if (!t) return 0;
+    switch (t->k) {
+    case T_VAR: return t->n == idx;
+    case T_APP: {
+        int nargs = 0; Term *w = t;
+        while (w->k == T_APP) { nargs++; w = w->a; }
+        if (w->k == T_CON) {
+            int np = datas[cons[w->n].data].nparams;
+            Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
+            for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
+            for (int i = np; i < nargs; i++) if (mentions_essentially(args[i], idx)) return 1;
+            return 0;
+        }
+        return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx);
+    }
+    case T_U: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
+    case T_PI: case T_SIGMA: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx + 1);
+    case T_LAM: return mentions_essentially(t->a, idx + 1);
+    case T_LET: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx + 1);
+    case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_essentially(t->br[i].face, idx) || mentions_essentially(t->br[i].body, idx)) return 1; return 0;
+    default: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx) || mentions_essentially(t->d, idx);
+    }
+}
 static void elab_data(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
@@ -807,10 +835,12 @@ static void elab_data(SDecl *s) {
             if (A->ty->k == T_PATHP && A->ty->a->k == T_LAM) {
                 Term **idx; int nidx;
                 if (mentions(A->ty->a->a, d)) {
-                    if (!data_spine(A->ty->a->a, d, j + 1, &idx, &nidx) || nidx != 0 || mentions(A->ty->b, d) == -1)
+                    if (!data_spine(A->ty->a->a, d, j + 1, &idx, &nidx))
                         die("line %d: constructor %s: a path argument must be a path in %s itself", sc->line, sc->name, s->name);
                     if (term_mentions_var(A->ty->a->a, 0)) die("line %d: constructor %s: a path argument's line must be constant", sc->line, sc->name);
                     A->isrecpath = 1; A->px = A->ty->b; A->py = A->ty->c; C.nrec++;
+                    A->nidx = nidx; A->idx = xalloc((nidx + 1) * sizeof(Term *));
+                    for (int q = 0; q < nidx; q++) A->idx[q] = subst_term(idx[q], 0, mk_term(T_I0, NULL, NULL, NULL, NULL));   /* drop the unused binder */
                     x = x->b; continue;
                 }
             }
@@ -834,7 +864,8 @@ static void elab_data(SDecl *s) {
         Term **ridx; int nridx;
         if (!data_spine(x, d, r + nint, &ridx, &nridx)) die("line %d: constructor %s must return %s", sc->line, sc->name, s->name);
         C.ridx = ridx;
-        if (nint > 0 && nridx > 0) die("line %d: path constructor %s: higher inductive families with indices are not supported", sc->line, sc->name);
+        for (int j = 0; j < nridx; j++) for (int q = 0; q < nint; q++)
+            if (term_mentions_var(ridx[j], nint - 1 - q)) die("line %d: path constructor %s: an index may not vary along the interval", sc->line, sc->name);
         if (sc->boundary && nint == 0) die("line %d: constructor %s has a boundary but no interval binders", sc->line, sc->name);
         if (sc->boundary) {   /* the boundary: a system of elements of D params under [params, args, intervals] */
             Ctx bc = c; bc.names = xalloc((c.n + r + nint + 1) * sizeof(char *)); bc.tys = xalloc((c.n + r + nint + 1) * sizeof(Val *));
@@ -846,12 +877,12 @@ static void elab_data(SDecl *s) {
             for (int i = 0; i < sc->boundary->nbr; i++) { Term *f = check_interval(&bc, sc->boundary->br[i].face); cover = iv_or(cover, eval(bc.env, f)->iv); }
             Val *Dv = mkval(V_DATA); Dv->n = d;
             for (int i = 0; i < s->nparams; i++) vl_push(&Dv->args, vvar(i), 0);
+            for (int j = 0; j < nridx; j++) vl_push(&Dv->args, eval(bc.env, ridx[j]), 1);   /* the boundary lives at the constructor's own index */
             Val *pty = mkval(V_PARTIAL); pty->a = vi(cover); pty->b = Dv;
             C.boundary = check(&bc, sc->boundary, pty);
-            for (int i = 0; i < C.boundary->nbr; i++) {
-                if (term_poly(C.boundary->br[i].body) && 0) {}
-                for (int p = 0; p < s->nparams; p++) if (term_mentions_var(C.boundary->br[i].body, r + nint + (s->nparams - 1 - p))) C.bparams = 1;
-            }
+            /* does the boundary depend on the parameters beyond passing them to constructors? (then transport must correct it) */
+            for (int i = 0; i < C.boundary->nbr; i++)
+                for (int p = 0; p < s->nparams; p++) if (mentions_essentially(C.boundary->br[i].body, r + nint + (s->nparams - 1 - p))) C.bparams = 1;
             if (nint == 1) {
                 Term *v0 = mk_term(T_I0, NULL, NULL, NULL, NULL), *v1 = mk_term(T_I1, NULL, NULL, NULL, NULL); int has0 = 0, has1 = 0;
                 for (int i = 0; i < C.boundary->nbr; i++) {

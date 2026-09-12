@@ -93,6 +93,9 @@ check id_u_cast.tt     bool true
 check s1_elim.tt       bool true
 check s1_winding.tt    bool false
 check int_posneg.tt    nat 2
+check qvec.tt          nat 4
+check pushout.tt       nat 2
+check pushout_indexed.tt nat 2
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
