@@ -96,6 +96,8 @@ check int_posneg.tt    nat 2
 check qvec.tt          nat 4
 check pushout.tt       nat 2
 check pushout_indexed.tt nat 2
+check torus_nat.tt     nat 4
+check torus_s1.tt      bool false
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

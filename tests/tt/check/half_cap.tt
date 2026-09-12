@@ -1,0 +1,7 @@
+-- a path constructor with one endpoint only has a cube method (a Sub); applying it in a boundary needs outS
+data H : U where
+  | pt : H
+  | half : (i : I) -> H [ ~ i -> pt ]
+  | cap : (i j : I) -> H [ ~ i -> half j | i -> half j | ~ j -> pt ]
+def cnt (h : H) : Nat := elim H (\_ -> Nat) one (\i -> inS one) (\i j -> inS one) h
+def main : Nat := cnt (cap i1 i1)

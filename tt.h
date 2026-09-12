@@ -9,6 +9,10 @@
  * abstraction and application; partial elements (systems) over faces
  * phi : I; and the Kan operations transp and hcomp, computing on functions,
  * paths, universes and inductive types.
+ * M4c: a boundary may apply an earlier path constructor; the eliminator images
+ * it as that constructor's method path-applied (or its cube method, taken out
+ * of the subtype), and every higher inductive type's induction principle is
+ * formed at its declaration.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,

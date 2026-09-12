@@ -1,0 +1,7 @@
+-- a parameterized 2-cell whose boundary applies a path constructor with a parameter and an argument
+data Circ (A : U) : U where
+  | pt : A -> Circ A
+  | lp : (a : A) -> (i : I) -> Circ A [ ~ i -> pt A a | i -> pt A a ]
+  | sq : (a : A) -> (i j : I) -> Circ A [ ~ i -> lp A a j | i -> lp A a j | ~ j -> pt A a | j -> pt A a ]
+def cnt (A : U) (c : Circ A) : Nat := elim Circ A (\_ -> Nat) (\a -> one) (\a -> \i -> one) (\a -> \i j -> inS one) c
+def main : Nat := cnt Nat (sq Nat two i0 i1)
