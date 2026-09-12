@@ -46,7 +46,7 @@ static void erase(Term *t, int depth) {
     case T_DATA:
         if (t->n == self_data) fprintf(out, "tcs_%s(self)", datas[t->n].name); else fprintf(out, "tc_%s", datas[t->n].name);
         break;
-    case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: fputs("tc_u", out); break;
+    case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
     case T_PATHP: fputs("tc_path(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_I0: fputs("tt_i0", out); break;

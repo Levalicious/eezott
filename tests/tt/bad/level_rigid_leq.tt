@@ -1,0 +1,3 @@
+-- two declared levels are unrelated: l <= m is not derivable, and a declared level takes no new constraint
+def f (l m : Level) (A : U {l}) : U {m} := A
+def main : Nat := one

@@ -87,7 +87,7 @@ typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_EL
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
                T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
                T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE,
-               T_LEVEL, T_LZERO, T_LSUC, T_LMAX } TKind;
+               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA } TKind;
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -96,7 +96,7 @@ struct Term {
     int isi;            /* T_PI/T_LAM: the binder is an interval variable */
     int pre;            /* T_U: the sort Pre l of pretypes; T_PI: the domain is a pretype */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
-    int n;              /* T_VAR index; T_U constant level (a NULL); T_LZERO the constant; T_LSUC how many; T_GLUE constant level (d NULL);
+    int n;              /* T_VAR index; T_U constant level (a NULL); T_LZERO the constant; T_LSUC how many; T_LMETA the meta's id; T_GLUE constant level (d NULL);
                            T_DEF/T_DATA/T_CON/T_ELIM global id */
     int lv;             /* T_DEF/T_DATA/T_CON/T_ELIM: universe shift of the global (every U n lifted to U n+lv) */
     Term *a, *b, *c, *d;/* T_U: a=level term (NULL: constant n); T_LSUC: a + n; T_LMAX: a b; T_GLUE: d=level term (NULL: constant n);
@@ -147,11 +147,27 @@ int iv_mentions(IVal a, int level);
  * max(c, l_1 + n_1, ..., l_k + n_k), in normal form: variables by de Bruijn
  * level, each at most once, sorted; the constant only when no summand
  * dominates it. */
-typedef struct { int var, off; } LAtom;
+typedef struct { int var, off, meta; } LAtom;   /* meta: the atom is a flexible variable (by id), else a rigid one (by de Bruijn level) */
 typedef struct { int c; LAtom *t; int n; } LVal;
-LVal lv_const(int n); LVal lv_var(int level); LVal lv_add(LVal a, int k); LVal lv_max(LVal a, LVal b);
+LVal lv_const(int n); LVal lv_var(int level); LVal lv_meta(int id); LVal lv_add(LVal a, int k); LVal lv_max(LVal a, LVal b);
 int lv_eq(LVal a, LVal b); int lv_leq(LVal a, LVal b); int lv_is_const(LVal a, int *n);
-LVal lv_subst(LVal a, int var, LVal s);
+LVal lv_subst(LVal a, int var, LVal s); LVal lv_subst_meta(LVal a, int id, LVal s);
+int lv_has_meta(LVal a);
+
+/* The constraint store: an append-only log of edges y >= x + k between level
+ * atoms (the constant 0, rigid variables, metas), consistent iff it has no
+ * cycle of positive weight; every variable is implicitly >= 0. Enforcing
+ * a <= b adds edges summand by summand and reports 1 (added), 0
+ * (inconsistent) or -1 (ambiguous: a rigid summand below a max of several
+ * summands with none of the choices derivable). A meta summand below such a
+ * max is deferred and re-checked once the metas are solved. Conversion is
+ * transactional: constraints added by a comparison that fails are rolled
+ * back to the mark taken at its entry. */
+typedef struct { int e, d; } LMark;
+LMark lstore_mark(void); void lstore_rollback(LMark m);
+int lv_meta_new(void);
+int lv_enforce_leq(LVal a, LVal b); int lv_enforce_eq(LVal a, LVal b);
+int lstore_nedges(void); int lstore_ndeferred(void);
 
 /* ---------------- values ---------------- */
 

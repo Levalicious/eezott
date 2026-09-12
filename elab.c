@@ -149,7 +149,7 @@ static Term *inst_tele(Term *t, int n, Term **vs, int k) {
         if (t->n < k) return t;
         if (t->n - k < n) return shift(vs[t->n - k], 0, k);
         return mk_var(t->n - n);
-    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_PI:  r = mk_pi(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), t->irr); r->isi = t->isi; r->pre = t->pre; return r;
     case T_LAM: r = mk_lam(t->name, inst_tele(t->a, n, vs, k + 1), t->irr); r->isi = t->isi; return r;
     case T_SIGMA: r = mk_term(T_SIGMA, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), NULL, NULL); r->name = t->name; return r;
@@ -224,7 +224,7 @@ static Term *E(Term *t, EInfo *I, int depth) {
     }
     case T_APP: { Term *m = E_con_spine(t, I, depth); if (m) return m; return mk_app(E(t->a, I, depth), E(t->b, I, depth), t->irr); }
     case T_CON: { Term *m = E_con_spine(t, I, depth); if (m) return m; return t; }
-    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: return t;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: return t;
     case T_PI: r = mk_pi(t->name, E(t->a, I, depth), E(t->b, I, depth + 1), t->irr); r->isi = t->isi; return r;
     case T_LAM: r = mk_lam(t->name, E(t->a, I, depth + 1), t->irr); r->isi = t->isi; return r;
     case T_LET: return mk_let(t->name, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth + 1), t->irr);
@@ -849,7 +849,12 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
     }
     if (s->k == S_SYS) return check_system(c, s, ty);
     Val *got; Term *t = infer(c, s, &got);
-    if (got->k == V_U && ty->k == V_U && lv_leq(got->lvl, ty->lvl) && got->pre <= ty->pre) return t;   /* cumulativity; a universe type is also a pretype */
+    if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
+        int r = lv_enforce_leq(got->lvl, ty->lvl);
+        if (r == 1) return t;
+        if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
+        die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
+    }
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
     if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
     return t;
@@ -900,7 +905,7 @@ static int mentions_essentially(Term *t, int idx) {
         }
         return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx);
     }
-    case T_LEVEL: case T_LZERO: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
     case T_PI: case T_SIGMA: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx + 1);
     case T_LAM: return mentions_essentially(t->a, idx + 1);
     case T_LET: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx + 1);
