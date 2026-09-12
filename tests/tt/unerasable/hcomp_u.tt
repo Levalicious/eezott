@@ -1,0 +1,3 @@
+-- a formal composition in the universe: fine to check, but transport along it needs Glue (M3) at run time
+def T (i : I) : U := hcomp U (i \/ ~ i) (\j -> [ i -> Nat | ~ i -> Nat ]) Nat
+def main : Nat := transp (\i -> T i) i0 one

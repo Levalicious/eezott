@@ -254,7 +254,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             lvl = cur->n;
             Val *fib = eval(c->env, rt);
             for (int j = nb; j <= m; j++) fib = vapp(fib, vvar(c->n + (j - nb)), 0);
-            res_irr = is_type_like(c->n + (m + 1 - nb), fib);
+            (void)fib; res_irr = 0;
             for (int i = 0; i < nb; i++) ctx_pop(c);
         }
         Term *ety = elim_type(d, lvl, res_irr);
@@ -314,7 +314,8 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             if (!conv(c->n, side, restrict_val(u0v, &fs[i])))
                 die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s", args[3]->line, show(c, pv));
         }
-        return app_spine(c, args + 4, n - 4, mk_term(T_HCOMP, A, phi, u, u0), Av, ty);
+        Term *t = mk_term(T_HCOMP, A, phi, u, u0); t->n = (Av->k == V_U);
+        return app_spine(c, args + 4, n - 4, t, Av, ty);
     }
     case S_COMP: {
         /* comp A phi u u0 : A i1  with  u : (i : I) -> Partial phi (A i),  u0 : A i0 agreeing with u i0 on phi.
@@ -344,7 +345,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         sys->br[0].face = shift(phi, 0, 1); sys->br[0].body = tr;
         Term *sides = mk_lam("i", sys, 0); sides->isi = 1;
         Term *base = mk_term(T_TRANSP, line, mk_term(T_I0, NULL, NULL, NULL, NULL), u0, NULL); base->n = constline;
-        Term *t = mk_term(T_HCOMP, A1, phi, sides, base);
+        Term *t = mk_term(T_HCOMP, A1, phi, sides, base); t->n = (vapp(lv, vi(iv_one()), 0)->k == V_U);
         return app_spine(c, args + 4, n - 4, t, vapp(lv, vi(iv_one()), 0), ty);
     }
     case S_SUB: {   /* Sub A phi u : U,  u : Partial phi A */
@@ -437,7 +438,7 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
             Term *t = mk_pi(b->name, mk_term(T_INTERVAL, NULL, NULL, NULL, NULL), cod, 0); return t;
         }
         int la, lb; Term *dom = check_type(c, b->ty, &la);
-        Val *dv = eval(c->env, dom); int irr = is_type_like(c->n, dv);
+        Val *dv = eval(c->env, dom); int irr = 0;   /* types are run-time codes: every binder is relevant */
         ctx_bind(c, b->name, dv);
         Term *cod = check_type(c, s->a, &lb);
         ctx_pop(c);
@@ -451,7 +452,7 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         int l; Term *tyt = check_type(c, s->a, &l);
         Val *tv = eval(c->env, tyt);
         Term *v = check(c, s->b, tv);
-        int irr = is_type_like(c->n, tv);
+        int irr = 0;
         ctx_push(c, s->name, tv, eval(c->env, v));
         Val *bty; Term *body = infer(c, s->c, &bty);
         ctx_pop(c);
@@ -492,7 +493,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         int l; Term *tyt = check_type(c, s->a, &l);
         Val *tv = eval(c->env, tyt);
         Term *v = check(c, s->b, tv);
-        int irr = is_type_like(c->n, tv);
+        int irr = 0;
         ctx_push(c, s->name, tv, eval(c->env, v));
         Term *body = check(c, s->c, ty);
         ctx_pop(c);
@@ -561,7 +562,7 @@ static void elab_data(SDecl *s) {
     if (w->k != T_U) die("line %d: the type of data %s must end in a universe", s->line, s->name);
     D.lvl = w->n;
     Term *full = ity;
-    for (int i = s->nparams - 1; i >= 0; i--) full = mk_pi(s->params[i].name, D.ptys[i], full, 1);
+    for (int i = s->nparams - 1; i >= 0; i--) full = mk_pi(s->params[i].name, D.ptys[i], full, 0);
     { Term *x = ity; for (int j = 0; j < m; j++) { x->irr = 1; x = x->b; } }
     D.ty = full;
     int d = ndatas;

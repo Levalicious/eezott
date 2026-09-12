@@ -1,21 +1,30 @@
 /*
  * erase.c - erasure of checked programs to eezoc source.
  *
- * Types, universes, motives, indices and every binder or argument marked
- * irrelevant vanish.  Constructors become Scott selectors; the induction
- * principle of a data type becomes a recursive case analysis built with
- * the prelude's fix.  The interval becomes the Scott booleans (i0 false,
- * i1 true; meet, join and reversal the boolean operations), paths become
- * functions of a boolean, systems a chain of boolean choices, and hcomp
- * the choice between its sides at i1 and its base.  transp is dropped
- * along lines the elaborator proved constant; along any other line it has
- * no run-time meaning without type codes, and erasure refuses it.
+ * Types are not dropped: they erase to run-time codes (a Tarski universe),
+ * because transport along a line of types is the execution of a recipe and
+ * must survive to run time.  A code is a record  k -> k(method)(c1)..(cn)
+ * whose method is its own transport rule:
+ *   tt_transp line phi a = phi(a)(line(i0)(m -> m)(line)(phi)(a))
+ * so the code at the start of a line dispatches the transport along the
+ * whole line.  tc_u (identity), tc_pi (the CCHM rule for functions),
+ * tc_path (composition in the underlying line), and one tc_D per data type
+ * whose method transports constructor arguments along their own type lines
+ * with fillers, exactly as the checker does.  Binders of type-like type are
+ * therefore relevant; only the positions that never carry run-time content
+ * vanish: data-type parameters of constructors and eliminators, motives,
+ * indices.  Constructors become Scott selectors and induction a recursive
+ * case analysis built with the prelude's fix; the interval becomes the
+ * Scott booleans; hcomp is the choice between its sides at i1 and its base.
+ * hcomp in the universe has no run-time meaning before Glue and is refused.
  * Output is ordinary eezoc source: definitions in dependency order, then
  * `;` and the program's main term.
  */
 #include "tt.h"
 
+int keep_kan;
 static FILE *out;
+static int self_data = -1;      /* while emitting tt_transp_D: references to D go through the fixpoint's self */
 
 static void erase(Term *t, int depth) {
     switch (t->k) {
@@ -31,11 +40,15 @@ static void erase(Term *t, int depth) {
     case T_LET:
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
-    case T_DEF:
-        if (defs[t->n].irr) die("internal: erased definition '%s' used at run time", defs[t->n].name);
-        fprintf(out, "tt_%s", defs[t->n].name); break;
+    case T_DEF: fprintf(out, "tt_%s", defs[t->n].name); break;
     case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
+    case T_DATA:
+        if (t->n == self_data) fprintf(out, "tcs_%s(self)", datas[t->n].name); else fprintf(out, "tc_%s", datas[t->n].name);
+        break;
+    case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: fputs("tc_u", out); break;
+    case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
+    case T_PATHP: fputs("tc_path(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_I0: fputs("tt_i0", out); break;
     case T_I1: fputs("tt_i1", out); break;
     case T_IAND: fputs("tt_iand(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
@@ -47,14 +60,13 @@ static void erase(Term *t, int depth) {
         for (int i = 0; i < t->nbr; i++) fputc(')', out);
         break;
     case T_HCOMP:
+        if (t->n) die("hcomp in the universe reaches run time; it has no run-time meaning before Glue (M3)");
         fputs("tt_hcomp(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break;
     case T_TRANSP:
-        if (t->n || t->b->k == T_I1) { erase(t->c, depth); break; }
-        die("transp along a line that is not constant reaches run time; this needs run-time type codes and is not erasable yet");
+        if (!keep_kan && (t->n || t->b->k == T_I1)) { erase(t->c, depth); break; }     /* a constant line: the identity */
+        fputs("tt_transp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_INS: erase(t->a, depth); break;
     case T_OUTS: erase(t->d, depth); break;
-    case T_U: case T_PI: case T_DATA: case T_INTERVAL: case T_PATHP: case T_PARTIAL: case T_SUB:
-        die("internal: a type reached erasure in a relevant position");
     }
 }
 
@@ -99,26 +111,69 @@ static void emit_rec(Data *D) {
     fputs(")\n", out);
 }
 
+/* the line of the j-th argument's type of constructor C at i, given the data line and the fillers of the earlier arguments:
+     i -> ((v0 -> .. -> v_{np+j-1} -> A_j')(param_0(line i))..(param_{np-1}(line i))(fl_0(i))..(fl_{j-1}(i)))   */
+static void emit_arg_line(Data *D, Con *C, int j) {
+    int np = D->nparams;
+    fputs("(i -> (", out);
+    for (int k = 0; k < np + j; k++) fprintf(out, "v%d -> ", k);
+    erase(C->args[j].ty, np + j);
+    fputc(')', out);
+    for (int k = 0; k < np; k++) {
+        fputs("(line(i)(m -> ", out);
+        for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
+        fprintf(out, "p%d))", k);
+    }
+    for (int k = 0; k < j; k++) fprintf(out, "(fl%d(i))", k);
+    fputc(')', out);
+}
 
-/* only what main reaches is emitted: definitions through their bodies, data types through constructors and eliminators */
+/* tcs_D := tr -> p.. -> k -> k(tr)(p..);  tt_transp_D := fix(self -> p.. -> line -> phi -> x -> x(case..));  tc_D := tcs_D(tt_transp_D) */
+static void emit_codes(Data *D) {
+    int np = D->nparams;
+    fprintf(out, "tcs_%s := tr -> ", D->name);
+    for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
+    fputs("k -> k(tr)", out);
+    for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
+    fputc('\n', out);
+    fprintf(out, "tt_transp_%s := fix(self -> ", D->name);
+    for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
+    fputs("line -> phi -> x -> x", out);
+    self_data = D - datas;
+    for (int ci = 0; ci < D->ncons; ci++) {
+        Con *C = &cons[D->cons[ci]];
+        fputc('(', out);
+        for (int j = 0; j < C->nargs; j++) fprintf(out, "a%d -> ", j);
+        /* bind the fillers of every argument but the last, in order */
+        for (int j = 0; j + 1 < C->nargs; j++) fprintf(out, "(fl%d -> ", j);
+        fprintf(out, "tt_c_%s", C->name);
+        for (int j = 0; j < C->nargs; j++) {
+            fputs("(tt_transp", out); emit_arg_line(D, C, j); fprintf(out, "(phi)(a%d))", j);
+        }
+        for (int j = C->nargs - 2; j >= 0; j--) {
+            /* fl_j := i -> transp (k -> A_j(i /\ k)) (phi \/ ~i) a_j */
+            fputs(")(i -> tt_transp(k -> ", out); emit_arg_line(D, C, j); fprintf(out, "(tt_iand(i)(k)))(tt_ior(phi)(tt_ineg(i)))(a%d))", j);
+        }
+        fputc(')', out);
+    }
+    self_data = -1;
+    fputs(")\n", out);
+    fprintf(out, "tc_%s := tcs_%s(tt_transp_%s)\n", D->name, D->name, D->name);
+}
+
+/* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and codes */
 static int *def_used, *data_used;
 static void mark(Term *t) {
     if (!t) return;
     switch (t->k) {
-    case T_DEF: if (!def_used[t->n]) { def_used[t->n] = 1; if (!defs[t->n].irr) mark(defs[t->n].val); } break;
-    case T_CON: data_used[cons[t->n].data] = 1; break;
-    case T_ELIM: data_used[t->n] = 1; break;
+    case T_DEF: if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); } break;
+    case T_CON: if (!data_used[cons[t->n].data]) { data_used[cons[t->n].data] = 1; mark(datas[cons[t->n].data].ty); for (int ci = 0; ci < datas[cons[t->n].data].ncons; ci++) mark(cons[datas[cons[t->n].data].cons[ci]].ty); } break;
+    case T_ELIM: case T_DATA: if (!data_used[t->n]) { data_used[t->n] = 1; mark(datas[t->n].ty); for (int ci = 0; ci < datas[t->n].ncons; ci++) mark(cons[datas[t->n].cons[ci]].ty); } break;
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
     case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
-    case T_LAM: if (!t->irr) mark(t->a); else mark(t->a); break;
-    case T_LET: mark(t->b); mark(t->c); break;
-    case T_TRANSP: mark(t->c); break;
+    case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
     case T_HCOMP: mark(t->b); mark(t->c); mark(t->d); break;
-    case T_PAPP: mark(t->a); mark(t->b); break;
-    case T_INS: mark(t->a); break;
-    case T_OUTS: mark(t->d); break;
-    case T_IAND: case T_IOR: case T_INEG: mark(t->a); mark(t->b); break;
-    default: break;
+    default: mark(t->a); mark(t->b); mark(t->c); mark(t->d); break;
     }
 }
 
@@ -132,7 +187,7 @@ void erase_program(FILE *f) {
     def_used = xalloc((ndefs + 1) * sizeof(int)); data_used = xalloc((ndatas + 1) * sizeof(int));
     def_used[mainid] = 1; mark(defs[mainid].val);
     fputs("#import prelude\n", out);
-    /* the interval as Scott booleans; the run-time meaning of systems and hcomp */
+    /* the interval as Scott booleans; the run-time meaning of systems, hcomp, transport and the codes of the basic type formers */
     fputs("tt_i0 := t -> f -> f\n", out);
     fputs("tt_i1 := t -> f -> t\n", out);
     fputs("tt_iand := a -> b -> a(b)(tt_i0)\n", out);
@@ -140,6 +195,21 @@ void erase_program(FILE *f) {
     fputs("tt_ineg := a -> a(tt_i0)(tt_i1)\n", out);
     fputs("tt_absurd := x -> x\n", out);
     fputs("tt_hcomp := phi -> u -> u0 -> phi(u(tt_i1))(u0)\n", out);
+    fputs("tt_transp := line -> phi -> a -> phi(a)(line(tt_i0)(m -> m)(line)(phi)(a))\n", out);
+    fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    fputs("tt_transp_u := line -> phi -> a -> a\n", out);
+    fputs("tc_u := k -> k(tt_transp_u)\n", out);
+    fputs("tt_dom := c -> c(m -> d -> b -> d)\n", out);
+    fputs("tt_cod := c -> c(m -> d -> b -> b)\n", out);
+    fputs("tt_transp_pi := d -> b -> line -> phi -> f -> x -> (v -> tt_transp(i -> tt_cod(line(i))(v(i)))(phi)(f(v(tt_i0))))"
+          "(i -> tt_transp(j -> tt_dom(line(tt_ior(i)(tt_ineg(j)))))(tt_ior(phi)(i))(x))\n", out);
+    fputs("tc_pi := d -> b -> k -> k(tt_transp_pi)(d)(b)\n", out);
+    fputs("tt_pline := c -> c(m -> l -> x -> y -> l)\n", out);
+    fputs("tt_px := c -> c(m -> l -> x -> y -> x)\n", out);
+    fputs("tt_py := c -> c(m -> l -> x -> y -> y)\n", out);
+    fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
+          "(i -> phi(p(j))(tt_ineg(j)(tt_px(line(i)))(j(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
+    fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(l)(x)(y)\n", out);
     /* declaration order: data types and definitions interleaved by line number */
     int di = 0, fi = 0;
     while (di < ndatas || fi < ndefs) {
@@ -149,9 +219,10 @@ void erase_program(FILE *f) {
             if (!data_used[D - datas]) continue;
             for (int ci = 0; ci < D->ncons; ci++) emit_con(D, ci);
             emit_rec(D);
+            emit_codes(D);
         } else {
             Def *d = &defs[fi++];
-            if (d->irr || !def_used[d - defs]) continue;
+            if (!def_used[d - defs]) continue;
             fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
         }
     }

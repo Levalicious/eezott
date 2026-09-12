@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # eezott end-to-end tests: every typed program in tests/tt is checked, erased
-# to eezoc source, compiled and run on the STG and JIT evaluators; its output
+# to eezoc source, compiled and run on the STG and JIT evaluators (and once more with every
+# transport kept at run time, eezott -K); its output
 # must equal an untyped oracle (Church booleans from the stdlib, which coincide
 # with Scott booleans bit for bit; Scott naturals written as literals).
 # Every program in tests/tt/bad must be rejected; every program in tests/tt/unerasable
@@ -28,18 +29,21 @@ oracle() {      # kind value -> expected bitstring
         nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" | "$EEZO" ;;
     esac
 }
-run_typed() {   # file mode -> bitstring (or ERROR)
+run_typed() {   # file mode ttflags -> bitstring (or ERROR)
     local src; src=$(cat "$TT/prelude.tt" "$TT/$1")
-    local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
+    local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" $3 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
     local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
     echo "$bcl" | "$EEZO" $2 2>&1
 }
 check() {       # file kind value
     local want; want=$(oracle "$2" "$3")
     for mode in "" "-n"; do
-        local got; got=$(run_typed "$1" "$mode")
+        local got; got=$(run_typed "$1" "$mode" "")
         if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezo $mode)"; else fail "$1 = $2 $3 (eezo $mode)" "$want" "$got"; fi
     done
+    # every transport kept at run time: the run-time Kan rules must agree with the checker's shortcut
+    local got; got=$(run_typed "$1" "" "-K")
+    if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
 }
 
 check not_true.tt      bool false
@@ -67,6 +71,10 @@ check hcomp_list.tt    nat 1
 check transp_vec.tt    nat 5
 check pathp_dep.tt     nat 1
 check hcomp_vec_elim.tt nat 1
+check transport_generic.tt nat 1
+check transp_list_path.tt nat 1
+check fam_rec.tt       nat 2
+check transp_vec_path.tt nat 5
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

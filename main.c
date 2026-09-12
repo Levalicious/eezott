@@ -1,7 +1,8 @@
 /*
  * main.c - eezott driver.
  *
- *   eezott [-c] [FILE]     check FILE (or stdin); unless -c, write the erased eezoc source to stdout
+ *   eezott [-c] [-K] [FILE]   check FILE (or stdin); unless -c, write the erased eezoc source to stdout
+ *   -K keeps every Kan operation at run time (no identity shortcut for constant lines): a differential test of the run-time rules
  *
  * The output is meant to be piped straight into eezoc:
  *   eezott prog.tt | eezoc | eezo
@@ -25,6 +26,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "\nOptions:\n");
     fprintf(stderr, "  -c            Check only; emit nothing\n");
     fprintf(stderr, "  -t NAME       Print the type of the definition NAME after checking\n");
+    fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -h            Show this help\n");
     fprintf(stderr, "\nInput is read from FILE, or stdin if absent. Output is eezoc source on stdout.\n");
 }
@@ -34,6 +36,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
+        else if (!strcmp(argv[i], "-K")) keep_kan = 1;
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }
         else fname = argv[i];
