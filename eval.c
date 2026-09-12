@@ -19,7 +19,7 @@
 #include "tt.h"
 
 Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
-static int elim_lv;   /* the universe shift of the eliminator being reduced (set by vapp) */
+static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
 void *xalloc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) die("out of memory"); return p; }
@@ -43,66 +43,146 @@ Term *mk_lam(const char *x, Term *body, int irr) { Term *t = mk(T_LAM); t->name 
 Term *mk_app(Term *f, Term *a, int irr) { Term *t = mk(T_APP); t->a = f; t->b = a; t->irr = irr; return t; }
 Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr) { Term *t = mk(T_LET); t->name = x; t->a = ty; t->b = v; t->c = body; t->irr = irr; return t; }
 Term *mk_ref(TKind k, int id) { Term *t = mk(k); t->n = id; return t; }
-int term_poly(Term *t) {
-    if (!t) return 0;
-    switch (t->k) {
-    case T_U: return 1;
-    case T_DEF: return defs[t->n].poly;
-    case T_DATA: case T_ELIM: return datas[t->n].poly;
-    case T_CON: return datas[cons[t->n].data].poly;
-    case T_VAR: case T_INTERVAL: case T_I0: case T_I1: return 0;
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (term_poly(t->br[i].face) || term_poly(t->br[i].body)) return 1; return 0;
-    default: return term_poly(t->a) || term_poly(t->b) || term_poly(t->c) || term_poly(t->d);
-    }
-}
-/* a shift only matters for a polymorphic global: Nat^1 is Nat, List^1 is not List */
-static int ref_poly(TKind k, int id) {
+/* does the global take a level? */
+int ref_poly(TKind k, int id) {
     switch (k) { case T_DEF: return defs[id].poly; case T_DATA: case T_ELIM: return datas[id].poly; case T_CON: return datas[cons[id].data].poly; default: return 1; }
 }
-Term *mk_ref_lv(TKind k, int id, int lv) { Term *t = mk(k); t->n = id; t->lv = ref_poly(k, id) ? lv : 0; return t; }
-Term *shift_univ(Term *t, int k) {
-    if (!t || k == 0) return t;
+Term *mk_ref_l(TKind k, int id, Term *lt) { Term *t = mk(k); t->n = id; t->a = ref_poly(k, id) ? lt : NULL; return t; }
+Term *mk_lval(LVal l) { Term *t = mk(T_LVAL); t->lvl = l; return t; }
+Term *mk_u_l(LVal l) { Term *u = mk_u(0); u->a = mk_lval(l); return u; }
+
+/* a generic map over a term's level values (embedded levels, and nothing else carries them) */
+static Term *map_levels(Term *t, LVal (*f)(LVal, void *), void *data) {
+    if (!t) return NULL;
     Term *r;
     switch (t->k) {
-    case T_U: {
-        Term *u = mk_u(t->a ? 0 : t->n + k); u->pre = t->pre; u->a = t->a;
-        if (t->a && k) { Term *s = mk_term(T_LSUC, t->a, NULL, NULL, NULL); s->n = k; u->a = s; }
-        return u;
-    }
-    case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: return t;   /* levels are not universes */
-    case T_DEF: case T_DATA: case T_CON: case T_ELIM: return mk_ref_lv(t->k, t->n, t->lv + k);
-    case T_VAR: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_LVAL: return mk_lval(f(t->lvl, data));
+    case T_LMETA: return mk_lval(f(lv_meta(t->n), data));   /* a meta as a term becomes an embedded value */
+    case T_VAR: case T_LEVEL: case T_LZERO: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_SYS: {
-        r = mk(T_SYS); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = shift_univ(t->br[i].face, k); r->br[i].body = shift_univ(t->br[i].body, k); }
+        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = map_levels(t->br[i].face, f, data); r->br[i].body = map_levels(t->br[i].body, f, data); }
         return r;
     }
     default:
-        r = mk_term(t->k, shift_univ(t->a, k), shift_univ(t->b, k), shift_univ(t->c, k), shift_univ(t->d, k));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; r->pre = t->pre; return r;
+        r = mk_term(t->k, map_levels(t->a, f, data), map_levels(t->b, f, data), map_levels(t->c, f, data), map_levels(t->d, f, data));
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->pre = t->pre; r->lvl = t->lvl; return r;
     }
 }
-Val *def_val(int id, int lv) {
-    Def *d = &defs[id];
-    if (lv == 0) return d->vval;
-    if (lv >= d->nlv) {
-        int n = lv + 4; Val **nv = xalloc(n * sizeof(Val *)), **nt = xalloc(n * sizeof(Val *));
-        for (int i = 0; i < d->nlv; i++) { nv[i] = d->vval_lv[i]; nt[i] = d->vty_lv[i]; }
-        d->vval_lv = nv; d->vty_lv = nt; d->nlv = n;
+static LVal f_hidden(LVal l, void *data) { return lv_subst(l, -1, *(LVal *)data); }
+Term *subst_hidden(Term *t, LVal L) { return map_levels(t, f_hidden, &L); }
+typedef struct { LVal *sol; int m0; } MetaSubst;
+static LVal f_metas(LVal l, void *data) {
+    MetaSubst *ms = data;
+    for (int i = 0; i < l.n; i++) if (l.t[i].meta && l.t[i].var >= ms->m0) { int id = l.t[i].var; l = lv_subst_meta(l, id, ms->sol[id - ms->m0]); i = -1; }
+    return l;
+}
+Term *subst_metas(Term *t, LVal *sol, int m0) {
+    MetaSubst ms = { sol, m0 };
+    /* metas also occur as terms (T_LMETA) in level expressions: replace those first */
+    Term *r = map_levels(t, f_metas, &ms);
+    return r;
+}
+int term_mentions_hidden(Term *t) {
+    if (!t) return 0;
+    switch (t->k) {
+    case T_LVAL: return lv_mentions_hidden(t->lvl);
+    case T_SYS: for (int i = 0; i < t->nbr; i++) if (term_mentions_hidden(t->br[i].face) || term_mentions_hidden(t->br[i].body)) return 1; return 0;
+    default: return term_mentions_hidden(t->a) || term_mentions_hidden(t->b) || term_mentions_hidden(t->c) || term_mentions_hidden(t->d);
     }
-    if (!d->vval_lv[lv]) d->vval_lv[lv] = eval(NULL, shift_univ(d->val, lv));
-    return d->vval_lv[lv];
 }
-Val *def_ty(int id, int lv) {
-    Def *d = &defs[id];
-    if (lv == 0) return d->vty;
-    def_val(id, lv);
-    if (!d->vty_lv[lv]) d->vty_lv[lv] = eval(NULL, shift_univ(d->ty, lv));
-    return d->vty_lv[lv];
+
+/* ---- globals taken at a level ---- */
+typedef struct { LVal l; void *inst; } LMemo;
+typedef struct { LMemo *m; int n, cap; } LMemoList;
+static void *lmemo_get(LMemoList *ml, LVal L) { for (int i = 0; i < ml->n; i++) if (lv_eq(ml->m[i].l, L)) return ml->m[i].inst; return NULL; }
+static void lmemo_put(LMemoList *ml, LVal L, void *inst) {
+    if (ml->n == ml->cap) { ml->cap = ml->cap ? 2 * ml->cap : 8; LMemo *nm = xalloc(ml->cap * sizeof(LMemo)); for (int i = 0; i < ml->n; i++) nm[i] = ml->m[i]; ml->m = nm; }
+    ml->m[ml->n].l = L; ml->m[ml->n].inst = inst; ml->n++;
 }
-Term *con_arg_ty(Con *C, int j, int lv) { return shift_univ(C->args[j].ty, lv); }
-Term *data_ty(int d, int lv) { return shift_univ(datas[d].ty, lv); }
-Term *con_ty(int c, int lv) { return shift_univ(cons[c].ty, lv); }
+static LMemoList *con_memo, *data_memo; static int ncon_memo, ndata_memo;
+static LMemoList *memo_for(LMemoList **arr, int *n, int id) {
+    if (id >= *n) { int m = id + 16; LMemoList *na = xalloc(m * sizeof(LMemoList)); for (int i = 0; i < *n; i++) na[i] = (*arr)[i]; *arr = na; *n = m; }
+    return &(*arr)[id];
+}
+Val *def_at(int id, LVal L) {
+    Def *d = &defs[id]; int n;
+    if (!d->poly) return d->vval;
+    if (!lv_is_const(L, &n)) {
+        static LMemoList *dm; static int ndm;
+        LMemoList *ml = memo_for(&dm, &ndm, id); Val *r = lmemo_get(ml, L);
+        if (!r) { r = eval(NULL, subst_hidden(d->val, L)); lmemo_put(ml, L, r); }
+        return r;
+    }
+    if (n >= d->nat) {
+        int m = n + 4; Val **nv = xalloc(m * sizeof(Val *)), **nt = xalloc(m * sizeof(Val *));
+        for (int i = 0; i < d->nat; i++) { nv[i] = d->vval_at[i]; nt[i] = d->vty_at[i]; }
+        d->vval_at = nv; d->vty_at = nt; d->nat = m;
+    }
+    if (!d->vval_at[n]) d->vval_at[n] = eval(NULL, subst_hidden(d->val, L));
+    return d->vval_at[n];
+}
+Val *def_ty_at(int id, LVal L) {
+    Def *d = &defs[id]; int n;
+    if (!d->poly) return d->vty;
+    if (!lv_is_const(L, &n)) {
+        static LMemoList *tm; static int ntm;
+        LMemoList *ml = memo_for(&tm, &ntm, id); Val *r = lmemo_get(ml, L);
+        if (!r) { r = eval(NULL, subst_hidden(d->ty, L)); lmemo_put(ml, L, r); }
+        return r;
+    }
+    def_at(id, L);
+    if (!d->vty_at[n]) d->vty_at[n] = eval(NULL, subst_hidden(d->ty, L));
+    return d->vty_at[n];
+}
+static Con *con_instance(Con *C, LVal L) {
+    Con *r = xalloc(sizeof *r); *r = *C;
+    r->ty = subst_hidden(C->ty, L);
+    r->args = xalloc((C->nargs + 1) * sizeof(ConArg));
+    for (int j = 0; j < C->nargs; j++) {
+        ConArg *A = &r->args[j]; *A = C->args[j];
+        A->ty = subst_hidden(A->ty, L);
+        if (A->nidx) { A->idx = xalloc((A->nidx + 1) * sizeof(Term *)); for (int q = 0; q < A->nidx; q++) A->idx[q] = subst_hidden(C->args[j].idx[q], L); }
+        A->px = subst_hidden(A->px, L); A->py = subst_hidden(A->py, L);
+    }
+    Data *D = &datas[C->data];
+    if (D->nidx) { r->ridx = xalloc((D->nidx + 1) * sizeof(Term *)); for (int j = 0; j < D->nidx; j++) r->ridx[j] = subst_hidden(C->ridx[j], L); }
+    r->boundary = subst_hidden(C->boundary, L);
+    r->at = NULL; r->nat = 0;
+    return r;
+}
+Con *con_at(int ci, LVal L) {
+    Con *C = &cons[ci]; int n;
+    if (!datas[C->data].poly) return C;
+    if (!lv_is_const(L, &n)) {
+        LMemoList *ml = memo_for(&con_memo, &ncon_memo, ci); Con *r = lmemo_get(ml, L);
+        if (!r) { r = con_instance(C, L); lmemo_put(ml, L, r); }
+        return r;
+    }
+    if (n >= C->nat) { int m = n + 4; Con **na = xalloc(m * sizeof(Con *)); for (int i = 0; i < C->nat; i++) na[i] = C->at[i]; C->at = na; C->nat = m; }
+    if (!C->at[n]) C->at[n] = con_instance(C, L);
+    return C->at[n];
+}
+static Data *data_instance(Data *D, LVal L) {
+    Data *r = xalloc(sizeof *r); *r = *D;
+    r->ptys = xalloc((D->nparams + 1) * sizeof(Term *)); for (int i = 0; i < D->nparams; i++) r->ptys[i] = subst_hidden(D->ptys[i], L);
+    r->itys = xalloc((D->nidx + 1) * sizeof(Term *)); for (int j = 0; j < D->nidx; j++) r->itys[j] = subst_hidden(D->itys[j], L);
+    r->ty = subst_hidden(D->ty, L); r->lvl = lv_subst(D->lvl, -1, L);
+    r->at = NULL; r->nat = 0;
+    return r;
+}
+Data *data_at(int d, LVal L) {
+    Data *D = &datas[d]; int n;
+    if (!D->poly) return D;
+    if (!lv_is_const(L, &n)) {
+        LMemoList *ml = memo_for(&data_memo, &ndata_memo, d); Data *r = lmemo_get(ml, L);
+        if (!r) { r = data_instance(D, L); lmemo_put(ml, L, r); }
+        return r;
+    }
+    if (n >= D->nat) { int m = n + 4; Data **na = xalloc(m * sizeof(Data *)); for (int i = 0; i < D->nat; i++) na[i] = D->at[i]; D->at = na; D->nat = m; }
+    if (!D->at[n]) D->at[n] = data_instance(D, L);
+    return D->at[n];
+}
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d) { Term *t = mk(k); t->a = a; t->b = b; t->c = c; t->d = d; return t; }
 
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
@@ -113,7 +193,7 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
         if (t->n >= cut2) return mk_var(t->n + by2);
         if (t->n >= cut1) return mk_var(t->n + by1);
         return t;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_PI:  r = mk_pi(t->name, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1 + 1, by1, cut2 + 1, by2), t->irr); r->isi = t->isi; return r;
     case T_LAM: r = mk_lam(t->name, shift2(t->a, cut1 + 1, by1, cut2 + 1, by2), t->irr); r->isi = t->isi; return r;
     case T_SIGMA: r = mk_term(T_SIGMA, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1 + 1, by1, cut2 + 1, by2), NULL, NULL); r->name = t->name; return r;
@@ -128,7 +208,7 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
     default:
         r = mk_term(t->k, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1, by1, cut2, by2),
                     shift2(t->c, cut1, by1, cut2, by2), shift2(t->d, cut1, by1, cut2, by2));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->lv = t->lv; r->pre = t->pre; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->lvl = t->lvl; r->pre = t->pre; return r;
     }
 }
 Term *shift(Term *t, int cut, int by) { return shift2(t, cut, by, cut, by); }
@@ -137,7 +217,7 @@ Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
     Term *r;
     switch (t->k) {
     case T_VAR: if (t->n == idx) return v; if (t->n > idx) return mk_var(t->n - 1); return t;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return t;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_PI:  r = mk_pi(t->name, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), t->irr); r->isi = t->isi; return r;
     case T_LAM: r = mk_lam(t->name, subst_term(t->a, idx + 1, v), t->irr); r->isi = t->isi; return r;
     case T_SIGMA: r = mk_term(T_SIGMA, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), NULL, NULL); r->name = t->name; return r;
@@ -149,7 +229,7 @@ Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
     }
     default:
         r = mk_term(t->k, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx, v), subst_term(t->d, idx, v));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lv = t->lv; r->pre = t->pre; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; return r;
     }
 }
 
@@ -162,7 +242,8 @@ int term_eq(Term *a, Term *b) {
     case T_LEVEL: return 1;
     case T_LZERO: case T_LMETA: return a->n == b->n;
     case T_LSUC: return a->n == b->n && term_eq(a->a, b->a);
-    case T_DEF: case T_DATA: case T_CON: case T_ELIM: return a->n == b->n && a->lv == b->lv;
+    case T_DEF: case T_DATA: case T_CON: case T_ELIM: return a->n == b->n && term_eq(a->a, b->a);
+    case T_LVAL: return lv_eq(a->lvl, b->lvl);
     case T_INTERVAL: case T_I0: case T_I1: return 1;
     case T_SYS:
         if (a->nbr != b->nbr) return 0;
@@ -175,7 +256,7 @@ int term_mentions_var(Term *t, int idx) {
     if (!t) return 0;
     switch (t->k) {
     case T_VAR: return t->n == idx;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_DEF: case T_DATA: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return 0;
     case T_PI: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx + 1);
     case T_LAM: return term_mentions_var(t->a, idx + 1);
     case T_SIGMA: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx + 1);
@@ -199,6 +280,31 @@ static int numeral_of(Term *t, unsigned long long *out) {
     if (t->n != zi) return 0;
     *out = n; return 1;
 }
+static void tp(FILE *f, Term *t, const char **names, int depth, int prec);
+/* a level value: the hidden level reads as its offset alone (U n, f^n), others as lmax of lsuc^n applied to names */
+static void lv_tp(FILE *f, LVal l, const char **names, int depth, int prec) {
+    int hn;
+    if (lv_is_hidden_plus(l, &hn)) { fprintf(f, "%d", hn); return; }
+    int ns = l.n + (l.c > 0 || l.n == 0 ? 1 : 0);
+    if (ns > 1 && prec > 0) fputc('(', f);
+    for (int i = 0; i < l.n; i++) {
+        if (i + 1 < ns) fputs("lmax ", f);
+        for (int q = 0; q < l.t[i].off; q++) fputs("lsuc (", f);
+        if (l.t[i].meta) fprintf(f, "?%d", l.t[i].var);
+        else if (l.t[i].var == -1) fputs("L", f);
+        else { int lv = l.t[i].var; if (lv >= 0 && lv < depth && names[lv]) fprintf(f, "%s", names[lv]); else fprintf(f, "#l%d", lv); }
+        for (int q = 0; q < l.t[i].off; q++) fputc(')', f);
+        if (i + 1 < ns) fputc(' ', f);
+    }
+    if (l.c > 0 || l.n == 0) fprintf(f, "%d", l.c);
+    if (ns > 1 && prec > 0) fputc(')', f);
+}
+static void ref_lvl_tp(FILE *f, Term *t, const char **names, int depth) {
+    int hn;
+    if (!t->a) return;
+    if (t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) fprintf(f, "^%d", hn); return; }
+    fputs("^{", f); tp(f, t->a, names, depth, 0); fputc('}', f);
+}
 static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
     unsigned long long num;
     if ((t->k == T_APP || t->k == T_CON) && numeral_of(t, &num)) { fprintf(f, "%llu", num); return; }
@@ -207,7 +313,13 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
         int lvl = depth - 1 - t->n;
         if (lvl >= 0 && lvl < depth && names[lvl]) fprintf(f, "%s", names[lvl]); else fprintf(f, "#%d", t->n);
         break; }
-    case T_U: fputs(t->pre ? "Pre" : "U", f); if (t->a) { fputs(" {", f); tp(f, t->a, names, depth, 0); fputc('}', f); } else if (t->n) fprintf(f, " %d", t->n); break;
+    case T_U: {
+        int hn;
+        fputs(t->pre ? "Pre" : "U", f);
+        if (t->a && t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) fprintf(f, " %d", hn); }   /* the hidden level + n reads as U n */
+        else if (t->a) { fputs(" {", f); tp(f, t->a, names, depth, 0); fputc('}', f); }
+        else if (t->n) fprintf(f, " %d", t->n);
+        break; }
     case T_LEVEL: fputs("Level", f); break;
     case T_LZERO: fprintf(f, "%d", t->n); break;
     case T_LMETA: fprintf(f, "?%d", t->n); break;
@@ -220,10 +332,11 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
         if (prec > 1) fputc(')', f);
         break; }
     case T_LMAX: if (prec > 0) fputc('(', f); fputs("lmax ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); if (prec > 0) fputc(')', f); break;
-    case T_DEF: fprintf(f, "%s", defs[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
-    case T_DATA: fprintf(f, "%s", datas[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
-    case T_CON: fprintf(f, "%s", cons[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
-    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
+    case T_DEF: fprintf(f, "%s", defs[t->n].name); ref_lvl_tp(f, t, names, depth); break;
+    case T_DATA: fprintf(f, "%s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
+    case T_CON: fprintf(f, "%s", cons[t->n].name); ref_lvl_tp(f, t, names, depth); break;
+    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
+    case T_LVAL: lv_tp(f, t->lvl, names, depth, prec); break;
     case T_INTERVAL: fputs("I", f); break;
     case T_I0: fputs("i0", f); break;
     case T_I1: fputs("i1", f); break;
@@ -479,6 +592,7 @@ Val *vlevel(void) { return mkval(V_LEVEL); }
 LVal eval_level(Env *env, Term *t) {
     switch (t->k) {
     case T_LZERO: return lv_const(t->n);
+    case T_LVAL: return t->lvl;
     case T_LMETA: return lv_meta(t->n);
     case T_LSUC: return lv_add(eval_level(env, t->a), t->n);
     case T_LMAX: return lv_max(eval_level(env, t->a), eval_level(env, t->b));
@@ -495,8 +609,11 @@ Term *quote_level(int depth, LVal l) {
     Term *r = NULL;
     for (int i = 0; i < l.n; i++) {
         Term *x;
-        if (l.t[i].meta) { x = mk_term(T_LMETA, NULL, NULL, NULL, NULL); x->n = l.t[i].var; } else x = mk_var(depth - 1 - l.t[i].var);
+        if (l.t[i].meta) { x = mk_term(T_LMETA, NULL, NULL, NULL, NULL); x->n = l.t[i].var; }
+        else if (l.t[i].var == -1) { LVal h = lv_var(-1); h.t[0].off = l.t[i].off; x = mk_lval(h); continue_hidden: r = r ? mk_term(T_LMAX, r, x, NULL, NULL) : x; continue; }
+        else x = mk_var(depth - 1 - l.t[i].var);
         if (l.t[i].off) { Term *s = mk_term(T_LSUC, x, NULL, NULL, NULL); s->n = l.t[i].off; x = s; }
+        if (0) goto continue_hidden;
         r = r ? mk_term(T_LMAX, r, x, NULL, NULL) : x;
     }
     if (l.c || !r) { Term *z = mk_term(T_LZERO, NULL, NULL, NULL, NULL); z->n = l.c; r = r ? mk_term(T_LMAX, r, z, NULL, NULL) : z; }
@@ -514,8 +631,8 @@ enum { N_IH = 1, N_LINE_DOM, N_LINE_COD_V, N_TRANSP_V, N_LINE_IOR, N_LINE_IAND, 
        N_CONST, N_ELIM_MOTIVE_LINE, N_ELIM_SIDES,
        N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES,
        N_ELIM_PATH_IH, N_TRANSP_MAP, N_HITTR_SIDES };
-typedef struct { int code; int i1, i2, i3; VList cap; } Native;
-typedef struct { int n; Val *v[8]; } Caps;
+typedef struct { int code; int i1, i2, i3; VList cap;  LVal l; } Native;
+typedef struct { int n; Val *v[8]; LVal l; } Caps;
 
 static Val *native_apply(Native *nt, Val *arg);
 typedef struct { Val *psi, *forall, *ungl, *Teg, *tf, *i; int F; } TrSides;
@@ -532,7 +649,7 @@ static Val *gcomp_body(int k, const Face *f, void *data);
 static Val *transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv);
 static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0);
 static Val *hcompU_body(int k, const Face *f, void *data);
-static Val *builtin_val_lv(const char *name, int lv);
+static Val *builtin_at(const char *name, LVal L);
 static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
 Val *inst(Clo *c, Val *v) {
@@ -559,7 +676,7 @@ static Val *elim_apply_list(int data, VList *args);
    cap = base (params, motive, methods), tele (params, previous args), ys, aj; i1=data i2=con i3=j; ys count = cap.n - nb - nt - 1 */
 static Val *ih_apply(Native *c, Val *y) {
     int nb = datas[c->i1].nparams + 1 + datas[c->i1].ncons;
-    Con *C = &cons[c->i2]; int j = c->i3; int nt = datas[c->i1].nparams + j;
+    Con *C = con_at(c->i2, c->l); int j = c->i3; int nt = datas[c->i1].nparams + j;
     ConArg *ca = &C->args[j];
     Native *d = xalloc(sizeof *d); *d = *c; d->cap = vl_copy(&c->cap);
     /* insert y before the trailing aj */
@@ -582,11 +699,11 @@ static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
 static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 static Val *elim_reduce(int data, VList *args) {
-    Data *D = &datas[data]; elim_data_cur = data;
+    Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, k = D->ncons;
     Val *target = args->a[args->n - 1].v;
     if (target->k != V_CON) return NULL;
-    Con *c = &cons[target->n];
+    Con *c = con_at(target->n, target->lvl);
     if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
     Val *res = args->a[np + 1 + c->ci].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
@@ -603,7 +720,7 @@ static Val *elim_reduce(int data, VList *args) {
             continue;
         }
         if (!c->args[j].isrec) continue;
-        Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = data; ih->i2 = target->n; ih->i3 = j;
+        Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = data; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
         for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
         for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);
         for (int i = 0; i < j; i++) vl_push(&ih->cap, target->args.a[np + i].v, 0);
@@ -662,7 +779,7 @@ static Val *elim_hcomp(int data, VList *args) {
     int np = D->nparams, k = D->ncons, m = D->nidx;
     Val *t = args->a[args->n - 1].v;
     if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
-    Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lv = elim_lv;
+    Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
     for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
     Native *nt = xalloc(sizeof *nt); nt->code = N_ELIM_MOTIVE_LINE; nt->i1 = m;
     vl_push(&nt->cap, args->a[np].v, 0);
@@ -672,7 +789,7 @@ static Val *elim_hcomp(int data, VList *args) {
     return vcomp(line, t->b, vnative(N_ELIM_SIDES, 0, 0, 0, 2, E, t->c), vapp(E, t->dom, 0));
 }
 static Val *elim_apply_list(int data, VList *args) {
-    Val *e = mkval(V_NEU); e->h = H_ELIM; e->n = data; e->lv = elim_lv;
+    Val *e = mkval(V_NEU); e->h = H_ELIM; e->n = data; e->lvl = elim_lvl;
     Val *r = e;
     for (int i = 0; i < args->n; i++) r = vapp(r, args->a[i].v, args->a[i].irr);
     return r;
@@ -718,14 +835,14 @@ Val *vapp(Val *f, Val *a, int irr) {
             Val *v = neu_app(f, ar);
             Data *D = &datas[f->n];
             int arity = D->nparams + 1 + D->ncons + D->nidx + 1;
-            if (v->args.n == arity) { elim_lv = f->lv; Val *r = elim_reduce(f->n, &v->args); if (r) return r; r = elim_hcomp(f->n, &v->args); if (r) return r; }
+            if (v->args.n == arity) { elim_lvl = f->lvl; Val *r = elim_reduce(f->n, &v->args); if (r) return r; r = elim_hcomp(f->n, &v->args); if (r) return r; }
             return v;
         }
         return neu_app(f, ar);
     case V_DATA: return neu_app(f, ar);
     case V_CON: {
         Val *v = neu_app(f, ar);
-        Con *C = &cons[f->n]; int np = datas[C->data].nparams;
+        Con *C = con_at(f->n, f->lvl); int np = datas[C->data].nparams;
         if (C->nint > 0 && v->args.n == np + C->nargs + C->nint) {   /* a path constructor on a face of its boundary is the boundary */
             Env *env = NULL;
             for (int i = 0; i < v->args.n; i++) env = env_push(env, v->args.a[i].v);
@@ -785,10 +902,11 @@ Val *eval(Env *env, Term *t) {
     case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->clo.env = env; v->clo.t = t->a; return v; }
     case T_APP: return vapp(eval(env, t->a), eval(env, t->b), t->irr);
     case T_LET: return eval(env_push(env, eval(env, t->b)), t->c);
-    case T_DEF: return def_val(t->n, t->lv);
-    case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lv = t->lv; return v; }
-    case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lv = t->lv; return v; }
-    case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lv = t->lv; return v; }
+    case T_DEF: return def_at(t->n, t->a ? eval_level(env, t->a) : lv_const(0));
+    case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
+    case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
+    case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
+    case T_LVAL: return vl(t->lvl);
     case T_INTERVAL: return vinterval();
     case T_I0: return vi(iv_zero());
     case T_I1: return vi(iv_one());
@@ -871,7 +989,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
         return vsys(br, v->nbr);
     }
     case V_DATA: case V_CON: {
-        Val *r = mkval(v->k); r->n = v->n; r->lv = v->lv; r->args = (VList){0};
+        Val *r = mkval(v->k); r->n = v->n; r->lvl = v->lvl; r->args = (VList){0};
         for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } a.irr = 0; if (v->k == V_CON) r = vapp(r, a.v, 0); else vl_push_arg(&r->args, a); }
         return r;
     }
@@ -881,7 +999,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
         Val *head;
         switch (v->h) {
         case H_VAR: head = vvar(v->n); break;
-        case H_ELIM: head = mkval(V_NEU); head->h = H_ELIM; head->n = v->n; head->lv = v->lv; break;
+        case H_ELIM: head = mkval(V_NEU); head->h = H_ELIM; head->n = v->n; head->lvl = v->lvl; break;
         case H_TRANSP: head = vtransp(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s)); break;
         case H_HCOMP: head = vhcomp(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
         case H_OUTS: head = vouts(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
@@ -980,12 +1098,12 @@ static Val *native_apply(Native *nt, Val *arg) {
     }
     case N_TFILL: return vtransp(vnative(N_LINE_IAND, 0, 0, 0, 2, CAP(nt, 0), arg), ior(CAP(nt, 1), ineg(arg)), CAP(nt, 2));
     case N_DATA_ARG_LINE: {      /* λi. A_j evaluated at (params of line i, fills k<j at i); cap: line, fill_0..fill_{j-1}; i1=con, i2=j */
-        Con *C = &cons[nt->i1]; int np = datas[C->data].nparams;
         Val *Di = vapp(CAP(nt, 0), arg, 0); if (Di->k != V_DATA) die("internal: data line expected");
+        Con *C = con_at(nt->i1, Di->lvl); int np = datas[C->data].nparams;
         Env *e = NULL;
         for (int i = 0; i < np; i++) e = env_push(e, Di->args.a[i].v);
         for (int k = 0; k < nt->i2; k++) e = env_push(e, vapp(CAP(nt, 1 + k), arg, 0));
-        return eval(e, con_arg_ty(C, nt->i2, Di->lv));
+        return eval(e, C->args[nt->i2].ty);
     }
     case N_ELIM_MOTIVE_LINE: {   /* λk. P idx (fill k); cap: P, idx.., fill; i1 = #idx */
         Val *P = CAP(nt, 0);
@@ -1026,10 +1144,11 @@ static Val *native_apply(Native *nt, Val *arg) {
         return vsys_faces(2, phis, gcomp_body, &c);
     }
     case N_HITTR_SIDES: {        /* λj. [ psi_k -> squeeze of the boundary at stage ~j, phi -> u0 ]; cap: line, phi, u0, fills..; i1 = con */
-        Con *C = &cons[nt->i1]; int np = datas[C->data].nparams;
+        int np = datas[cons[nt->i1].data].nparams;
         Val *line = CAP(nt, 0), *phi = CAP(nt, 1), *u0 = CAP(nt, 2);
         Val *stage = ineg(arg);
         Val *Dst = vapp(line, stage, 0);   /* the type at the stage: its parameters */
+        Con *C = con_at(nt->i1, Dst->lvl);
         Env *env = NULL;
         for (int i = 0; i < np; i++) env = env_push(env, Dst->args.a[i].v);
         for (int j = 0; j < C->nargs; j++) env = env_push(env, vapp(CAP(nt, 3 + j), stage, 0));
@@ -1108,18 +1227,18 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
         return res;
     }
     case V_DATA: {
-        Data *D = &datas[Ai->n];
+        Data *D = data_at(Ai->n, Ai->lvl);
         if (D->nparams + D->nidx == 0) return u0;
         if (D->hit && u0->k == V_NEU && u0->h == H_HCOMP && u0->a->k == V_DATA) {   /* transp of a formal composition: the composition of the transports */
             Val *D1 = vapp(line, ione(), 0);
             return vhcomp(D1, u0->b, vnative(N_TRANSP_MAP, 0, 0, 0, 3, line, phi, u0->c), vtransp(line, phi, u0->dom));
         }
         if (u0->k != V_CON) return neu_transp(line, phi, u0);
-        Con *C = &cons[u0->n];
+        Con *C = con_at(u0->n, u0->lvl);
         int np = D->nparams;
         /* transport each argument along its own line, with fillers for the earlier ones */
         Val **fills = xalloc((C->nargs + 1) * sizeof(Val *));
-        Val *res = mkval(V_CON); res->n = u0->n; res->lv = u0->lv;
+        Val *res = mkval(V_CON); res->n = u0->n; res->lvl = u0->lvl;
         Val *D1 = vapp(line, ione(), 0);
         for (int i = 0; i < np; i++) vl_push(&res->args, D1->args.a[i].v, 1);
         for (int j = 0; j < C->nargs; j++) {
@@ -1131,7 +1250,7 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
             fills[j] = vtfill(aline, phi, aj);
         }
         if (C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r) */
-            Val *r = mkval(V_CON); r->n = res->n; r->lv = res->lv;
+            Val *r = mkval(V_CON); r->n = res->n; r->lvl = res->lvl;
             for (int i = 0; i < res->args.n; i++) vl_push_arg(&r->args, res->args.a[i]);
             for (int q = 0; q < C->nint; q++) vl_push(&r->args, u0->args.a[np + C->nargs + q].v, 0);
             res = r;
@@ -1208,19 +1327,17 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
     }
     case V_GLUE: return hcomp_glue(A, phi, u, u0);
     case V_U: {   /* hcomp in the universe is the Glue type of the lid, glued along transport back down the sides (CCHM 6) */
-        int lvn;
-        if (!lv_is_const(A->lvl, &lvn)) die("hcomp in a universe at a level with variables needs the level-polymorphic transpEquiv (levels, stage L2)");
-        Caps c = { lvn, { u } };
+        Caps c = { 0, { u } }; c.l = A->lvl;
         Val *Te = vsys_faces(1, &phi, hcompU_body, &c);
         Val *g = vglue(u0, phi, Te); if (g->k == V_GLUE) g->lvl = A->lvl;
         return g;
     }
     case V_DATA: {
-        Data *D = &datas[A->n];
+        Data *D = data_at(A->n, A->lvl);
         if (D->nidx > 0 || D->hit) return neu_hcomp(A, phi, u, u0);
         if (u0->k != V_CON || !sides_all_con(u, u0->n)) return neu_hcomp(A, phi, u, u0);
-        Con *C = &cons[u0->n]; int np = D->nparams;
-        Val *res = mkval(V_CON); res->n = u0->n; res->lv = u0->lv;
+        Con *C = con_at(u0->n, u0->lvl); int np = D->nparams;
+        Val *res = mkval(V_CON); res->n = u0->n; res->lvl = u0->lvl;
         for (int i = 0; i < np; i++) vl_push(&res->args, A->args.a[i].v, 1);
         Val **fills = xalloc((C->nargs + 1) * sizeof(Val *));
         Val *cline = vnative(N_CONST, 0, 0, 0, 1, A);
@@ -1252,9 +1369,9 @@ Val *hcomp_path_apply(void *data, Val *j) {
 
 
 /* ---- Glue types (CCHM section 6; the Kan operations follow Agda's Glue.hs) ---- */
-static Val *builtin_val_lv(const char *name, int lv) {
-    for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) return def_val(i, lv);
-    die("Glue needs the definition '%s' (in the prelude)", name);
+static Val *builtin_at(const char *name, LVal L) {
+    for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) return def_at(i, L);
+    die("internal: the prelude definition %s is needed", name);
     return NULL;
 }
 Val *vglue(Val *A, Val *phi, Val *Te) {
@@ -1316,7 +1433,7 @@ static Val *pe_body(int k, const Face *f, void *data) {
     Val *c = vnative(N_CONST, 0, 0, 0, 1, R(d->a1)); p->b = c;
     return p;
 }
-typedef struct { Val *Te1, *A1, *a1, *psi, *forall, *u0, *tf; int lv; } FibData;
+typedef struct { Val *Te1, *A1, *a1, *psi, *forall, *u0, *tf; LVal lvl; } FibData;
 static Val *glue_fiber_body(int k, const Face *f, void *data) {
     FibData *d = data; (void)k;
     Val *Te = vsys_at(R(d->Te1), NULL);
@@ -1326,10 +1443,10 @@ static Val *glue_fiber_body(int k, const Face *f, void *data) {
     PeData pd = { R(d->u0), R(d->tf), a1 };
     Val *phis[2] = { psi, forall };
     Val *pe = vsys_faces(2, phis, pe_body, &pd);
-    Val *ep = builtin_val_lv("equivProof", d->lv);
+    Val *ep = builtin_at("equivProof", d->lvl);
     Val *fib = vapp(vapp(vapp(vapp(vapp(vapp(ep, T1, 0), A1, 0), w, 0), a1, 0), ior(psi, forall), 0), pe, 0);
     if (fib->k == V_INS) return fib->a;
-    Val *fiberT = vapp(vapp(vapp(vapp(builtin_val_lv("fiber", d->lv), T1, 0), A1, 0), vproj(w, 1), 0), a1, 0);
+    Val *fiberT = vapp(vapp(vapp(vapp(builtin_at("fiber", d->lvl), T1, 0), A1, 0), vproj(w, 1), 0), a1, 0);
     return vouts(fiberT, ior(psi, forall), pe, fib);
 }
 static Val *glue_a1p_body(int k, const Face *f, void *data) {
@@ -1355,8 +1472,7 @@ static Val *transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv) {
     Val *a1 = vgcomp(lineA, ior(psi, forall), sides, vapp(ungl, izero(), 0));
     Val *phi1 = vi(iv_subst(phig->iv, F, iv_one()));
     Val *Te1 = subst_val(Teg, F, iv_one()), *A1 = subst_val(Ab, F, iv_one());
-    int agl; if (!lv_is_const(Ag->lvl, &agl)) die("transport in a Glue type at a level with variables needs the level-polymorphic equivProof (levels, stage L2)");
-    FibData fd = { Te1, A1, a1, psi, forall, u0, tf, agl };
+        FibData fd = { Te1, A1, a1, psi, forall, u0, tf, Ag->lvl };
     Val *fibsys = vsys_faces(1, &phi1, glue_fiber_body, &fd);
     Val *ts = vsys_map(fibsys, proj1, NULL), *alphas = vsys_map(fibsys, proj2, NULL);
     Val *a1p = vhcomp(A1, ior(phi1, psi), vnative(N_GLUE_A1P_SIDES, 0, 0, 0, 6, phi1, psi, alphas, ts, Te1, a1), a1);
@@ -1378,11 +1494,11 @@ static Val *glue_hc_body(int k, const Face *f, void *data) {
     return vapp(equiv_fun(Te), t, 0);
 }
 static Val *hcompU_body(int k, const Face *f, void *data) {
-    Caps *c = data; Val *u = restrict_val(c->v[0], f); int lv = c->n;
+    Caps *c = data; Val *u = restrict_val(c->v[0], f);
     (void)k;
     Val *p = mkval(V_PAIR);
     p->a = vapp(u, ione(), 0);                                        /* the type at the lid */
-    p->b = vapp(builtin_val_lv("transpEquiv", lv), vnative(N_LINE_IOR, 1, 0, 0, 2, u, izero()), 0);   /* λi. u (i0 ∨ ~i) = u (~i): from the lid back to the base */
+    p->b = vapp(builtin_at("transpEquiv", c->l), vnative(N_LINE_IOR, 1, 0, 0, 2, u, izero()), 0);   /* λi. u (i0 ∨ ~i) = u (~i): from the lid back to the base */
     return p;
 }
 static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0) {
@@ -1441,9 +1557,9 @@ Term *quote(int depth, Val *v) {
     }
     case V_NEU: case V_DATA: case V_CON: {
         Term *h;
-        if (v->k == V_DATA) h = mk_ref_lv(T_DATA, v->n, v->lv);
-        else if (v->k == V_CON) h = mk_ref_lv(T_CON, v->n, v->lv);
-        else if (v->h == H_ELIM) h = mk_ref_lv(T_ELIM, v->n, v->lv);
+        if (v->k == V_DATA) h = mk_ref_l(T_DATA, v->n, quote_level(depth, v->lvl));
+        else if (v->k == V_CON) h = mk_ref_l(T_CON, v->n, quote_level(depth, v->lvl));
+        else if (v->h == H_ELIM) h = mk_ref_l(T_ELIM, v->n, quote_level(depth, v->lvl));
         else if (v->h == H_TRANSP) h = mk_term(T_TRANSP, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
         else if (v->h == H_HCOMP) h = mk_term(T_HCOMP, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
         else if (v->h == H_OUTS) h = mk_term(T_OUTS, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
@@ -1484,6 +1600,8 @@ static int conv_sys(int depth, Val *a, Val *b) {   /* partial elements agree on 
     return 1;
 }
 static int conv1(int depth, Val *a, Val *b);
+/* the levels of two occurrences of a global agree (only polymorphic globals take one) */
+static int lvl_conv(TKind k, int id, LVal a, LVal b) { return !ref_poly(k, id) || lv_enforce_eq(a, b) == 1; }
 /* conversion is transactional: level constraints added by a comparison that fails are rolled back */
 int conv(int depth, Val *a, Val *b) {
     LMark m = lstore_mark();
@@ -1534,9 +1652,9 @@ static int conv1(int depth, Val *a, Val *b) {
         if (a->h == H_TRANSP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c))) return 0; }
         else if (a->h == H_HCOMP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c) && conv(depth, a->dom, b->dom))) return 0; }
         else if (a->h == H_OUTS || a->h == H_UNGLUE) { if (!conv(depth, a->dom, b->dom)) return 0; }
-        else if (a->n != b->n || a->lv != b->lv) return 0;
+        else if (a->n != b->n || !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) return 0;
         return conv_spine(depth, &a->args, &b->args);
-    case V_DATA: case V_CON: return a->n == b->n && a->lv == b->lv && conv_spine(depth, &a->args, &b->args);
+    case V_DATA: case V_CON: return a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl) && conv_spine(depth, &a->args, &b->args);
     default: return 0;
     }
 }

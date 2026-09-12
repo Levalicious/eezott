@@ -81,13 +81,23 @@ typedef struct SDecl {
 
 SDecl *parse_program(const char *src, const char *fname);
 
+/* ---------------- universe levels (values) ---------------- */
+
+/* An element of the free max-plus algebra on the context's level variables,
+ * max(c, l_1 + n_1, ..., l_k + n_k), in normal form: variables by de Bruijn
+ * level, each at most once, sorted; the constant only when no summand
+ * dominates it. The atom with var -1 is the hidden level of the global
+ * being elaborated (see lv_hidden). */
+typedef struct { int var, off, meta; } LAtom;   /* meta: the atom is a flexible variable (by id), else a rigid one (by de Bruijn level) */
+typedef struct { int c; LAtom *t; int n; } LVal;
+
 /* ---------------- core terms (de Bruijn indices) ---------------- */
 
 typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_ELIM,
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
                T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
                T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE,
-               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA } TKind;
+               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA, T_LVAL } TKind;
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -98,8 +108,9 @@ struct Term {
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
     int n;              /* T_VAR index; T_U constant level (a NULL); T_LZERO the constant; T_LSUC how many; T_LMETA the meta's id; T_GLUE constant level (d NULL);
                            T_DEF/T_DATA/T_CON/T_ELIM global id */
-    int lv;             /* T_DEF/T_DATA/T_CON/T_ELIM: universe shift of the global (every U n lifted to U n+lv) */
+    LVal lvl;           /* T_LVAL: an embedded level value (atoms are context levels, so it is stable under binders) */
     Term *a, *b, *c, *d;/* T_U: a=level term (NULL: constant n); T_LSUC: a + n; T_LMAX: a b; T_GLUE: d=level term (NULL: constant n);
+                           T_DEF/T_DATA/T_CON/T_ELIM: a=the level the global is taken at (NULL: 0 / not polymorphic);
                            T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
                            T_IAND/T_IOR: a b; T_INEG: a; T_PATHP: a=line b=x c=y; T_PAPP: a=path b=r c=x d=y;
                            T_PARTIAL: a=phi b=A; T_TRANSP: a=line b=phi c=u0; T_HCOMP: a=A b=phi c=u d=u0;
@@ -108,10 +119,12 @@ struct Term {
                            T_GLUE: a=A b=phi c=Te; T_GLUEEL: a=ts b=a c=the Glue type; T_UNGLUE: a=b b=A c=phi d=Te */
     TBranch *br; int nbr; /* T_SYS */
 };
-Term *mk_var(int i); Term *mk_u(int l); Term *mk_upre(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
+Term *mk_var(int i); Term *mk_u(int l); Term *mk_upre(int l); Term *mk_u_l(LVal l); Term *mk_lval(LVal l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
 Term *mk_lam(const char *x, Term *body, int irr); Term *mk_app(Term *f, Term *a, int irr);
-Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id); Term *mk_ref_lv(TKind k, int id, int lv);
-Term *shift_univ(Term *t, int k);                   /* lift every universe level by k (globals: shift += k) */
+Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id); Term *mk_ref_l(TKind k, int id, Term *lt);
+Term *subst_hidden(Term *t, LVal L);                /* instantiate the hidden level of a global's term */
+int term_mentions_hidden(Term *t);
+Term *subst_metas(Term *t, LVal *sol, int m0);      /* replace every meta ?m (m >= m0) by sol[m - m0] */
 Term *subst_term(Term *t, int idx, Term *v);         /* substitute a closed term for a variable */
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d);
 Term *shift(Term *t, int cut, int by);              /* free vars >= cut get +by */
@@ -147,12 +160,11 @@ int iv_mentions(IVal a, int level);
  * max(c, l_1 + n_1, ..., l_k + n_k), in normal form: variables by de Bruijn
  * level, each at most once, sorted; the constant only when no summand
  * dominates it. */
-typedef struct { int var, off, meta; } LAtom;   /* meta: the atom is a flexible variable (by id), else a rigid one (by de Bruijn level) */
-typedef struct { int c; LAtom *t; int n; } LVal;
-LVal lv_const(int n); LVal lv_var(int level); LVal lv_meta(int id); LVal lv_add(LVal a, int k); LVal lv_max(LVal a, LVal b);
+LVal lv_const(int n); LVal lv_var(int level); LVal lv_meta(int id); LVal lv_hidden(void); LVal lv_add(LVal a, int k); LVal lv_max(LVal a, LVal b);
 int lv_eq(LVal a, LVal b); int lv_leq(LVal a, LVal b); int lv_is_const(LVal a, int *n);
 LVal lv_subst(LVal a, int var, LVal s); LVal lv_subst_meta(LVal a, int id, LVal s);
-int lv_has_meta(LVal a);
+int lv_has_meta(LVal a); int lv_mentions_hidden(LVal a);
+int lv_is_hidden_plus(LVal a, int *n);        /* exactly the hidden level + n? */
 
 /* The constraint store: an append-only log of edges y >= x + k between level
  * atoms (the constant 0, rigid variables, metas), consistent iff it has no
@@ -168,6 +180,11 @@ LMark lstore_mark(void); void lstore_rollback(LMark m);
 int lv_meta_new(void);
 int lv_enforce_leq(LVal a, LVal b); int lv_enforce_eq(LVal a, LVal b);
 int lstore_nedges(void); int lstore_ndeferred(void);
+int lstore_nmetas(void);
+/* solve the metas m0.. by their lower bounds (Bellman-Ford over the store); 1 if every constraint then holds,
+   else 0 with *bad the first meta whose upper bound is violated (generalization: L2c) */
+int lstore_solve(int m0, LVal *sol, int *bad);
+const char *lstore_bad_constraint(void);       /* the constraint lstore_solve found violated */
 
 /* ---------------- values ---------------- */
 
@@ -184,9 +201,8 @@ typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
     int pre;            /* V_U: the sort Pre l of pretypes */
-    LVal lvl;           /* V_U: the level; V_L: the level value; V_GLUE: the universe level */
+    LVal lvl;           /* V_U: the level; V_L: the level value; V_GLUE: the universe level; V_DATA/V_CON/H_ELIM: the level the global is taken at */
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
-    int lv;             /* V_DATA/V_CON/H_ELIM: universe shift; V_GLUE: the universe level */
     HKind h;
     Clo clo;            /* V_LAM body; V_PI / V_SIGMA codomain */
     Val *dom;           /* V_PI / V_SIGMA domain */
@@ -227,15 +243,17 @@ int val_mentions_ivar(int depth, Val *v, int level);
 
 /* ---------------- globals ---------------- */
 
-typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_lv, **vval_lv; int nlv; int poly; } Def;
-/* poly: the global mentions a universe (directly or through another polymorphic global); only then does a universe shift change it */
+typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly; } Def;
+/* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
+   and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
     const char *name; Term *ty; int irr;   /* type of the argument, under [params, previous args] */
     int isrec, npi;                        /* recursive: type is (y_1..y_npi) -> D params idx */
     Term **idx; int nidx;                  /* index terms of the recursive occurrence, under [params, prev args, y's] */
     int isrecpath; Term *px, *py;          /* recursive path argument: type is Path (D params) px py (endpoints under [params, prev args]) */
 } ConArg;
-typedef struct {
+typedef struct Con Con; typedef struct Data Data;
+struct Con {
     const char *name; int data, ci; Term *ty; int line;
     ConArg *args; int nargs; int nrec;
     Term **ridx;                           /* return index terms, under [params, args] */
@@ -243,22 +261,23 @@ typedef struct {
     Term *boundary;                        /* its boundary: a system under [params, args, intervals] (NULL: none) */
     int bparams;                           /* the boundary mentions the parameters (they are then kept at run time) */
     int pathmethod;                        /* the eliminator's method is a PathP (one interval, boundary at both ends) */
-} Con;
-typedef struct {
+    Con **at; int nat;                     /* instances at constant levels (con_at) */
+};
+struct Data {
     const char *name; int line;
-    int nparams, nidx, lvl;
+    int nparams, nidx; LVal lvl;           /* lvl: the universe level of the type (under the hidden level when poly) */
     Term **ptys;                           /* param types, each under the previous params */
     Term **itys;                           /* index types, each under [params, previous indices] */
     Term *ty;                              /* the type of the data constant: params -> indices -> U lvl */
     int *cons; int ncons;
     int poly;
     int hit;                               /* has path constructors: hcomp is a normal form */
-} Data;
+    Data **at; int nat;                    /* instances at constant levels (data_at) */
+};
 
-Val *def_val(int id, int lv); Val *def_ty(int id, int lv);   /* a definition at a universe shift (memoised) */
-Term *con_arg_ty(Con *C, int j, int lv);                     /* a constructor argument's type at a shift */
-Term *data_ty(int d, int lv); Term *con_ty(int c, int lv);
-int term_poly(Term *t);                                      /* does the term mention a universe (or a polymorphic global)? */
+Val *def_at(int id, LVal L); Val *def_ty_at(int id, LVal L);   /* a definition taken at a level (memoised for constants) */
+Data *data_at(int d, LVal L); Con *con_at(int ci, LVal L);   /* a data type / constructor taken at a level: its terms instantiated */
+int ref_poly(TKind k, int id);                               /* does the global take a level? */
 
 extern Def *defs; extern int ndefs;
 extern Data *datas; extern int ndatas;

@@ -9,6 +9,8 @@
  * natural numbers, so l + n >= n dominates every constant c <= n.
  */
 #include "tt.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int atom_lt(LAtom a, LAtom b) { return a.meta != b.meta ? a.meta < b.meta : a.var < b.var; }
@@ -38,6 +40,9 @@ LVal lv_const(int n) { LVal a = { n, NULL, 0 }; return a; }
 LVal lv_var(int level) { LVal a = { 0, xalloc(sizeof(LAtom)), 1 }; a.t[0].var = level; a.t[0].off = 0; a.t[0].meta = 0; return a; }
 LVal lv_meta(int id) { LVal a = { 0, xalloc(sizeof(LAtom)), 1 }; a.t[0].var = id; a.t[0].off = 0; a.t[0].meta = 1; return a; }
 int lv_has_meta(LVal a) { for (int i = 0; i < a.n; i++) if (a.t[i].meta) return 1; return 0; }
+LVal lv_hidden(void) { return lv_var(-1); }
+int lv_mentions_hidden(LVal a) { for (int i = 0; i < a.n; i++) if (!a.t[i].meta && a.t[i].var == -1) return 1; return 0; }
+int lv_is_hidden_plus(LVal a, int *n) { if (a.n != 1 || a.t[0].meta || a.t[0].var != -1 || a.c != 0) return 0; *n = a.t[0].off; return 1; }
 LVal lv_add(LVal a, int k) {
     LVal r = lv_copy(a);
     for (int i = 0; i < r.n; i++) r.t[i].off += k;
@@ -91,6 +96,7 @@ LMark lstore_mark(void) { LMark m = { nedges, ndefers }; return m; }
 void lstore_rollback(LMark m) { nedges = m.e; ndefers = m.d; }
 int lv_meta_new(void) { return nmetas++; }
 int lstore_nedges(void) { return nedges; }
+int lstore_nmetas(void) { return nmetas; }
 int lstore_ndeferred(void) { return ndefers; }
 
 static int node_kind(LAtom t) { return t.meta ? 2 : 1; }
@@ -100,7 +106,9 @@ static int node_kind(LAtom t) { return t.meta ? 2 : 1; }
 static int longest(int xk, int x, int yk, int y) {
     if (xk == yk && x == y) return 0;
     /* collect the nodes */
-    int cap = 2 * nedges + 4, nn = 0; int *nk = xalloc(cap * sizeof(int)), *ni = xalloc(cap * sizeof(int)), *d = xalloc(cap * sizeof(int));
+    static int *nk, *ni, *d; static int bcap;
+    int cap = 2 * nedges + 4, nn = 0;
+    if (cap > bcap) { bcap = 2 * cap; nk = xalloc(bcap * sizeof(int)); ni = xalloc(bcap * sizeof(int)); d = xalloc(bcap * sizeof(int)); }
     #define NODE(kk, ii) ({ int f_ = -1; for (int q = 0; q < nn; q++) if (nk[q] == (kk) && ni[q] == (ii)) { f_ = q; break; } \
                             if (f_ < 0) { nk[nn] = (kk); ni[nn] = (ii); d[nn] = NEG; f_ = nn++; } f_; })
     int s = NODE(xk, x), t = NODE(yk, y), z = NODE(0, 0);
@@ -167,4 +175,53 @@ int lv_enforce_eq(LVal a, LVal b) {
     if (lv_eq(a, b)) return 1;
     int r = lv_enforce_leq(a, b); if (r != 1) return r;
     return lv_enforce_leq(b, a);
+}
+
+/* ---- solving: every meta at its lower bound ---- */
+static LVal atom_val(int k, int id, int off, LVal *sol, int m0) {
+    if (k == 2 && id < m0) die("internal: a level meta (?%d) from an earlier definition survived into this one", id);
+    LVal v = k == 0 ? lv_const(0) : k == 1 ? lv_var(id) : sol[id - m0];
+    return lv_add(v, off);
+}
+static char badbuf[256];
+const char *lstore_bad_constraint(void) { return badbuf; }
+static void atom_str(char *b, int k, int id, int off) {
+    if (k == 0) sprintf(b, "%d", off);
+    else if (k == 1) sprintf(b, id == -1 ? "L+%d" : "l%d+%d", id == -1 ? off : id, off);
+    else sprintf(b, "?%d+%d", id, off);
+}
+int lstore_solve(int m0, LVal *sol, int *bad) {
+    int n = nmetas - m0;
+    for (int i = 0; i < n; i++) sol[i] = lv_const(0);
+    for (int round = 0; round < n + 2; round++) {   /* Bellman-Ford: the store has no positive cycles */
+        int changed = 0;
+        for (int i = 0; i < nedges; i++) {
+            LEdge *e = &edges[i];
+            if (e->yk != 2 || e->y < m0) continue;
+            LVal lb = atom_val(e->xk, e->x, e->k, sol, m0);   /* y >= x + k */
+            LVal cur = sol[e->y - m0], nw = lv_max(cur, lb);
+            if (!lv_eq(nw, cur)) { sol[e->y - m0] = nw; changed = 1; }
+        }
+        if (!changed) break;
+    }
+    for (int i = 0; i < nedges; i++) {   /* every constraint must hold with the metas at their lower bounds */
+        LEdge *e = &edges[i];
+        if (e->xk != 2 && e->yk != 2) continue;
+        LVal x = atom_val(e->xk, e->x, e->k, sol, m0), y = atom_val(e->yk, e->y, 0, sol, m0);
+        if (!lv_leq(x, y)) {
+            char bx[64], by[64]; atom_str(bx, e->xk, e->x, e->k); atom_str(by, e->yk, e->y, 0); snprintf(badbuf, sizeof badbuf, "%s <= %s", bx, by); *bad = e->xk == 2 ? e->x : e->y;
+            if (getenv("EEZOTT_LEVELS")) {   /* debugging: the whole store and the solutions */
+                fprintf(stderr, "store (m0 = %d, %d metas):\n", m0, n);
+                for (int q = 0; q < nedges; q++) { char qx[64], qy[64]; atom_str(qx, edges[q].xk, edges[q].x, edges[q].k); atom_str(qy, edges[q].yk, edges[q].y, 0); fprintf(stderr, "  %s <= %s\n", qx, qy); }
+                for (int q = 0; q < n; q++) { fprintf(stderr, "  ?%d := c=%d", m0 + q, sol[q].c); for (int a = 0; a < sol[q].n; a++) fprintf(stderr, " (%s%d+%d)", sol[q].t[a].meta ? "?" : "l", sol[q].t[a].var, sol[q].t[a].off); fprintf(stderr, "\n"); }
+            }
+            return 0;
+        }
+    }
+    for (int i = 0; i < ndefers; i++) {   /* and the deferred disjunctions */
+        LVal a = defers[i].a, b = defers[i].b;
+        for (int j = m0; j < nmetas; j++) { a = lv_subst_meta(a, j, sol[j - m0]); b = lv_subst_meta(b, j, sol[j - m0]); }
+        if (!lv_leq(a, b)) { snprintf(badbuf, sizeof badbuf, "a deferred bound under lmax"); *bad = defers[i].a.t[0].var; return 0; }
+    }
+    return 1;
 }

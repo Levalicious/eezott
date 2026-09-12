@@ -1,0 +1,5 @@
+-- precision: with an explicit level for the large argument, the result stays small enough for a constructor argument
+def Fam (l : Level) (A : U {l}) (B : U) : U := B -> B
+data Wrap : U where
+  | w : Fam 1 U Nat -> Wrap
+def main : Nat := elim Wrap (\_ -> Nat) (\f -> f 3) (w (\n -> n))
