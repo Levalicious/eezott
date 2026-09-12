@@ -1,0 +1,2 @@
+-- typechecks, but transport along a path in U has no run-time meaning without type codes
+def main : Nat := transport Nat Nat (\i -> Nat) one

@@ -1,0 +1,1 @@
+def f (i : I) : Bool := hcomp Bool i (\j -> [ i -> false ]) true

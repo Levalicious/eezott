@@ -6,18 +6,26 @@
  *             | 'data' name binder* ':' term 'where' ('|' name ':' term)*
  *   binder   := '(' name+ ':' term ')'
  *   term     := binder+ '->' term            dependent function type
- *             | '\' name+ '->' term          lambda
+ *             | '\' name+ '->' term          lambda / path abstraction
  *             | 'let' name ':' term ':=' term 'in' term
- *             | app ('->' term)?             non-dependent arrow
+ *             | ior ('->' term)?             non-dependent arrow
+ *   ior      := iand ('\/' iand)*            interval join
+ *   iand     := neg ('/\' neg)*              interval meet
+ *   neg      := '~' neg | app                interval reversal
  *   app      := atom atom*
- *   atom     := name | 'U' [0-9]+? | 'elim' name | '(' term ')'
+ *   atom     := name | 'U' [0-9]+? | 'I' | 'i0' | 'i1' | 'elim' name | '(' term ')'
+ *             | 'PathP' | 'Path' | 'Partial' | 'transp' | 'hcomp' | 'comp'   (heads, applied like functions)
+ *             | 'Sub' | 'inS' | 'outS'                                     (cubical subtypes A [ phi |-> u ])
+ *             | '[' (ior '->' term ('|' ior '->' term)*)? ']'          (system of partial elements)
  *   comments: '#' or '--' to end of line.
  */
 #include "tt.h"
 #include <ctype.h>
 
-typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_COLON, TK_DEFEQ, TK_ARROW, TK_LAM, TK_BAR,
-               TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U } TokKind;
+typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK_DEFEQ, TK_ARROW, TK_LAM, TK_BAR,
+               TK_TILDE, TK_AND, TK_OR,
+               TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U, TK_I, TK_I0, TK_I1,
+               TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS } TokKind;
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
@@ -36,17 +44,24 @@ static void lex(const char *src) {
         if (*p == '#' || (p[0] == '-' && p[1] == '-')) { while (*p && *p != '\n') p++; continue; }
         if (p[0] == ':' && p[1] == '=') { addtok(TK_DEFEQ, p, 2, line); p += 2; continue; }
         if (p[0] == '-' && p[1] == '>') { addtok(TK_ARROW, p, 2, line); p += 2; continue; }
+        if (p[0] == '/' && p[1] == '\\') { addtok(TK_AND, p, 2, line); p += 2; continue; }
+        if (p[0] == '\\' && p[1] == '/') { addtok(TK_OR, p, 2, line); p += 2; continue; }
         if (*p == ':') { addtok(TK_COLON, p, 1, line); p++; continue; }
         if (*p == '(') { addtok(TK_LP, p, 1, line); p++; continue; }
         if (*p == ')') { addtok(TK_RP, p, 1, line); p++; continue; }
+        if (*p == '[') { addtok(TK_LB, p, 1, line); p++; continue; }
+        if (*p == ']') { addtok(TK_RB, p, 1, line); p++; continue; }
         if (*p == '\\') { addtok(TK_LAM, p, 1, line); p++; continue; }
         if (*p == '|') { addtok(TK_BAR, p, 1, line); p++; continue; }
+        if (*p == '~') { addtok(TK_TILDE, p, 1, line); p++; continue; }
         if (isdigit((unsigned char)*p)) { const char *s = p; while (isdigit((unsigned char)*p)) p++; addtok(TK_NUM, s, (int)(p - s), line); continue; }
         if (isalpha((unsigned char)*p) || *p == '_') {
             const char *s = p; while (isident((unsigned char)*p)) p++;
             int n = (int)(p - s);
             #define KW(str, kind) if (n == (int)strlen(str) && !strncmp(s, str, n)) { addtok(kind, s, n, line); continue; }
-            KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM) KW("U", TK_U)
+            KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM)
+            KW("U", TK_U) KW("I", TK_I) KW("i0", TK_I0) KW("i1", TK_I1)
+            KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS)
             #undef KW
             addtok(TK_NAME, s, n, line); continue;
         }
@@ -59,8 +74,10 @@ static Tok *peek(void) { return &toks[pos]; }
 static Tok *peekat(int k) { return pos + k < ntoks ? &toks[pos + k] : &toks[ntoks - 1]; }
 static Tok *next(void) { Tok *t = &toks[pos]; if (t->k != TK_EOF) pos++; return t; }
 static const char *tokname(TokKind k) {
-    static const char *n[] = { "end of file", "name", "number", "'('", "')'", "':'", "':='", "'->'", "'\\'", "'|'",
-                               "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'" };
+    static const char *n[] = { "end of file", "name", "number", "'('", "')'", "'['", "']'", "':'", "':='", "'->'", "'\\'", "'|'",
+                               "'~'", "'/\\'", "'\\/'",
+                               "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'", "'I'", "'i0'", "'i1'",
+                               "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'" };
     return n[k];
 }
 static Tok *expect(TokKind k) {
@@ -73,8 +90,8 @@ static const char *tokstr(Tok *t) { char *s = xalloc(t->n + 1); memcpy(s, t->s, 
 
 static STerm *st(SKind k, int line) { STerm *t = xalloc(sizeof *t); t->k = k; t->line = line; return t; }
 static STerm *parse_term(void);
+static STerm *parse_ior(void);
 
-/* binder group: '(' name+ ':' term ')'  -- caller has verified the shape */
 static int binder_ahead(void) {
     if (peek()->k != TK_LP) return 0;
     int i = 1;
@@ -101,19 +118,52 @@ static SBinder *parse_binders(int *n) {
     return b;
 }
 
+static STerm *parse_system(void) {
+    Tok *t = expect(TK_LB);
+    STerm *r = st(S_SYS, t->line);
+    int cap = 0;
+    while (peek()->k != TK_RB) {
+        if (r->nbr) expect(TK_BAR);
+        STerm *face = parse_ior();
+        expect(TK_ARROW);
+        STerm *body = parse_term();
+        if (r->nbr == cap) { cap = cap ? 2 * cap : 4; r->br = realloc(r->br, cap * sizeof(SBranch)); if (!r->br) die("out of memory"); }
+        r->br[r->nbr].face = face; r->br[r->nbr].body = body; r->nbr++;
+    }
+    expect(TK_RB);
+    return r;
+}
+
 static STerm *parse_atom(void) {
     Tok *t = peek();
     switch (t->k) {
     case TK_NAME: { next(); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
     case TK_U: { next(); STerm *r = st(S_U, t->line); r->lvl = 0;
                  if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); } return r; }
+    case TK_I: next(); return st(S_I, t->line);
+    case TK_I0: next(); return st(S_I0, t->line);
+    case TK_I1: next(); return st(S_I1, t->line);
+    case TK_PATHP: next(); return st(S_PATHP, t->line);
+    case TK_PATH: { next(); STerm *r = st(S_PATHP, t->line); r->lvl = 1; return r; }   /* lvl=1 marks the non-dependent sugar */
+    case TK_PARTIAL: next(); return st(S_PARTIAL, t->line);
+    case TK_TRANSP: next(); return st(S_TRANSP, t->line);
+    case TK_HCOMP: next(); return st(S_HCOMP, t->line);
+    case TK_COMP: next(); return st(S_COMP, t->line);
+    case TK_SUB: next(); return st(S_SUB, t->line);
+    case TK_INS: next(); return st(S_INS, t->line);
+    case TK_OUTS: next(); return st(S_OUTS, t->line);
     case TK_ELIM: { next(); Tok *d = expect(TK_NAME); STerm *r = st(S_ELIM, t->line); r->name = tokstr(d); return r; }
     case TK_LP: { next(); STerm *r = parse_term(); expect(TK_RP); return r; }
+    case TK_LB: return parse_system();
     default: die("%s:%d: expected a term, found %s", file, t->line, tokname(t->k));
     }
     return NULL;
 }
-static int atom_ahead(void) { TokKind k = peek()->k; return k == TK_NAME || k == TK_U || k == TK_ELIM || k == TK_LP; }
+static int atom_ahead(void) {
+    TokKind k = peek()->k;
+    return k == TK_NAME || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_I || k == TK_I0 || k == TK_I1 ||
+           k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS;
+}
 
 static STerm *parse_app(void) {
     STerm *f = parse_atom();
@@ -123,6 +173,21 @@ static STerm *parse_app(void) {
         STerm *r = st(S_APP, f->line); r->a = f; r->b = a; f = r;
     }
     return f;
+}
+static STerm *parse_neg(void) {
+    Tok *t = peek();
+    if (t->k == TK_TILDE) { next(); STerm *r = st(S_INEG, t->line); r->a = parse_neg(); return r; }
+    return parse_app();
+}
+static STerm *parse_iand(void) {
+    STerm *a = parse_neg();
+    while (peek()->k == TK_AND) { Tok *t = next(); STerm *r = st(S_IAND, t->line); r->a = a; r->b = parse_neg(); a = r; }
+    return a;
+}
+static STerm *parse_ior(void) {
+    STerm *a = parse_iand();
+    while (peek()->k == TK_OR) { Tok *t = next(); STerm *r = st(S_IOR, t->line); r->a = a; r->b = parse_iand(); a = r; }
+    return a;
 }
 
 static STerm *wrap_pi(SBinder *b, int n, STerm *body) {
@@ -163,7 +228,7 @@ static STerm *parse_term(void) {
         expect(TK_ARROW);
         return wrap_pi(b, n, parse_term());
     }
-    STerm *a = parse_app();
+    STerm *a = parse_ior();
     if (peek()->k == TK_ARROW) {
         next();
         STerm *body = parse_term();

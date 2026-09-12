@@ -1,0 +1,2 @@
+def p : Path Bool true true := \i -> true
+def main : Bool := p i1

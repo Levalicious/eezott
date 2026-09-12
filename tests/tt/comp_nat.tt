@@ -1,0 +1,1 @@
+def main : Nat := comp (\i -> Nat) i0 (\i -> []) three

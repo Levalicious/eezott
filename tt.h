@@ -3,10 +3,17 @@
  *
  * M1: Martin-Lof type theory with a predicative universe hierarchy U 0 < U 1
  * < ..., dependent functions, let, and inductive families with their
- * induction principles (elim D).  Programs are checked bidirectionally,
- * definitional equality is decided by normalization by evaluation, and
- * well-typed programs are erased to eezoc source: types vanish, data becomes
- * Scott-encoded, induction becomes a recursive case-analysis.
+ * induction principles (elim D).
+ * M2: the cubical layer of CCHM / Cubical Agda: a De Morgan interval I with
+ * endpoints, connections and reversal; dependent path types PathP with
+ * abstraction and application; partial elements (systems) over faces
+ * phi : I; and the Kan operations transp and hcomp, computing on functions,
+ * paths, universes and inductive types.
+ *
+ * Programs are checked bidirectionally, definitional equality is decided by
+ * normalization by evaluation, and well-typed programs are erased to eezoc
+ * source: types vanish, data becomes Scott-encoded, induction becomes a
+ * recursive case-analysis, the interval becomes booleans.
  */
 #ifndef EEZOTT_H
 #define EEZOTT_H
@@ -24,15 +31,21 @@ void die(const char *fmt, ...);
 
 /* ---------------- surface syntax ---------------- */
 
-typedef enum { S_VAR, S_U, S_PI, S_LAM, S_APP, S_LET, S_ELIM } SKind;
+typedef enum { S_VAR, S_U, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
+               S_I, S_I0, S_I1, S_IAND, S_IOR, S_INEG,
+               S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS } SKind;
 typedef struct STerm STerm;
 typedef struct { const char *name; STerm *ty; int line; } SBinder;   /* ty NULL for lambda binders */
+typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
     const char *name;                 /* S_VAR name; S_ELIM data name; S_LET bound name */
     int lvl;                          /* S_U */
     SBinder *binders; int nbinders;   /* S_PI, S_LAM (one binder each after desugaring) */
-    STerm *a, *b, *c;                 /* S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body */
+    STerm *a, *b, *c, *d;             /* S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body;
+                                         S_IAND/S_IOR: a b; S_INEG: a; S_PATHP: a=line b=x c=y; S_PARTIAL: a=phi b=A;
+                                         S_TRANSP: a=line b=phi c=u0; S_HCOMP: a=A b=phi c=u d=u0 */
+    SBranch *br; int nbr;             /* S_SYS */
 };
 typedef struct { const char *name; STerm *ty; int line; } SCon;
 typedef struct SDecl {
@@ -48,51 +61,96 @@ SDecl *parse_program(const char *src, const char *fname);
 
 /* ---------------- core terms (de Bruijn indices) ---------------- */
 
-typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_ELIM } TKind;
+typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_ELIM,
+               T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
+               T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS } TKind;
 typedef struct Term Term;
+typedef struct { Term *face, *body; } TBranch;
 struct Term {
     TKind k;
     int irr;            /* T_PI/T_LAM: binder computationally irrelevant; T_APP: argument irrelevant; T_LET: bound value irrelevant */
+    int isi;            /* T_PI/T_LAM: the binder is an interval variable */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
     int n;              /* T_VAR index; T_U level; T_DEF/T_DATA/T_CON/T_ELIM global id */
-    Term *a, *b, *c;    /* T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body */
+    Term *a, *b, *c, *d;/* T_PI: a=dom b=cod; T_LAM: a=body; T_APP: a=fn b=arg; T_LET: a=type b=val c=body;
+                           T_IAND/T_IOR: a b; T_INEG: a; T_PATHP: a=line b=x c=y; T_PAPP: a=path b=r c=x d=y;
+                           T_PARTIAL: a=phi b=A; T_TRANSP: a=line b=phi c=u0; T_HCOMP: a=A b=phi c=u d=u0;
+                           T_SUB: a=A b=phi c=u; T_INS: a=x; T_OUTS: a=A b=phi c=u d=s */
+    TBranch *br; int nbr; /* T_SYS */
 };
 Term *mk_var(int i); Term *mk_u(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
 Term *mk_lam(const char *x, Term *body, int irr); Term *mk_app(Term *f, Term *a, int irr);
 Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id);
+Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d);
 Term *shift(Term *t, int cut, int by);              /* free vars >= cut get +by */
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2); /* vars in [cut1,cut2) get +by1, vars >= cut2 get +by2 */
 int term_eq(Term *a, Term *b);
 void term_print(FILE *f, Term *t, const char **names, int depth);
+int term_mentions_var(Term *t, int idx);
+
+/* ---------------- interval values ---------------- */
+
+/* An element of the free De Morgan algebra on the context's interval
+ * variables, in irredundant disjunctive normal form: an OR of ANDs of
+ * literals, a literal being a variable (by de Bruijn level) or its
+ * reversal.  0 = the empty OR, 1 = an OR containing the empty AND. */
+typedef struct { int var, neg; } ILit;
+typedef struct { ILit *l; int n; } IConj;
+typedef struct { IConj *c; int n; } IVal;
+IVal iv_zero(void); IVal iv_one(void); IVal iv_var(int level);
+IVal iv_and(IVal a, IVal b); IVal iv_or(IVal a, IVal b); IVal iv_neg(IVal a);
+int iv_is_one(IVal a); int iv_is_zero(IVal a); int iv_eq(IVal a, IVal b);
+/* a face: a partial assignment of interval variables to endpoints */
+typedef struct { int *var; int *val; int n; } Face;
+IVal iv_restrict(IVal a, const Face *f);
+int iv_faces(IVal phi, Face **out);           /* the faces on which phi = 1 (one per consistent conjunct) */
+Face face_join(const Face *a, const Face *b);  /* returns n = -1 if inconsistent */
+int iv_mentions(IVal a, int level);
 
 /* ---------------- values ---------------- */
 
-typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON } VKind;
+typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS } VKind;
 typedef struct Val Val;
 typedef struct Env { Val *v; struct Env *next; } Env;
-typedef struct { Val **v; int n, cap; } VList;
-typedef struct IhClo IhClo;
-typedef struct { Env *env; Term *t; IhClo *ih; } Clo;     /* t==NULL => native induction-hypothesis closure */
-typedef enum { H_VAR, H_ELIM } HKind;
+typedef struct { Val *v; int irr; int papp; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y */
+typedef struct { Arg *a; int n, cap; } VList;
+typedef struct Clo Clo;
+struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
+typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS } HKind;
+typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
-    VKind k; int irr; const char *name;
+    VKind k; int irr; const char *name; int isi;
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
     HKind h;
     Clo clo;            /* V_LAM body; V_PI codomain */
-    Val *dom;           /* V_PI */
+    Val *dom;           /* V_PI domain */
     VList args;         /* V_NEU spine; V_DATA/V_CON arguments (params first) */
+    IVal iv;            /* V_I */
+    Val *a, *b, *c;     /* V_PATHP: a=line b=x c=y; V_PARTIAL: a=phi b=A; V_NEU/H_TRANSP: a=line b=phi c=u0 (then spine); V_NEU/H_HCOMP: a=A b=phi c=u, dom=u0;
+                           V_SUB: a=A b=phi c=u; V_INS: a=x; V_NEU/H_OUTS: a=A b=phi c=u dom=s */
+    VBranch *br; int nbr; /* V_SYS */
 };
 
-void vl_push(VList *l, Val *v);
+void vl_push(VList *l, Val *v, int irr);
+void vl_push_arg(VList *l, Arg a);
 VList vl_copy(const VList *l);
 Env *env_push(Env *e, Val *v);
 Val *env_get(Env *e, int idx);
-Val *vvar(int level); Val *vu(int l);
+Val *vvar(int level); Val *vu(int l); Val *vi(IVal iv); Val *vivar(int level);
+Val *mkval(VKind k);
 Val *eval(Env *env, Term *t);
 Val *vapp(Val *f, Val *a, int irr);
+Val *vpapp(Val *p, Val *r, Val *x, Val *y);
+Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data);
 Term *quote(int depth, Val *v);
 int conv(int depth, Val *a, Val *b);
 Val *inst(Clo *c, Val *v);          /* instantiate a closure */
+Val *restrict_val(Val *v, const Face *f);
+Val *vtransp(Val *line, Val *phi, Val *u0);
+Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0);
+Val *vsys_at(Val *sys, const Face *f);   /* the branch of a system that is total on f (NULL if none) */
+Val *vouts(Val *A, Val *phi, Val *u, Val *s);
+int val_mentions_ivar(int depth, Val *v, int level);
 
 /* ---------------- globals ---------------- */
 

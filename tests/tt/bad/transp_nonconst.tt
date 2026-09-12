@@ -1,0 +1,1 @@
+def f (A B : U) (p : Path U A B) (a : A) : B := transp (\i -> p i) i1 a

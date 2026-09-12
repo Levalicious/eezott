@@ -29,3 +29,14 @@ data List (A : U) : U where
   | lcons : A -> List A -> List A
 
 def id : (A : U) -> A -> A := \A x -> x
+
+-- cubical
+def prefl (A : U) (x : A) : Path A x x := \i -> x
+def sym (A : U) (x y : A) (p : Path A x y) : Path A y x := \i -> p (~ i)
+def cong (A B : U) (f : A -> B) (x y : A) (p : Path A x y) : Path B (f x) (f y) := \i -> f (p i)
+def funExt (A B : U) (f g : A -> B) (h : (x : A) -> Path B (f x) (g x)) : Path (A -> B) f g := \i -> \x -> h x i
+def compPath (A : U) (x y z : A) (p : Path A x y) (q : Path A y z) : Path A x z :=
+  \i -> hcomp A (~ i \/ i) (\j -> [ ~ i -> x | i -> q j ]) (p i)
+def transport (A B : U) (p : Path U A B) (a : A) : B := transp (\i -> p i) i0 a
+def hfill (A : U) (phi : I) (u : (i : I) -> Partial phi A) (u0 : Sub A phi (u i0)) (i : I) : A :=
+  hcomp A (phi \/ ~ i) (\j -> [ phi -> u (i /\ j) | ~ i -> outS u0 ]) (outS u0)

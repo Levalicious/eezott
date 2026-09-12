@@ -4,7 +4,8 @@
 # to eezoc source, compiled and run on the STG and JIT evaluators; its output
 # must equal an untyped oracle (Church booleans from the stdlib, which coincide
 # with Scott booleans bit for bit; Scott naturals written as literals).
-# Every program in tests/tt/bad must be rejected.
+# Every program in tests/tt/bad must be rejected; every program in tests/tt/unerasable
+# must typecheck but be refused at erasure (Kan operations without run-time meaning).
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
@@ -51,10 +52,32 @@ check vec_sum.tt       nat 5
 check list_length.tt   nat 3
 check let_sharing.tt   nat 4
 check large_elim.tt    bool true
+check path_endpoint.tt bool true
+check sym_refl.tt      nat 1
+check comppath_nat.tt  nat 1
+check funext_apply.tt  nat 3
+check transp_const.tt  nat 2
+check transp_pi.tt     nat 2
+check hcomp_nat.tt     nat 2
+check comp_nat.tt      nat 3
+check hfill_bool.tt    bool true
+check cong_sym.tt      nat 2
+check transp_list.tt   nat 1
+check hcomp_list.tt    nat 1
+check transp_vec.tt    nat 5
+check pathp_dep.tt     nat 1
+check hcomp_vec_elim.tt nat 1
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
     if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+done
+
+for f in "$TT"/unerasable/*.tt; do
+    name=unerasable/$(basename "$f")
+    if ! cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
+    elif cat "$TT/prelude.tt" "$f" | "$EEZOTT" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
+    else pass "$name typechecks but is refused at erasure"; fi
 done
 
 echo "$n cases"
