@@ -1,0 +1,2 @@
+-- numerals are checked against Nat: zero, small, and a numeral built along its bits
+def main : Nat := add (add 0 5) 37

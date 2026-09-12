@@ -1,0 +1,3 @@
+-- Bool is not shaped like the naturals (two nullary constructors)
+def b : Bool := 1
+def main : Nat := one

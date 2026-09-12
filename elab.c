@@ -684,6 +684,8 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         *ty = vinterval(); return mk_term(s->k == S_IAND ? T_IAND : T_IOR, a, b, NULL, NULL);
     }
     case S_INEG: { Term *a = check_interval(c, s->a); *ty = vinterval(); return mk_term(T_INEG, a, NULL, NULL, NULL); }
+    case S_NUM:
+        die("line %d: the type of the numeral %llu is not determined here; a numeral is checked against a type shaped like the naturals (give it one: a binder, a let, an argument)", s->line, s->num);
     case S_PI: {
         SBinder *b = &s->binders[0];
         if (b->ty->k == S_I) {   /* a function from the interval is a pretype: it has no Kan structure */
@@ -721,7 +723,43 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     return NULL;
 }
 
+/* a data type shaped like the naturals: no parameters or indices, exactly two constructors, one nullary and one
+   with a single recursive argument. Returns 1 and the two constructors' ids. */
+int peano_shape(int d, int *zero, int *suc) {
+    Data *D = &datas[d];
+    if (D->nparams || D->nidx || D->ncons != 2) return 0;
+    *zero = *suc = -1;
+    for (int ci = 0; ci < 2; ci++) {
+        Con *C = &cons[D->cons[ci]];
+        if (C->nint) return 0;
+        if (C->nargs == 0) *zero = D->cons[ci];
+        else if (C->nargs == 1 && C->args[0].isrec && C->args[0].npi == 0 && !C->args[0].isrecpath) *suc = D->cons[ci];
+    }
+    return *zero >= 0 && *suc >= 0;
+}
+/* the numeral n at a type shaped like the naturals, as a term of size O(log n):
+     let s1 := suc in let s2 := \x -> s1 (s1 x) in ... in s_{2^k} (... (s_{2^j} zero))
+   one let per bit of n, applied along the bits that are set */
+static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
+    int zi, si;
+    if (ty->k != V_DATA || ty->args.n != 0 || !peano_shape(ty->n, &zi, &si))
+        die("line %d: the numeral %llu needs a type shaped like the naturals (a nullary constructor and one with a single recursive argument), not %s", s->line, s->num, show(c, ty));
+    Term *zero = mk_ref_lv(T_CON, zi, ty->lv), *suc = mk_ref_lv(T_CON, si, ty->lv), *D = mk_ref_lv(T_DATA, ty->n, ty->lv);
+    unsigned long long n = s->num;
+    if (n == 0) return zero;
+    if (n == 1) return mk_app(suc, zero, 0);
+    int K = 0; for (unsigned long long m = n; m; m >>= 1) K++;
+    Term *body = zero;
+    for (int i = 0; i < K; i++) if (n >> i & 1) body = mk_app(mk_var(K - 1 - i), body, 0);
+    for (int i = K - 1; i >= 0; i--) {
+        char *name = xalloc(32); snprintf(name, 32, "s%llu", 1ULL << i);
+        Term *val = i == 0 ? suc : mk_lam("x", mk_app(mk_var(1), mk_app(mk_var(1), mk_var(0), 0), 0), 0);
+        body = mk_let(name, mk_pi("_", D, D, 0), val, body, 0);
+    }
+    return body;
+}
 static Term *check(Ctx *c, STerm *s, Val *ty) {
+    if (s->k == S_NUM) return check_numeral(c, s, ty);
     if (s->k == S_LAM) {
         SBinder *b = &s->binders[0];
         if (ty->k == V_PATHP) {

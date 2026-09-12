@@ -178,7 +178,22 @@ int term_mentions_var(Term *t, int idx) {
 }
 
 /* printing with names: names[] indexed by de Bruijn level, depth = number bound */
+/* a closed constructor spine of a type shaped like the naturals: suc (suc (... zero)); returns 1 and its value */
+static int numeral_of(Term *t, unsigned long long *out) {
+    unsigned long long n = 0; int zi, si, d = -1;
+    while (t->k == T_APP && t->a->k == T_CON) {
+        if (d < 0) { d = cons[t->a->n].data; if (!peano_shape(d, &zi, &si)) return 0; }
+        if (t->a->n != si) return 0;
+        n++; t = t->b;
+    }
+    if (t->k != T_CON) return 0;
+    if (d < 0) { d = cons[t->n].data; if (!peano_shape(d, &zi, &si)) return 0; }
+    if (t->n != zi) return 0;
+    *out = n; return 1;
+}
 static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
+    unsigned long long num;
+    if ((t->k == T_APP || t->k == T_CON) && numeral_of(t, &num)) { fprintf(f, "%llu", num); return; }
     switch (t->k) {
     case T_VAR: {
         int lvl = depth - 1 - t->n;
