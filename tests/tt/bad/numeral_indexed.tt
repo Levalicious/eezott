@@ -1,0 +1,3 @@
+-- an indexed family is not shaped like the naturals
+def v : Vec Nat zero := 0
+def main : Nat := one

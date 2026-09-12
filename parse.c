@@ -23,6 +23,7 @@
  */
 #include "tt.h"
 #include <ctype.h>
+#include <errno.h>
 
 typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK_DEFEQ, TK_ARROW, TK_LAM, TK_BAR,
                TK_TILDE, TK_AND, TK_OR,
@@ -143,6 +144,11 @@ static STerm *parse_atom(void) {
     Tok *t = peek();
     switch (t->k) {
     case TK_NAME: { next(); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
+    case TK_NUM: {
+        next(); STerm *r = st(S_NUM, t->line);
+        errno = 0; r->num = strtoull(tokstr(t), NULL, 10);
+        if (errno == ERANGE) die("%s:%d: the numeral %s is too large", file, t->line, tokstr(t));
+        return r; }
     case TK_U: { next(); STerm *r = st(S_U, t->line); r->lvl = 0;
                  if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); } return r; }
     case TK_I: next(); return st(S_I, t->line);
@@ -175,7 +181,7 @@ static STerm *parse_atom(void) {
 }
 static int atom_ahead(void) {
     TokKind k = peek()->k;
-    return k == TK_NAME || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_I || k == TK_I0 || k == TK_I1 ||
+    return k == TK_NAME || k == TK_NUM || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_I || k == TK_I0 || k == TK_I1 ||
            k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS ||
            k == TK_SIGMA || k == TK_FST || k == TK_SND || k == TK_GLUE || k == TK_GLUEEL || k == TK_UNGLUE;
 }

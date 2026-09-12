@@ -98,6 +98,8 @@ check pushout.tt       nat 2
 check pushout_indexed.tt nat 2
 check torus_nat.tt     nat 4
 check torus_s1.tt      bool false
+check literal.tt       nat 42
+check literal_fold.tt  nat 200
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

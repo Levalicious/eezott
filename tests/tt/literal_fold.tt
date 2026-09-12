@@ -1,0 +1,2 @@
+-- numerals of several bits, through the prelude's arithmetic: 12 * 15 + 20
+def main : Nat := add (mul 12 15) 20

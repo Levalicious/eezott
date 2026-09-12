@@ -13,6 +13,11 @@
  * it as that constructor's method path-applied (or its cube method, taken out
  * of the subtype), and every higher inductive type's induction principle is
  * formed at its declaration.
+ * M6: numerals. A decimal literal has no type of its own: it is checked
+ * against a data type shaped like the naturals (a nullary constructor and one
+ * with a single recursive argument) and elaborates to a term of size
+ * O(log n) that doubles the successor along its bits; closed values of such a
+ * type print as decimals.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,
@@ -40,7 +45,7 @@ void die(const char *fmt, ...);
 
 /* ---------------- surface syntax ---------------- */
 
-typedef enum { S_VAR, S_U, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
+typedef enum { S_VAR, S_U, S_NUM, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
                S_I, S_I0, S_I1, S_IAND, S_IOR, S_INEG,
                S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
                S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE } SKind;
@@ -51,6 +56,7 @@ struct STerm {
     SKind k; int line;
     const char *name;                 /* S_VAR name; S_ELIM data name; S_LET bound name */
     int lvl;                          /* S_U */
+    unsigned long long num;           /* S_NUM: a numeral, checked against a type shaped like the naturals */
     SBinder *binders; int nbinders;   /* S_PI, S_LAM (one binder each after desugaring) */
     STerm *a, *b, *c, *d;             /* S_PI: a=body; S_LAM: a=body; S_APP: a=fn b=arg; S_LET: a=type b=value c=body;
                                          S_IAND/S_IOR: a b; S_INEG: a; S_PATHP: a=line b=x c=y; S_PARTIAL: a=phi b=A;
@@ -217,6 +223,7 @@ extern Data *datas; extern int ndatas;
 extern Con *cons; extern int ncons;
 
 int is_type_like(int depth, Val *ty);      /* U or a family into U: computationally irrelevant */
+int peano_shape(int d, int *zero, int *suc);  /* a data type shaped like the naturals, with its zero and successor */
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
