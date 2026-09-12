@@ -1,0 +1,1 @@
+def main : Nat := transport Nat Nat (\i -> Nat) one

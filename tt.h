@@ -181,5 +181,6 @@ extern Con *cons; extern int ncons;
 int is_type_like(int depth, Val *ty);      /* U or a family into U: computationally irrelevant */
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
+extern int keep_kan;                 /* erase every transport, even along constant lines */
 
 #endif

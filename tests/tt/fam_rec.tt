@@ -1,0 +1,4 @@
+-- a type family by recursion is a code-valued program at run time; transport along it dispatches through the computed code
+def Fam : Nat -> U := \n -> elim Nat (\_ -> U) Nat (\k ih -> Nat -> ih) n
+def f : Fam two := \a b -> b
+def main : Nat := (transp (\i -> Fam (prefl Nat two i)) i0 f) one two

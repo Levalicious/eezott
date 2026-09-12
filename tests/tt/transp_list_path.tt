@@ -1,0 +1,3 @@
+def length : (A : U) -> List A -> Nat := \A l -> elim List A (\_ -> Nat) zero (\x xs ih -> suc ih) l
+def pN : Path U Nat Nat := \i -> Nat
+def main : Nat := length Nat (transp (\i -> List (pN i)) i0 (lcons Nat one (lnil Nat)))
