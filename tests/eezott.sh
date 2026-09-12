@@ -1,0 +1,61 @@
+#!/bin/bash
+#
+# eezott end-to-end tests: every typed program in tests/tt is checked, erased
+# to eezoc source, compiled and run on the STG and JIT evaluators; its output
+# must equal an untyped oracle (Church booleans from the stdlib, which coincide
+# with Scott booleans bit for bit; Scott naturals written as literals).
+# Every program in tests/tt/bad must be rejected.
+#
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
+EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
+EEZO="${SCRIPT_DIR}/../eezo/eezo"
+TT="${SCRIPT_DIR}/tt"
+status=0; n=0
+
+pass() { echo "PASS: $1"; n=$((n+1)); }
+fail() { echo "FAIL: $1"; echo "  Expected: $2"; echo "  Got:      $3"; status=1; n=$((n+1)); }
+
+scott_nat() {   # Scott numeral literal for n, in eezoc syntax
+    local n=$1 s="z -> s -> z"
+    while [ "$n" -gt 0 ]; do s="z -> s -> s($s)"; n=$((n-1)); done
+    printf '%s' "$s"
+}
+oracle() {      # kind value -> expected bitstring
+    case "$1" in
+        bool) printf '#import bool\n%s' "$2" | "$EEZOC" | "$EEZO" ;;
+        nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" | "$EEZO" ;;
+    esac
+}
+run_typed() {   # file mode -> bitstring (or ERROR)
+    local src; src=$(cat "$TT/prelude.tt" "$TT/$1")
+    local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
+    local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
+    echo "$bcl" | "$EEZO" $2 2>&1
+}
+check() {       # file kind value
+    local want; want=$(oracle "$2" "$3")
+    for mode in "" "-n"; do
+        local got; got=$(run_typed "$1" "$mode")
+        if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezo $mode)"; else fail "$1 = $2 $3 (eezo $mode)" "$want" "$got"; fi
+    done
+}
+
+check not_true.tt      bool false
+check and_or.tt        bool true
+check id_poly.tt       bool true
+check add_two_three.tt nat 5
+check mul_two_three.tt nat 6
+check id_transport.tt  bool false
+check vec_sum.tt       nat 5
+check list_length.tt   nat 3
+check let_sharing.tt   nat 4
+check large_elim.tt    bool true
+
+for f in "$TT"/bad/*.tt; do
+    name=bad/$(basename "$f")
+    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+done
+
+echo "$n cases"
+exit $status

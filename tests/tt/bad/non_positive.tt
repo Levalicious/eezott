@@ -1,0 +1,3 @@
+data Bad : U where
+  | mk : (Bad -> Bad) -> Bad
+def main : Bad := mk (\x -> x)

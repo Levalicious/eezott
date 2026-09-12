@@ -1,0 +1,31 @@
+-- eezott test prelude: the data types the tests share.
+data Bool : U where
+  | true : Bool
+  | false : Bool
+
+def not : Bool -> Bool := \b -> elim Bool (\_ -> Bool) false true b
+def and : Bool -> Bool -> Bool := \a b -> elim Bool (\_ -> Bool) b false a
+def or : Bool -> Bool -> Bool := \a b -> elim Bool (\_ -> Bool) true b a
+
+data Nat : U where
+  | zero : Nat
+  | suc : Nat -> Nat
+
+def add : Nat -> Nat -> Nat := \m n -> elim Nat (\_ -> Nat) n (\k ih -> suc ih) m
+def mul : Nat -> Nat -> Nat := \m n -> elim Nat (\_ -> Nat) zero (\k ih -> add n ih) m
+def one : Nat := suc zero
+def two : Nat := suc one
+def three : Nat := suc two
+
+data Id (A : U) (a : A) : A -> U where
+  | refl : Id A a a
+
+data Vec (A : U) : Nat -> U where
+  | nil : Vec A zero
+  | cons : (n : Nat) -> A -> Vec A n -> Vec A (suc n)
+
+data List (A : U) : U where
+  | lnil : List A
+  | lcons : A -> List A -> List A
+
+def id : (A : U) -> A -> A := \A x -> x

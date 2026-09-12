@@ -1,0 +1,2 @@
+def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec Nat (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
+def main : Nat := vsum two (cons Nat one two (cons Nat zero three (nil Nat)))   -- elements two and three

@@ -1,0 +1,3 @@
+-- a type computed by recursion on a boolean: large elimination, erased entirely
+def Pick : Bool -> U := \b -> elim Bool (\_ -> U 0) Nat Bool b
+def main : Pick false := true

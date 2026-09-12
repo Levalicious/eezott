@@ -1,0 +1,1 @@
+def main : Nat := let t : Nat := add one one in mul t t

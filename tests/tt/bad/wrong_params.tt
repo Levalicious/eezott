@@ -1,0 +1,3 @@
+data Wrong (A : U) : U where
+  | w : Wrong Nat
+def main : Wrong Bool := w

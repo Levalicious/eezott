@@ -1,0 +1,3 @@
+-- Id's parameter lives in U 0; U itself lives in U 1: predicativity must reject this
+def cast : (A : U) -> (B : U) -> Id U A B -> A -> B := \A B p -> elim Id U A (\B _ -> A -> B) (\x -> x) B p
+def main : Bool := cast Bool Bool (refl U Bool) true
