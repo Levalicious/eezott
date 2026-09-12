@@ -16,6 +16,8 @@
  *   atom     := name | 'U' [0-9]+? | 'I' | 'i0' | 'i1' | 'elim' name | '(' term ')'
  *             | 'PathP' | 'Path' | 'Partial' | 'transp' | 'hcomp' | 'comp'   (heads, applied like functions)
  *             | 'Sub' | 'inS' | 'outS'                                     (cubical subtypes A [ phi |-> u ])
+ *             | 'Sigma' | 'fst' | 'snd' | '(' term ',' term ')'                (dependent pairs)
+ *             | 'Glue' | 'glue' | 'unglue'                                  (Glue types: univalence)
  *             | '[' (ior '->' term ('|' ior '->' term)*)? ']'          (system of partial elements)
  *   comments: '#' or '--' to end of line.
  */
@@ -25,7 +27,8 @@
 typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK_DEFEQ, TK_ARROW, TK_LAM, TK_BAR,
                TK_TILDE, TK_AND, TK_OR,
                TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U, TK_I, TK_I0, TK_I1,
-               TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS } TokKind;
+               TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS,
+               TK_COMMA, TK_SIGMA, TK_FST, TK_SND, TK_GLUE, TK_GLUEEL, TK_UNGLUE } TokKind;
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
@@ -54,6 +57,7 @@ static void lex(const char *src) {
         if (*p == '\\') { addtok(TK_LAM, p, 1, line); p++; continue; }
         if (*p == '|') { addtok(TK_BAR, p, 1, line); p++; continue; }
         if (*p == '~') { addtok(TK_TILDE, p, 1, line); p++; continue; }
+        if (*p == ',') { addtok(TK_COMMA, p, 1, line); p++; continue; }
         if (isdigit((unsigned char)*p)) { const char *s = p; while (isdigit((unsigned char)*p)) p++; addtok(TK_NUM, s, (int)(p - s), line); continue; }
         if (isalpha((unsigned char)*p) || *p == '_') {
             const char *s = p; while (isident((unsigned char)*p)) p++;
@@ -61,7 +65,7 @@ static void lex(const char *src) {
             #define KW(str, kind) if (n == (int)strlen(str) && !strncmp(s, str, n)) { addtok(kind, s, n, line); continue; }
             KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM)
             KW("U", TK_U) KW("I", TK_I) KW("i0", TK_I0) KW("i1", TK_I1)
-            KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS)
+            KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS) KW("Sigma", TK_SIGMA) KW("fst", TK_FST) KW("snd", TK_SND) KW("Glue", TK_GLUE) KW("glue", TK_GLUEEL) KW("unglue", TK_UNGLUE)
             #undef KW
             addtok(TK_NAME, s, n, line); continue;
         }
@@ -77,7 +81,7 @@ static const char *tokname(TokKind k) {
     static const char *n[] = { "end of file", "name", "number", "'('", "')'", "'['", "']'", "':'", "':='", "'->'", "'\\'", "'|'",
                                "'~'", "'/\\'", "'\\/'",
                                "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'", "'I'", "'i0'", "'i1'",
-                               "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'" };
+                               "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'", "','", "'Sigma'", "'fst'", "'snd'", "'Glue'", "'glue'", "'unglue'" };
     return n[k];
 }
 static Tok *expect(TokKind k) {
@@ -152,8 +156,17 @@ static STerm *parse_atom(void) {
     case TK_SUB: next(); return st(S_SUB, t->line);
     case TK_INS: next(); return st(S_INS, t->line);
     case TK_OUTS: next(); return st(S_OUTS, t->line);
+    case TK_SIGMA: next(); return st(S_SIGMA, t->line);
+    case TK_FST: next(); return st(S_FST, t->line);
+    case TK_SND: next(); return st(S_SND, t->line);
+    case TK_GLUE: next(); return st(S_GLUE, t->line);
+    case TK_GLUEEL: next(); return st(S_GLUEEL, t->line);
+    case TK_UNGLUE: next(); return st(S_UNGLUE, t->line);
     case TK_ELIM: { next(); Tok *d = expect(TK_NAME); STerm *r = st(S_ELIM, t->line); r->name = tokstr(d); return r; }
-    case TK_LP: { next(); STerm *r = parse_term(); expect(TK_RP); return r; }
+    case TK_LP: {   /* parenthesised term, or a pair (a , b) */
+        next(); STerm *r = parse_term();
+        if (peek()->k == TK_COMMA) { next(); STerm *q = st(S_PAIR, t->line); q->a = r; q->b = parse_term(); r = q; }
+        expect(TK_RP); return r; }
     case TK_LB: return parse_system();
     default: die("%s:%d: expected a term, found %s", file, t->line, tokname(t->k));
     }
@@ -162,7 +175,8 @@ static STerm *parse_atom(void) {
 static int atom_ahead(void) {
     TokKind k = peek()->k;
     return k == TK_NAME || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_I || k == TK_I0 || k == TK_I1 ||
-           k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS;
+           k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS ||
+           k == TK_SIGMA || k == TK_FST || k == TK_SND || k == TK_GLUE || k == TK_GLUEEL || k == TK_UNGLUE;
 }
 
 static STerm *parse_app(void) {

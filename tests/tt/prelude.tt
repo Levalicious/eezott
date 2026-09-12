@@ -40,3 +40,14 @@ def compPath (A : U) (x y z : A) (p : Path A x y) (q : Path A y z) : Path A x z 
 def transport (A B : U) (p : Path U A B) (a : A) : B := transp (\i -> p i) i0 a
 def hfill (A : U) (phi : I) (u : (i : I) -> Partial phi A) (u0 : Sub A phi (u i0)) (i : I) : A :=
   hcomp A (phi \/ ~ i) (\j -> [ phi -> u (i /\ j) | ~ i -> outS u0 ]) (outS u0)
+
+-- equivalences and univalence
+def isContr (A : U) : U := Sigma A (\x -> (y : A) -> Path A x y)
+def fiber (A B : U) (f : A -> B) (y : B) : U := Sigma A (\x -> Path B (f x) y)
+def isEquiv (A B : U) (f : A -> B) : U := (y : B) -> isContr (fiber A B f y)
+def Equiv (A B : U) : U := Sigma (A -> B) (\f -> isEquiv A B f)
+def equivProof (T A : U) (w : Equiv T A) (a : A) (psi : I) (f : Partial psi (fiber T A (fst w) a)) : Sub (fiber T A (fst w) a) psi f :=
+  inS (hcomp (fiber T A (fst w) a) (psi \/ ~ psi) (\i -> [ psi -> snd (snd w a) f i | ~ psi -> fst (snd w a) ]) (fst (snd w a)))
+def idIsEquiv (A : U) : isEquiv A A (\x -> x) := \y -> ((y , \i -> y) , \q -> \i -> (snd q (~ i) , \j -> snd q (~ i \/ j)))
+def idEquiv (A : U) : Equiv A A := (\x -> x , idIsEquiv A)
+def ua (A B : U) (e : Equiv A B) : Path U A B := \i -> Glue B (~ i \/ i) [ ~ i -> (A , e) | i -> (B , idEquiv B) ]

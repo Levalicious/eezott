@@ -1,0 +1,2 @@
+-- transport along ua of the identity equivalence: through the Glue transport rule, in the checker and at run time
+def main : Nat := transport Nat Nat (ua Nat Nat (idEquiv Nat)) two

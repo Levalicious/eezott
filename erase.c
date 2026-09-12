@@ -67,6 +67,13 @@ static void erase(Term *t, int depth) {
         fputs("tt_transp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_INS: erase(t->a, depth); break;
     case T_OUTS: erase(t->d, depth); break;
+    case T_SIGMA: fputs("tc_sigma(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
+    case T_PAIR: fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
+    case T_FST: fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
+    case T_SND: fputs("tt_snd(", out); erase(t->a, depth); fputc(')', out); break;
+    case T_GLUE: fputs("tc_glue(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
+    case T_GLUEEL: fputs("tt_glue(", out); erase(t->c->b, depth); fputs(")(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
+    case T_UNGLUE: fputs("tt_unglue(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputs(")(", out); erase(t->a, depth); fputc(')', out); break;
     }
 }
 
@@ -173,8 +180,34 @@ static void mark(Term *t) {
     case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
     case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
     case T_HCOMP: mark(t->b); mark(t->c); mark(t->d); break;
+    case T_GLUE: mark(t->a); mark(t->b); mark(t->c);
+        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof") && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
+        break;
     default: mark(t->a); mark(t->b); mark(t->c); mark(t->d); break;
     }
+}
+
+/* the run-time Glue layer: emitted right after the prelude's equivProof, which its transport rule calls */
+static void emit_glue_runtime(void) {
+    /* Glue: an element is the glued element itself where phi holds, and otherwise the pair (sides, base) */
+    fputs("tt_glue := phi -> ts -> a -> phi(ts)(tt_pair(ts)(a))\n", out);
+    fputs("tt_unglue := phi -> te -> b -> phi(tt_fst(tt_snd(te))(b))(tt_snd(b))\n", out);
+    fputs("tt_gA := c -> c(m -> a -> phi -> te -> a)\n", out);
+    fputs("tt_gphi := c -> c(m -> a -> phi -> te -> phi)\n", out);
+    fputs("tt_gte := c -> c(m -> a -> phi -> te -> te)\n", out);
+    fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(tt_ior(phi)(tt_ineg(phi)))(i -> phi(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    /* transport along a line of Glue types, as in the checker: at run time every interval value is an endpoint */
+    fputs("tt_transp_glue := a -> phi -> te -> line -> psi -> u0 -> "
+          "(fa -> (ungl -> (tf -> (a1 -> (phi1 -> (te1 -> "
+          "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_ior(phi1)(psi))(j -> phi1(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
+          "(tt_equivProof(tt_fst(te1))(tt_gA(line(tt_i1)))(tt_snd(te1))(a1)(tt_ior(psi)(fa))"
+          "(psi(tt_pair(u0)(j -> a1))(fa(tt_pair(tf(tt_i1))(j -> a1))(tt_absurd)))))"
+          "(tt_gte(line(tt_i1))))(tt_gphi(line(tt_i1))))"
+          "(tt_gcomp(i -> tt_gA(line(i)))(tt_ior(psi)(fa))(i -> psi(ungl(i))(fa(tt_fst(tt_snd(tt_gte(line(i))))(tf(i)))(tt_absurd)))(ungl(tt_i0))))"
+          "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
+          "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
+          "(tt_iand(tt_gphi(line(tt_i0)))(tt_gphi(line(tt_i1))))\n", out);
+    fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(a)(phi)(te)\n", out);
 }
 
 void erase_program(FILE *f) {
@@ -210,6 +243,12 @@ void erase_program(FILE *f) {
     fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
           "(i -> phi(p(j))(tt_ineg(j)(tt_px(line(i)))(j(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
     fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(l)(x)(y)\n", out);
+    fputs("tt_pair := a -> b -> k -> k(a)(b)\n", out);
+    fputs("tt_fst := p -> p(a -> b -> a)\n", out);
+    fputs("tt_snd := p -> p(a -> b -> b)\n", out);
+    fputs("tt_transp_sigma := d -> b -> line -> phi -> p -> tt_pair(tt_transp(i -> tt_dom(line(i)))(phi)(tt_fst(p)))"
+          "(tt_transp(i -> tt_cod(line(i))(tt_transp(j -> tt_dom(line(tt_iand(i)(j))))(tt_ior(phi)(tt_ineg(i)))(tt_fst(p))))(phi)(tt_snd(p)))\n", out);
+    fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(d)(b)\n", out);
     /* declaration order: data types and definitions interleaved by line number */
     int di = 0, fi = 0;
     while (di < ndatas || fi < ndefs) {
@@ -224,6 +263,7 @@ void erase_program(FILE *f) {
             Def *d = &defs[fi++];
             if (!def_used[d - defs]) continue;
             fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
+            if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
         }
     }
     fclose(out);

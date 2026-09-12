@@ -75,6 +75,13 @@ check transport_generic.tt nat 1
 check transp_list_path.tt nat 1
 check fam_rec.tt       nat 2
 check transp_vec_path.tt nat 5
+check sigma_basic.tt   nat 7
+check sigma_eta.tt     nat 2
+check transp_sigma.tt  nat 3
+check hcomp_sigma.tt   nat 3
+check ua_id.tt         nat 2
+check ua_unglue.tt     nat 2
+check glue_elem.tt     nat 4
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

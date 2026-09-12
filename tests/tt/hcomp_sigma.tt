@@ -1,0 +1,3 @@
+def q : Sigma Nat (\_ -> Nat) := (one , two)
+def f (i : I) : Sigma Nat (\_ -> Nat) := hcomp (Sigma Nat (\_ -> Nat)) (i \/ ~ i) (\j -> [ i -> q | ~ i -> q ]) q
+def main : Nat := add (fst (f i1)) (snd (f i0))

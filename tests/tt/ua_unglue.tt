@@ -1,0 +1,3 @@
+-- a path in Nat obtained by transporting into ua e i and ungluing there
+def p : Path Nat two two := \i -> unglue (transp (\j -> ua Nat Nat (idEquiv Nat) (i /\ j)) (~ i) two)
+def main : Nat := p i1
