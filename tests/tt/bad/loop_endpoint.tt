@@ -1,0 +1,5 @@
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def q : Path S1 base (loop i1) := \i -> loop i
+def bad : Bool := elim S1 (\_ -> Bool) true (\i -> elim Bool (\_ -> Bool) true false (i)) base

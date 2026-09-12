@@ -90,10 +90,19 @@ check sym_u.tt         bool true
 check comppath_u.tt    bool true
 check list_of_types.tt nat 2
 check id_u_cast.tt     bool true
+check s1_elim.tt       bool true
+check s1_winding.tt    bool false
+check int_posneg.tt    nat 2
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
     if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+done
+
+for f in "$TT"/check/*.tt; do
+    [ -e "$f" ] || continue
+    name=check/$(basename "$f")
+    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then pass "$name typechecks"; else fail "$name typechecks" "acceptance" "$(cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c 2>&1 | head -1)"; fi
 done
 
 for f in "$TT"/unerasable/*.tt; do

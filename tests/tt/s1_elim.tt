@@ -1,0 +1,6 @@
+-- the circle: a point and a loop; elimination computes on both, and on the loop's endpoints
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def toBool : S1 -> Bool := \x -> elim S1 (\_ -> Bool) true (\i -> true) x
+def main : Bool := and (toBool base) (toBool (loop i1))

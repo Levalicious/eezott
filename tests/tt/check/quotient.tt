@@ -1,0 +1,20 @@
+-- the set quotient: a point constructor, a path constructor with non-recursive arguments, and the 2-dimensional
+-- squash constructor with recursive path arguments; the identity elimination exercises PathP and Sub methods
+data SQ (A : U) (R : A -> A -> U) : U where
+  | inc : A -> SQ A R
+  | eq : (a : A) -> (b : A) -> R a b -> (i : I) -> SQ A R [ ~ i -> inc A R a | i -> inc A R b ]
+  | squash : (x : SQ A R) -> (y : SQ A R) -> (p : Path (SQ A R) x y) -> (q : Path (SQ A R) x y) -> (i : I) -> (j : I) -> SQ A R [ ~ i -> p j | i -> q j | ~ j -> x | j -> y ]
+def idSQ (A : U) (R : A -> A -> U) : SQ A R -> SQ A R :=
+  \s -> elim SQ A R (\_ -> SQ A R) (\a -> inc A R a) (\a b r -> \i -> eq A R a b r i) (\x y p q ihx ihy ihp ihq -> \i j -> inS (squash A R ihx ihy ihp ihq i j)) s
+-- the suspension: two points and a meridian for every element of the parameter
+data Susp (A : U) : U where
+  | N : Susp A
+  | S : Susp A
+  | merid : A -> (i : I) -> Susp A [ ~ i -> N A | i -> S A ]
+def idSusp (A : U) : Susp A -> Susp A := \s -> elim Susp A (\_ -> Susp A) (N A) (S A) (\a -> \i -> merid A a i) s
+-- propositional truncation into itself
+data PT (A : U) : U where
+  | tinc : A -> PT A
+  | sq : (x : PT A) -> (y : PT A) -> (i : I) -> PT A [ ~ i -> x | i -> y ]
+def idPT (A : U) : PT A -> PT A := \t -> elim PT A (\_ -> PT A) (\a -> tinc A a) (\x y ihx ihy -> \i -> sq A ihx ihy i) t
+def main : Nat := one
