@@ -9,6 +9,11 @@
  * abstraction and application; partial elements (systems) over faces
  * phi : I; and the Kan operations transp and hcomp, computing on functions,
  * paths, universes and inductive types.
+ * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
+ * the sort of pretypes: Partial phi A, Sub A phi u and every function type
+ * from I or from/into a pretype. Pretypes may be the types of binders,
+ * lets and definitions, never elements of U: no line, path, Glue, Sigma,
+ * data argument, motive or Kan operation is formed over one.
  *
  * Programs are checked bidirectionally, definitional equality is decided by
  * normalization by evaluation, and well-typed programs are erased to eezoc
@@ -72,6 +77,7 @@ struct Term {
     TKind k;
     int irr;            /* T_PI/T_LAM: binder computationally irrelevant; T_APP: argument irrelevant; T_LET: bound value irrelevant */
     int isi;            /* T_PI/T_LAM: the binder is an interval variable */
+    int pre;            /* T_U: the sort Pre l of pretypes; T_PI: the domain is a pretype */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
     int n;              /* T_VAR index; T_U level; T_DEF/T_DATA/T_CON/T_ELIM global id */
     int lv;             /* T_DEF/T_DATA/T_CON/T_ELIM: universe shift of the global (every U n lifted to U n+lv) */
@@ -83,7 +89,7 @@ struct Term {
                            T_GLUE: a=A b=phi c=Te; T_GLUEEL: a=ts b=a c=the Glue type; T_UNGLUE: a=b b=A c=phi d=Te */
     TBranch *br; int nbr; /* T_SYS */
 };
-Term *mk_var(int i); Term *mk_u(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
+Term *mk_var(int i); Term *mk_u(int l); Term *mk_upre(int l); Term *mk_pi(const char *x, Term *a, Term *b, int irr);
 Term *mk_lam(const char *x, Term *body, int irr); Term *mk_app(Term *f, Term *a, int irr);
 Term *mk_let(const char *x, Term *ty, Term *v, Term *body, int irr); Term *mk_ref(TKind k, int id); Term *mk_ref_lv(TKind k, int id, int lv);
 Term *shift_univ(Term *t, int k);                   /* lift every universe level by k (globals: shift += k) */
@@ -129,6 +135,7 @@ typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE } HKind;
 typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
+    int pre;            /* V_U: the sort Pre l of pretypes */
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
     int lv;             /* V_DATA/V_CON/H_ELIM: universe shift; V_GLUE: the universe level */
     HKind h;
@@ -147,7 +154,7 @@ void vl_push_arg(VList *l, Arg a);
 VList vl_copy(const VList *l);
 Env *env_push(Env *e, Val *v);
 Val *env_get(Env *e, int idx);
-Val *vvar(int level); Val *vu(int l); Val *vi(IVal iv); Val *vivar(int level);
+Val *vvar(int level); Val *vu(int l); Val *vupre(int l); Val *vi(IVal iv); Val *vivar(int level);
 Val *mkval(VKind k);
 Val *eval(Env *env, Term *t);
 Val *vapp(Val *f, Val *a, int irr);

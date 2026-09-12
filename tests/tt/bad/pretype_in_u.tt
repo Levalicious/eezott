@@ -1,0 +1,3 @@
+-- a partial element type is a pretype: it is not an element of U
+def P : U := Partial i0 Nat
+def main : Nat := one

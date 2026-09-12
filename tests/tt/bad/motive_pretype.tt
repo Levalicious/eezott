@@ -1,0 +1,3 @@
+-- an eliminator's motive must land in a universe, not in the pretypes
+def f : Nat -> (i : I) -> Nat := \n -> elim Nat (\_ -> (i : I) -> Nat) (\i -> zero) (\k ih -> \i -> suc (ih i)) n
+def main : Nat := one

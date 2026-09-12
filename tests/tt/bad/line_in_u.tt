@@ -1,0 +1,3 @@
+-- a function type from the interval is a pretype: it is not an element of U
+def L : U := (i : I) -> Nat
+def main : Nat := one

@@ -1,0 +1,4 @@
+-- constructor arguments must be types in a universe: a line has no transport
+data D : U where
+  | c : ((i : I) -> Nat) -> D
+def main : Nat := one

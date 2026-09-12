@@ -1,0 +1,7 @@
+-- pretypes are the types of binders, lets and definitions: lines, partial elements, subtypes
+def useLine (A : U) (l : (i : I) -> A) : A := l i1
+def useSub (A : U) (phi : I) (u : Partial phi A) (s : Sub A phi u) : A := outS s
+def withLet (A : U) (a : A) : A := let l : (i : I) -> A := \i -> a in l i0
+def aLine (A : U) (a : A) : (i : I) -> A := \i -> a
+def aPartial (A : U) (a : A) : Partial i1 A := [ i1 -> a ]
+def main : Nat := add (useLine Nat (aLine Nat two)) (withLet Nat one)

@@ -1,0 +1,3 @@
+-- no path in U between pretypes: Sub A phi u is not in U
+def PP : Path U (Sub Nat i0 []) (Sub Nat i0 []) := \i -> Sub Nat i0 []
+def main : Nat := one

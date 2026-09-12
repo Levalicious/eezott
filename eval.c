@@ -37,6 +37,7 @@ void die(const char *fmt, ...) {
 static Term *mk(TKind k) { Term *t = xalloc(sizeof *t); t->k = k; return t; }
 Term *mk_var(int i) { Term *t = mk(T_VAR); t->n = i; return t; }
 Term *mk_u(int l) { Term *t = mk(T_U); t->n = l; return t; }
+Term *mk_upre(int l) { Term *t = mk_u(l); t->pre = 1; return t; }
 Term *mk_pi(const char *x, Term *a, Term *b, int irr) { Term *t = mk(T_PI); t->name = x; t->a = a; t->b = b; t->irr = irr; t->isi = (a->k == T_INTERVAL); return t; }
 Term *mk_lam(const char *x, Term *body, int irr) { Term *t = mk(T_LAM); t->name = x; t->a = body; t->irr = irr; return t; }
 Term *mk_app(Term *f, Term *a, int irr) { Term *t = mk(T_APP); t->a = f; t->b = a; t->irr = irr; return t; }
@@ -63,7 +64,7 @@ Term *shift_univ(Term *t, int k) {
     if (!t || k == 0) return t;
     Term *r;
     switch (t->k) {
-    case T_U: return mk_u(t->n + k);
+    case T_U: { Term *u = mk_u(t->n + k); u->pre = t->pre; return u; }
     case T_DEF: case T_DATA: case T_CON: case T_ELIM: return mk_ref_lv(t->k, t->n, t->lv + k);
     case T_VAR: case T_INTERVAL: case T_I0: case T_I1: return t;
     case T_SYS: {
@@ -151,7 +152,8 @@ int term_eq(Term *a, Term *b) {
     if (a == b) return 1;
     if (!a || !b || a->k != b->k) return 0;
     switch (a->k) {
-    case T_VAR: case T_U: return a->n == b->n;
+    case T_VAR: return a->n == b->n;
+    case T_U: return a->n == b->n && a->pre == b->pre;
     case T_DEF: case T_DATA: case T_CON: case T_ELIM: return a->n == b->n && a->lv == b->lv;
     case T_INTERVAL: case T_I0: case T_I1: return 1;
     case T_SYS:
@@ -182,7 +184,7 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
         int lvl = depth - 1 - t->n;
         if (lvl >= 0 && lvl < depth && names[lvl]) fprintf(f, "%s", names[lvl]); else fprintf(f, "#%d", t->n);
         break; }
-    case T_U: if (t->n) fprintf(f, "U %d", t->n); else fprintf(f, "U"); break;
+    case T_U: fputs(t->pre ? "Pre" : "U", f); if (t->n) fprintf(f, " %d", t->n); break;
     case T_DEF: fprintf(f, "%s", defs[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
     case T_DATA: fprintf(f, "%s", datas[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
     case T_CON: fprintf(f, "%s", cons[t->n].name); if (t->lv) fprintf(f, "^%d", t->lv); break;
@@ -433,6 +435,7 @@ Val *env_get(Env *e, int idx) { while (idx-- > 0) { if (!e) die("internal: unbou
 Val *mkval(VKind k) { Val *v = xalloc(sizeof *v); v->k = k; return v; }
 Val *vvar(int level) { Val *v = mkval(V_NEU); v->h = H_VAR; v->n = level; return v; }
 Val *vu(int l) { Val *v = mkval(V_U); v->n = l; return v; }
+Val *vupre(int l) { Val *v = vu(l); v->pre = 1; return v; }
 Val *vi(IVal iv) { Val *v = mkval(V_I); v->iv = iv; return v; }
 Val *vivar(int level) { return vi(iv_var(level)); }
 static Val *vinterval(void) { return mkval(V_INTERVAL); }
@@ -709,7 +712,7 @@ static IVal face_iv(const Face *f);
 Val *eval(Env *env, Term *t) {
     switch (t->k) {
     case T_VAR: return env_get(env, t->n);
-    case T_U: return vu(t->n);
+    case T_U: return t->pre ? vupre(t->n) : vu(t->n);
     case T_PI: { Val *v = mkval(V_PI); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->dom = eval(env, t->a); v->clo.env = env; v->clo.t = t->b; return v; }
     case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->clo.env = env; v->clo.t = t->a; return v; }
     case T_APP: return vapp(eval(env, t->a), eval(env, t->b), t->irr);
@@ -1339,7 +1342,7 @@ static Term *quote_iv(int depth, IVal a) {
 }
 Term *quote(int depth, Val *v) {
     switch (v->k) {
-    case V_U: return mk_u(v->n);
+    case V_U: return v->pre ? mk_upre(v->n) : mk_u(v->n);
     case V_INTERVAL: return mk(T_INTERVAL);
     case V_I: return quote_iv(depth, v->iv);
     case V_LAM: {
@@ -1421,7 +1424,7 @@ int conv(int depth, Val *a, Val *b) {
     if (a->k == V_PAIR || b->k == V_PAIR) return conv(depth, vproj(a, 1), vproj(b, 1)) && conv(depth, vproj(a, 2), vproj(b, 2));   /* eta */
     if (a->k != b->k) return 0;
     switch (a->k) {
-    case V_U: return a->n == b->n;
+    case V_U: return a->n == b->n && a->pre == b->pre;
     case V_SIGMA: {
         if (!conv(depth, a->dom, b->dom)) return 0;
         Val *x = vvar(depth);
