@@ -3,6 +3,7 @@
  *
  *   eezott [-c] [-K] [FILE]   check FILE (or stdin); unless -c, write the erased eezoc source to stdout
  *   -K keeps every Kan operation at run time (no identity shortcut for constant lines): a differential test of the run-time rules
+ *   -n NAME prints the normal form of the definition NAME (the checker's own evaluation)
  *
  * The output is meant to be piped straight into eezoc:
  *   eezott prog.tt | eezoc | eezo
@@ -27,16 +28,18 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -c            Check only; emit nothing\n");
     fprintf(stderr, "  -t NAME       Print the type of the definition NAME after checking\n");
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
+    fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -h            Show this help\n");
     fprintf(stderr, "\nInput is read from FILE, or stdin if absent. Output is eezoc source on stdout.\n");
 }
 
 int main(int argc, char **argv) {
-    int check_only = 0; const char *fname = NULL, *show = NULL;
+    int check_only = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
+        else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }
         else fname = argv[i];
@@ -52,6 +55,13 @@ int main(int argc, char **argv) {
             const char *names[1024]; fprintf(stderr, "%s : ", show); term_print(stderr, quote(0, defs[i].vty), names, 0); fputc('\n', stderr); found = 1;
         }
         if (!found) die("-t: no definition named '%s'", show);
+    }
+    if (nf) {
+        int found = 0;
+        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, nf)) {
+            const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, defs[i].vval), names, 0); fputc('\n', stderr); found = 1;
+        }
+        if (!found) die("-n: no definition named '%s'", nf);
     }
     if (!check_only) erase_program(stdout);
     return 0;

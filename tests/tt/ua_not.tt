@@ -1,0 +1,4 @@
+-- the first non-trivial transport: along ua of the equivalence Bool ~ Bool given by not
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def main : Bool := transport Bool Bool (ua Bool Bool notEquiv) true

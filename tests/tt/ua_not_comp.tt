@@ -1,0 +1,5 @@
+-- transport along the composite path refl . ua not in the universe (hcomp in U)
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def pq : Path U Bool Bool := \i -> hcomp U (~ i \/ i) (\j -> [ ~ i -> Bool | i -> ua Bool Bool notEquiv j ]) Bool
+def main : Bool := transport Bool Bool pq true
