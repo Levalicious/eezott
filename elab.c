@@ -185,8 +185,9 @@ static Term *E_con_spine(Term *t, EInfo *I, int depth) {
     /* t = c' p.. a'.. is.. (a constructor of the same data type applied): returns the method applied, or NULL */
     int nargs = 0; Term *w = t;
     while (w->k == T_APP) { nargs++; w = w->a; }
-    if (w->k != T_CON || cons[w->n].data != I->C->data) return NULL;
+    if (w->k != T_CON || datas[cons[w->n].data].block != datas[I->C->data].block) return NULL;
     Con *Cp = con_at(w->n, I->dl); int np = I->np;
+    if (Cp->data != I->C->data && Cp->nint > 0) die("the index of %s applies the path constructor %s of another member: not supported", I->C->name, Cp->name);
     if (Cp->bord >= I->o) die("the boundary of %s uses the later constructor %s; boundaries may only use earlier constructors", I->C->name, Cp->name);
     if (nargs != np + Cp->nargs + Cp->nint) die("internal: constructor %s applied to %d arguments in a boundary", Cp->name, nargs);
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
@@ -217,9 +218,13 @@ static Term *E_con_spine(Term *t, EInfo *I, int depth) {
     Term *sys = E(inst_tele(Cp->boundary, tn + Cp->nint, vs2, 0), I, depth);
     Term *phi = NULL;
     for (int i = 0; i < sys->nbr; i++) phi = phi ? mk_term(T_IOR, phi, sys->br[i].face, NULL, NULL) : sys->br[i].face;
-    Term *A = mk_var(depth + I->n + I->htot + I->r + I->o + (I->nb - 1 - I->pi));   /* P idx (c p a is) */
+    Term *A = mk_var(depth + I->n + I->htot + I->r + I->o + (I->nb - 1 - I->pi));   /* P idx [img] (c p a is) */
     Data *D = &datas[Cp->data];
-    for (int j = 0; j < D->nidx; j++) A = mk_app(A, inst_tele(Cp->ridx[j], tn, vs, 0), 1);
+    for (int j = 0; j < D->nidx; j++) {
+        Term *ix = inst_tele(Cp->ridx[j], tn, vs, 0);
+        A = mk_app(A, ix, 1);
+        if (D->idxrec[j] >= 0) A = mk_app(A, E(ix, I, depth), 0);
+    }
     A = mk_app(A, t, 0);
     return mk_term(T_OUTS, A, phi ? phi : mk_term(T_I0, NULL, NULL, NULL, NULL), sys, m);
 }
@@ -265,6 +270,31 @@ static Term *boundary_at(Con *C, int end) {
     }
     return NULL;
 }
+/* rename the free variables of t: variable v (v < n) becomes map[v]; t's own d binders are passed */
+static Term *remap(Term *t, int n, const int *map, int d) {
+    if (!t) return NULL;
+    Term *r;
+    switch (t->k) {
+    case T_VAR:
+        if (t->n < d) return t;
+        if (t->n - d >= n) die("internal: remap: a variable out of range");
+        return mk_var(map[t->n - d] + d);
+    case T_PI: case T_SIGMA:
+        r = mk_term(t->k, remap(t->a, n, map, d), remap(t->b, n, map, d + 1), NULL, NULL);
+        r->name = t->name; r->irr = t->irr; r->isi = t->isi; r->pre = t->pre; r->imp = t->imp; return r;
+    case T_LAM: r = mk_lam(t->name, remap(t->a, n, map, d + 1), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
+    case T_LET: return mk_let(t->name, remap(t->a, n, map, d), remap(t->b, n, map, d), remap(t->c, n, map, d + 1), t->irr);
+    case T_SYS:
+        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = remap(t->br[i].face, n, map, d); r->br[i].body = remap(t->br[i].body, n, map, d); }
+        return r;
+    default:
+        r = mk_term(t->k, remap(t->a, n, map, d), remap(t->b, n, map, d), remap(t->c, n, map, d), remap(t->d, n, map, d));
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; return r;
+    }
+}
+/* the motive of a member is run-time content when hcomp is a formal element of it */
+static int motive_rel(int member) { Data *M = &datas[member]; return M->hit || M->nidx > 0; }
 static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
     Data *D = data_at(d, dl); elim_dlt = mk_lval(dl);
     int np = D->nparams, m = D->nidx;
@@ -273,9 +303,21 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
     #define ITY(j) (D->itys[j])
     #define PTY(i) (D->ptys[i])
     #define ATY(C, j) ((C)->args[j].ty)
-    /* body: P_j i x   under [params, P(nbk), mth(K), i(m), x] */
+    /* body: P_j i_0 [img_0] .. x   under [params, P(nbk), mth(K), i(m), x]; an index ranging over member rm is followed by
+       its image, its elimination by rm with the same prefix: elim D_rm p P.. m.. i_q */
     Term *body = mk_var(1 + m + K + (nbk - 1 - jpos));
-    for (int j = 0; j < m; j++) body = mk_app(body, mk_var(1 + (m - 1 - j)), 1);
+    for (int q = 0; q < m; q++) {
+        body = mk_app(body, mk_var(1 + (m - 1 - q)), 1);
+        int rm = D->idxrec[q];
+        if (rm >= 0) {
+            Term *im = mk_ref_l(T_ELIM, rm, elim_dlt);
+            for (int t2 = 0; t2 < np; t2++) im = mk_app(im, mk_var(1 + m + K + nbk + (np - 1 - t2)), 1);
+            for (int r2 = 0; r2 < nbk; r2++) im = mk_app(im, mk_var(1 + m + K + (nbk - 1 - r2)), !motive_rel(b0 + r2));
+            for (int o2 = 0; o2 < K; o2++) im = mk_app(im, mk_var(1 + m + (K - 1 - o2)), 0);
+            im = mk_app(im, mk_var(1 + (m - 1 - q)), 0);
+            body = mk_app(body, im, 0);
+        }
+    }
     body = mk_app(body, mk_var(0), 0);
     /* x : D p i */
     Term *t = mk_pi("x", data_applied(d, m + K + nbk, 0), body, 0);
@@ -288,9 +330,15 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
         int n = C->nint;
         /* recursive-argument ordinals (for the induction hypotheses' positions) */
         int *record = xalloc((r + 1) * sizeof(int)); { int oo = 0; for (int j = 0; j < r; j++) record[j] = (C->args[j].isrec || C->args[j].isrecpath) ? oo++ : -1; }
-        /* return: P_mi ridx (c p a is)   under [params, P(nbk), mth(o), a(r), ih(htot), iv(n)] */
+        EInfo I = { C, n, r, htot, o, nbk, mi, np, dl, record };
+        /* return: P_mi ridx [img] (c p a is)   under [params, P(nbk), mth(o), a(r), ih(htot), iv(n)]; the image of an index is
+           the index term with recursive arguments replaced by their hypotheses and constructors by their methods (E) */
         Term *ret = mk_var(n + htot + r + o + (nbk - 1 - mi));
-        for (int j = 0; j < mm; j++) ret = mk_app(ret, shift2(C->ridx[j], n, htot, n + r, htot + o + nbk), 1);
+        for (int j = 0; j < mm; j++) {
+            Term *ix = shift2(C->ridx[j], n, htot, n + r, htot + o + nbk);
+            ret = mk_app(ret, ix, 1);
+            if (M->idxrec[j] >= 0) ret = mk_app(ret, E(ix, &I, 0), 0);
+        }
         Term *ct = mk_ref_l(T_CON, M->cons[ci], elim_dlt);
         for (int i = 0; i < np; i++) ct = mk_app(ct, mk_var(n + htot + r + o + nbk + (np - 1 - i)), !C->bparams);
         for (int j = 0; j < r; j++) ct = mk_app(ct, mk_var(n + htot + (r - 1 - j)), C->args[j].irr);
@@ -298,7 +346,6 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
         ret = mk_app(ret, ct, 0);
         Term *mt = ret;
         if (n > 0) {
-            EInfo I = { C, n, r, htot, o, nbk, mi, np, dl, record };
             if (C->pathmethod) {   /* PathP (i. P (c a i)) E(b0) E(b1)   under [params, P, mth(o), a(r), ih(htot)] */
                 Term *line = mk_lam("i", ret, 0); line->isi = 1;
                 EInfo I0 = { C, 0, r, htot, o, nbk, mi, np, dl, record };
@@ -315,18 +362,24 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
                 for (int q = n - 1; q >= 0; q--) mt = mk_pi(xsprintf("i%d", q), mk_term(T_INTERVAL, NULL, NULL, NULL, NULL), mt, 0);
             }
         }
-        /* induction hypotheses, last first: an argument recursive in member rm gets its hypothesis from P_rm */
+        /* induction hypotheses, last first: an argument recursive in member rm gets its hypothesis from P_rm, applied to the
+           occurrence's indices and their images */
         int h = htot;
         for (int j = r - 1; j >= 0; j--) {
             ConArg *A = &C->args[j];
             int rm = (A->isrec || A->isrecpath) ? A->rec - b0 : 0;
-            if (A->isrecpath) {   /* PathP (k. P_rm (a_j k)) E(px) E(py)   under [params, P, mth(o), a(r), ih(h)] */
+            Data *RM = (A->isrec || A->isrecpath) ? &datas[A->rec] : NULL;
+            if (A->isrecpath) {   /* PathP (k. P_rm idx [img] (a_j k)) E(px) E(py)   under [params, P, mth(o), a(r), ih(h)] */
                 h--;
                 EInfo Ih = { C, 0, r, h, o, nbk, mi, np, dl, record };
                 Term *px = shift2(A->px, 0, h + (r - j), j, h + (r - j) + o + nbk), *py = shift2(A->py, 0, h + (r - j), j, h + (r - j) + o + nbk);
                 Term *pa = mk_term(T_PAPP, mk_var((r - 1 - j) + h + 1), mk_var(0), shift(px, 0, 1), shift(py, 0, 1));
                 Term *Pk = mk_var(1 + h + r + o + (nbk - 1 - rm));
-                for (int q = 0; q < A->nidx; q++) Pk = mk_app(Pk, shift(shift2(A->idx[q], 0, h + (r - j), j, h + (r - j) + o + nbk), 0, 1), 1);
+                for (int q = 0; q < A->nidx; q++) {
+                    Term *ix = shift(shift2(A->idx[q], 0, h + (r - j), j, h + (r - j) + o + nbk), 0, 1);
+                    Pk = mk_app(Pk, ix, 1);
+                    if (RM->idxrec[q] >= 0) Pk = mk_app(Pk, E(ix, &Ih, 1), 0);
+                }
                 Term *line = mk_lam("k", mk_app(Pk, pa, 0), 0); line->isi = 1;
                 Term *ih = mk_term(T_PATHP, line, E(px, &Ih, 0), E(py, &Ih, 0), NULL);
                 mt = mk_pi(xsprintf("ih%d", j), ih, mt, 0);
@@ -335,9 +388,14 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
             if (!A->isrec) continue;
             h--;
             int q = A->npi;
-            /* P_rm idx[y] (a_j y..)   under [params, P, mth(o), a(r), ih(h), y(q)] */
+            EInfo Iq = { C, 0, r, h, o, nbk, mi, np, dl, record };
+            /* P_rm idx[y] [img] (a_j y..)   under [params, P, mth(o), a(r), ih(h), y(q)] */
             Term *ih = mk_var(q + h + r + o + (nbk - 1 - rm));
-            for (int i = 0; i < A->nidx; i++) ih = mk_app(ih, shift2(A->idx[i], q, h + (r - j), q + j, h + (r - j) + o + nbk), 1);
+            for (int i = 0; i < A->nidx; i++) {
+                Term *ix = shift2(A->idx[i], q, h + (r - j), q + j, h + (r - j) + o + nbk);
+                ih = mk_app(ih, ix, 1);
+                if (RM->idxrec[i] >= 0) ih = mk_app(ih, E(ix, &Iq, q), 0);
+            }
             Term *aj = mk_var((r - 1 - j) + h + q);
             Term *aty = ATY(C, j); int yt = 1;
             for (Term *w = aty; w->k == T_PI && yt <= q; w = w->b, yt++) aj = mk_app(aj, mk_var(q - yt), w->irr);
@@ -353,11 +411,28 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
         t = mk_pi(xsprintf("m_%s", C->name), mt, t, 0);
       }
     }
-    /* motives, the last member's first: P_i : (idx_i..) -> D_i p idx -> U lvl   under [params, P_0..P_{i-1}] */
+    /* motives, the last member's first: P_i : (i_0 : I_0) [(h_0 : P_rm i_0)] .. -> D_i p i.. -> U lvl   under [params, P_0..P_{i-1}] */
     for (int mi = nbk - 1; mi >= 0; mi--) {
-        Data *M = data_at(b0 + mi, dl); int mm = M->nidx; int rel = M->hit || M->nidx > 0;   /* relevant with the motive: hcomp is a formal element */
-        Term *P = mk_pi("x", data_applied(b0 + mi, mm + mi, 0), mk_u_l(lvl), 0);
-        for (int j = mm - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), shift(M->itys[j], j, mi), P, !rel);
+        Data *M = data_at(b0 + mi, dl); int mm = M->nidx; int rel = motive_rel(b0 + mi);
+        int tot = mm + M->nimg;
+        int *pos = xalloc((mm + 1) * sizeof(int)); { int t2 = 0; for (int q = 0; q < mm; q++) { pos[q] = t2++; if (M->idxrec[q] >= 0) t2++; } }
+        Term *P = mk_ref_l(T_DATA, b0 + mi, elim_dlt);
+        for (int t2 = 0; t2 < np; t2++) P = mk_app(P, mk_var(tot + mi + (np - 1 - t2)), 1);
+        for (int q = 0; q < mm; q++) P = mk_app(P, mk_var(tot - 1 - pos[q]), 1);
+        P = mk_pi("x", P, mk_u_l(lvl), 0);
+        for (int q = mm - 1; q >= 0; q--) {
+            int rm = M->idxrec[q];
+            if (rm >= 0) {   /* the image of i_q: P_rm i_q   under [params, P(mi), b_0..b_{pos[q]}] */
+                int tb = pos[q] + 1;
+                Term *ity = mk_app(mk_var(tb + (mi - 1 - (rm - b0))), mk_var(0), 0);
+                P = mk_pi(xsprintf("h%d", q), ity, P, !rel);
+            }
+            int tb = pos[q];   /* I_q under [params, i_0..i_{q-1}] -> under [params, P(mi), b_0..b_{tb-1}] */
+            int *map = xalloc((q + np + 1) * sizeof(int));
+            for (int v = 0; v < q; v++) map[v] = tb - 1 - pos[q - 1 - v];
+            for (int v = 0; v < np; v++) map[q + v] = tb + mi + v;
+            P = mk_pi(xsprintf("i%d", q), remap(M->itys[q], q + np, map, 0), P, !rel);
+        }
         t = mk_pi(nbk == 1 ? "P" : xsprintf("P_%s", M->name), P, t, !rel);
     }
     for (int i = np - 1; i >= 0; i--) { t = mk_pi(xsprintf("p%d", i), PTY(i), t, 1); t->imp = 1; }   /* the parameters are implicit */
@@ -1068,21 +1143,24 @@ static int mentions_essentially(Term *t, int idx) {
    whose type is not D: the eliminator images recursive arguments by their induction hypotheses, which inhabit the
    motive, so a recursive argument at any other position would give the method an ill-typed boundary.
    Context of a boundary: [params(np), args(r), intervals(nint)] (+ depth under binders opened inside it). */
-typedef struct { Con *C; int np, r, nint, line; } BGram;
-static const char *bg_D(BGram *g) { return datas[g->C->data].name; }
+typedef struct { Con *C; int np, r, nint, line; int dt; } BGram;   /* dt: the data type the position ranges over */
+static const char *bg_D(BGram *g) { return datas[g->dt].name; }
 /* a variable standing for a recursive argument of the constructor: its ordinal in *j */
-static int bg_rec_var(BGram *g, Term *t, int depth, int *j) {
+static int bg_rec_var_any(BGram *g, Term *t, int depth, int *j) {   /* a recursive argument, of any member */
     if (t->k != T_VAR || t->n < depth) return 0;
     int idx = t->n - depth;
     if (idx < g->nint || idx >= g->nint + g->r) return 0;
     *j = g->r - 1 - (idx - g->nint);
     return g->C->args[*j].isrec || g->C->args[*j].isrecpath;
 }
+static int bg_rec_var(BGram *g, Term *t, int depth, int *j) {   /* a recursive argument of the position's member */
+    return bg_rec_var_any(g, t, depth, j) && g->C->args[*j].rec == g->dt;
+}
 /* a position whose type is not D: no recursive argument inside */
 static void bg_no_rec(BGram *g, Term *t, int depth) {
     if (!t) return;
     int j;
-    if (bg_rec_var(g, t, depth, &j))
+    if (bg_rec_var_any(g, t, depth, &j))
         die("line %d: the boundary of %s uses the recursive argument %s at a position whose type is not %s; a recursive argument may only stand for an element of %s (its image under the eliminator is an induction hypothesis)",
             g->line, g->C->name, g->C->args[j].name, bg_D(g), bg_D(g));
     switch (t->k) {
@@ -1104,6 +1182,8 @@ static void bg_path(BGram *g, Term *t, int depth) {
 /* an element of D */
 static void bg_elem(BGram *g, Term *t, int depth) {
     int j;
+    if (bg_rec_var_any(g, t, depth, &j) && g->C->args[j].rec != g->dt)
+        die("line %d: the boundary or index of %s: the recursive argument %s is an element of %s, not of %s", g->line, g->C->name, g->C->args[j].name, datas[g->C->args[j].rec].name, bg_D(g));
     if (bg_rec_var(g, t, depth, &j)) {
         if (g->C->args[j].isrec && g->C->args[j].npi == 0) return;
         die("line %d: the boundary of %s: the recursive argument %s is not an element of %s; apply it", g->line, g->C->name, g->C->args[j].name, bg_D(g));
@@ -1120,11 +1200,11 @@ static void bg_elem(BGram *g, Term *t, int depth) {
         for (Term *x = t; x->k == T_APP; x = x->a) bg_no_rec(g, x->b, depth);
         return;
     }
-    if (w->k != T_CON || cons[w->n].data != g->C->data)
-        die("line %d: the boundary of %s: an element of %s in a boundary must be a recursive argument or an earlier constructor applied; a Kan operation, eliminator, definition or let cannot stand for one (CHM18 3.2)",
+    if (w->k != T_CON || cons[w->n].data != g->dt)
+        die("line %d: the boundary or index of %s: an element of %s here must be a recursive argument or an earlier constructor applied; a Kan operation, eliminator, definition or let cannot stand for one (CHM18 3.2)",
             g->line, g->C->name, bg_D(g));
     Con *Cp = &cons[w->n];
-    if (Cp->ci >= g->C->ci) die("line %d: the boundary of %s uses the later constructor %s; boundaries may only use earlier constructors", g->line, g->C->name, Cp->name);
+    if (Cp->bord >= g->C->bord) die("line %d: the boundary or index of %s uses the later constructor %s; only earlier constructors may appear", g->line, g->C->name, Cp->name);
     if (nargs != g->np + Cp->nargs + Cp->nint)
         die("line %d: the boundary of %s applies %s to %d arguments, expected %d", g->line, g->C->name, Cp->name, nargs, g->np + Cp->nargs + Cp->nint);
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
@@ -1132,14 +1212,17 @@ static void bg_elem(BGram *g, Term *t, int depth) {
     for (int i = 0; i < g->np; i++) bg_no_rec(g, args[i], depth);
     for (int q = 0; q < Cp->nargs; q++) {
         Term *a = args[g->np + q]; ConArg *A = &Cp->args[q];
-        if (A->isrecpath) bg_path(g, a, depth);
-        else if (!A->isrec) bg_no_rec(g, a, depth);
-        else if (A->npi == 0) bg_elem(g, a, depth);
-        else {   /* a function into D: an abstraction over its arguments whose body is an element */
+        if (!(A->isrec || A->isrecpath)) { bg_no_rec(g, a, depth); continue; }
+        BGram g2 = *g; g2.dt = A->rec;   /* the position ranges over the member of the recursive occurrence */
+        if (A->isrecpath) bg_path(&g2, a, depth);
+        else if (A->npi == 0) bg_elem(&g2, a, depth);
+        else {   /* a function into the member: a recursive argument of that function type, or an abstraction whose body is an element */
+            int jj;
+            if (bg_rec_var(&g2, a, depth, &jj) && g->C->args[jj].isrec && g->C->args[jj].npi == A->npi) continue;
             Term *b = a; int k = 0;
             while (k < A->npi && b->k == T_LAM && !b->isi) { b = b->a; k++; }
-            if (k < A->npi) die("line %d: the boundary of %s: the argument %s of %s (a function into %s) must be an abstraction", g->line, g->C->name, A->name, Cp->name, bg_D(g));
-            bg_elem(g, b, depth + k);
+            if (k < A->npi) die("line %d: the boundary or index of %s: the argument %s of %s (a function into %s) must be an abstraction or a recursive argument of that type", g->line, g->C->name, A->name, Cp->name, bg_D(&g2));
+            bg_elem(&g2, b, depth + k);
         }
     }
     for (int q = 0; q < Cp->nint; q++) bg_no_rec(g, args[g->np + Cp->nargs + q], depth);
@@ -1176,6 +1259,15 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
             Env *ie = c.env; for (int j = 0; j < m; j++) ie = env_push(ie, vvar(c.n + j));
             D.lvl = w->a ? eval_level(ie, w->a) : lv_const(w->n);
             for (int q = 0; q < D.lvl.n; q++) if (!D.lvl.t[q].meta && D.lvl.t[q].var >= c.n) die("line %d: the universe level of data %s may not depend on an index", s->line, s->name);
+        }
+        D.idxrec = xalloc((m + 1) * sizeof(int)); D.nimg = 0;
+        for (int q = 0; q < m; q++) {   /* an index ranging over an earlier member: the eliminator images it */
+            Term **ix; int nix, which = -1; D.idxrec[q] = -1;
+            if (!mentions_range(D.itys[q], d0, ndatas)) continue;
+            if (!data_spine_any(D.itys[q], d0, ndatas, q, &ix, &nix, &which))
+                die("line %d: data %s: an index type mentioning a member of the block must be that member applied to the parameters", s->line, s->name);
+            if (nix > 0) die("line %d: data %s: an index of type %s applied to indices is not supported yet", s->line, s->name, datas[which].name);
+            D.idxrec[q] = which; D.nimg++;
         }
         Term *full = ity;
         for (int q = nparams - 1; q >= 0; q--) full = mk_pi(params[q].name, ptys[q], full, 0);
@@ -1240,6 +1332,13 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         C.ridx = ridx;
         for (int j = 0; j < nridx; j++) for (int q = 0; q < nint; q++)
             if (term_mentions_var(ridx[j], nint - 1 - q)) die("line %d: path constructor %s: an index may not vary along the interval", sc->line, sc->name);
+        /* an index ranging over a member is imaged by the eliminator: it must be in the constructor language */
+        for (int q = 0; q < nridx; q++) if (datas[d].idxrec[q] >= 0) { BGram g = { &C, nparams, r, nint, sc->line, datas[d].idxrec[q] }; bg_elem(&g, ridx[q], 0); }
+        for (int j = 0; j < r; j++) {
+            ConArg *A = &C.args[j];
+            if (!(A->isrec || A->isrecpath)) continue;
+            for (int q = 0; q < A->nidx; q++) if (datas[A->rec].idxrec[q] >= 0) { BGram g = { &C, nparams, j, 0, sc->line, datas[A->rec].idxrec[q] }; bg_elem(&g, A->idx[q], A->isrec ? A->npi : 0); }
+        }
         if (sc->boundary && nint == 0) die("line %d: constructor %s has a boundary but no interval binders", sc->line, sc->name);
         if (sc->boundary) {   /* the boundary: a system of elements of D params under [params, args, intervals] */
             Ctx bc = c; bc.names = xalloc((c.n + r + nint + 1) * sizeof(char *)); bc.tys = xalloc((c.n + r + nint + 1) * sizeof(Val *));
@@ -1255,7 +1354,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
             Val *pty = mkval(V_PARTIAL); pty->a = vi(cover); pty->b = Dv;
             C.boundary = zonk(check(&bc, sc->boundary, pty));   /* its implicit arguments are determined by the constructor's own type */
             {   /* the boundary must be in the constructor language (CHM18): checked after typing, at the declaration */
-                BGram g = { &C, nparams, r, nint, sc->line };
+                BGram g = { &C, nparams, r, nint, sc->line, d };
                 for (int i2 = 0; i2 < C.boundary->nbr; i2++) bg_elem(&g, C.boundary->br[i2].body, 0);
             }
             /* does the boundary depend on the parameters beyond passing them to constructors? (then transport must correct it) */

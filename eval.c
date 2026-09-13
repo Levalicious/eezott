@@ -697,6 +697,21 @@ static Val *ih_apply(Native *c, Val *y) {
     return elim_apply_list(c->i1, &args);
 }
 
+/* the motive of member `data` applied to the indices and, where an index ranges over a member, to its image: that member's
+   elimination of it with the same prefix (M11b) */
+static Val *motive_applied(int data, VList *pre, Val **idx) {
+    Data *D = &datas[data]; int np = D->nparams, nb = D->nblock, K = block_ncons(data);
+    Val *P = pre->a[np + D->bpos].v;
+    for (int j = 0; j < D->nidx; j++) {
+        P = vapp(P, idx[j], 1);
+        if (D->idxrec[j] >= 0) {
+            VList a2 = {0}; for (int i = 0; i < np + nb + K; i++) vl_push(&a2, pre->a[i].v, prefix_irr(data, i));
+            vl_push(&a2, idx[j], 0);
+            P = vapp(P, elim_apply_list(D->idxrec[j], &a2), 0);
+        }
+    }
+    return P;
+}
 /* iota: the eliminator's full spine ends in a constructor */
 static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
@@ -766,8 +781,9 @@ static Val *elim_reduce(int data, VList *args) {
         Val *img = vsys_map(bsys, elim_of_branch, &base);
         IVal phi = iv_zero();
         if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) phi = iv_or(phi, bsys->br[i].phi->iv); } else phi = iv_one();
-        Val *P = args->a[np + D->bpos].v;
-        for (int j = 0; j < D->nidx; j++) P = vapp(P, args->a[np + nb + K + j].v, 1);
+        Val **iv = xalloc((D->nidx + 1) * sizeof(Val *));
+        for (int j = 0; j < D->nidx; j++) iv[j] = args->a[np + nb + K + j].v;
+        Val *P = motive_applied(data, args, iv);
         return vouts(vapp(P, target, 0), vi(phi), img, res);
     }
     return res;
@@ -785,9 +801,10 @@ static Val *elim_hcomp(int data, VList *args) {
     if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
     Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
     for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
-    Native *nt = xalloc(sizeof *nt); nt->code = N_ELIM_MOTIVE_LINE; nt->i1 = m;
-    vl_push(&nt->cap, args->a[np + D->bpos].v, 0);
-    for (int j = 0; j < m; j++) vl_push(&nt->cap, args->a[np + nb + K + j].v, 0);
+    Native *nt = xalloc(sizeof *nt); nt->code = N_ELIM_MOTIVE_LINE; nt->i1 = 0;   /* the motive at the indices (and their images), then the filler */
+    Val **iv = xalloc((m + 1) * sizeof(Val *));
+    for (int j = 0; j < m; j++) iv[j] = args->a[np + nb + K + j].v;
+    vl_push(&nt->cap, motive_applied(data, args, iv), 0);
     vl_push(&nt->cap, vnative(N_FILL, 1, 0, 0, 4, t->a, t->b, t->c, t->dom), 0);
     Val *line = mkval(V_LAM); line->clo.fn = nfn; line->clo.data = nt; line->isi = 1; line->name = "k";
     return vcomp(line, t->b, vnative(N_ELIM_SIDES, 0, 0, 0, 2, E, t->c), vapp(E, t->dom, 0));

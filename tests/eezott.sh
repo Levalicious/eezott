@@ -122,6 +122,7 @@ check glue_forall.tt   bool false
 checkN nf_hit_hcomp.tt
 checkN nf_mutual_hit.tt
 checkN nf_pt_rec.tt
+checkN nf_iit_elim.tt
 checkN nf_hit_endpoint.tt
 checkN nf_hit_nested.tt
 checkN nf_torus_corner.tt

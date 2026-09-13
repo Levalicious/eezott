@@ -36,7 +36,11 @@
  * inductive types together (inductive-inductive when a later member's
  * indices use an earlier member's constructors); strict positivity is
  * checked across the block, and every member's induction principle takes
- * the motives and methods of the whole block.
+ * the motives and methods of the whole block. M11b: an index ranging over
+ * an earlier member gives the motive an image binder (the earlier motive's
+ * value at that index), so that the principle is the inductive-inductive
+ * one: methods and hypotheses see the images of their indices, and the
+ * elimination of an element has the eliminations of its indices in its type.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,
@@ -317,6 +321,8 @@ struct Data {
     int *cons; int ncons;
     int poly;
     int hit;                               /* has path constructors: hcomp is a normal form */
+    int *idxrec, nimg;                     /* idxrec[q]: the block member the q-th index ranges over (-1: none); the eliminator's motive
+                                              takes that member's motive value there (an image); nimg: how many such indices */
     int block, nblock, bpos, bcons0;       /* the block (mutual declaration): its first member, member count, this member's position,
                                               ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
