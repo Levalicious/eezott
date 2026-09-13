@@ -23,6 +23,10 @@
  * U {l} and Pre {l} carry one; Level itself is a pretype, so a function
  * type over it is a pretype (Agda's Setomega). Level binders and level
  * arguments have no run-time meaning and are erased.
+ * M9: boundaries are in the constructor language (CHM18 3.2): an element of the
+ * type in a boundary is a recursive argument, an applied recursive path
+ * argument, or an earlier constructor applied; a recursive argument never
+ * stands at a position of another type. Checked at the declaration.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,

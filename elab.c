@@ -390,6 +390,8 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     switch (h->k) {
     case S_ELIM: {
         int d = find_data(h->name);
+        if (d >= 0 && d == cur_data)   /* its constructors are not all declared yet: an eliminator here would have too few methods */
+            die("line %d: elim %s inside the declaration of %s: the type is not complete yet", s->line, h->name, h->name);
         if (d < 0) die("line %d: elim of unknown data type '%s'", h->line, h->name);
         Data *D = &datas[d]; int np = D->nparams, m = D->nidx;
         if (n < np + 1) die("line %d: elim %s needs its %d parameter%s and a motive", h->line, D->name, np, np == 1 ? "" : "s");
@@ -932,6 +934,90 @@ static int mentions_essentially(Term *t, int idx) {
     default: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx) || mentions_essentially(t->d, idx);
     }
 }
+/* The boundary grammar (CHM18, 3.2): an element of D in a boundary is a recursive argument of the constructor, a
+   recursive path argument applied to an interval, a recursive argument of function type applied, or an earlier
+   constructor of D applied to the parameters, to arguments by this grammar and to intervals. Nothing else stands for
+   an element of D (no Kan operation, eliminator, definition or let), and no recursive argument appears at a position
+   whose type is not D: the eliminator images recursive arguments by their induction hypotheses, which inhabit the
+   motive, so a recursive argument at any other position would give the method an ill-typed boundary.
+   Context of a boundary: [params(np), args(r), intervals(nint)] (+ depth under binders opened inside it). */
+typedef struct { Con *C; int np, r, nint, line; } BGram;
+static const char *bg_D(BGram *g) { return datas[g->C->data].name; }
+/* a variable standing for a recursive argument of the constructor: its ordinal in *j */
+static int bg_rec_var(BGram *g, Term *t, int depth, int *j) {
+    if (t->k != T_VAR || t->n < depth) return 0;
+    int idx = t->n - depth;
+    if (idx < g->nint || idx >= g->nint + g->r) return 0;
+    *j = g->r - 1 - (idx - g->nint);
+    return g->C->args[*j].isrec || g->C->args[*j].isrecpath;
+}
+/* a position whose type is not D: no recursive argument inside */
+static void bg_no_rec(BGram *g, Term *t, int depth) {
+    if (!t) return;
+    int j;
+    if (bg_rec_var(g, t, depth, &j))
+        die("line %d: the boundary of %s uses the recursive argument %s at a position whose type is not %s; a recursive argument may only stand for an element of %s (its image under the eliminator is an induction hypothesis)",
+            g->line, g->C->name, g->C->args[j].name, bg_D(g), bg_D(g));
+    switch (t->k) {
+    case T_PI: case T_SIGMA: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth + 1); return;
+    case T_LAM: bg_no_rec(g, t->a, depth + 1); return;
+    case T_LET: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth); bg_no_rec(g, t->c, depth + 1); return;
+    case T_SYS: for (int i = 0; i < t->nbr; i++) { bg_no_rec(g, t->br[i].face, depth); bg_no_rec(g, t->br[i].body, depth); } return;
+    default: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth); bg_no_rec(g, t->c, depth); bg_no_rec(g, t->d, depth); return;
+    }
+}
+static void bg_elem(BGram *g, Term *t, int depth);
+/* a path in D: a recursive path argument, or an abstraction over an interval whose body is an element */
+static void bg_path(BGram *g, Term *t, int depth) {
+    int j;
+    if (bg_rec_var(g, t, depth, &j) && g->C->args[j].isrecpath) return;
+    if (t->k == T_LAM && t->isi) { bg_elem(g, t->a, depth + 1); return; }
+    die("line %d: the boundary of %s: a path in %s must be a recursive path argument or an abstraction over an interval", g->line, g->C->name, bg_D(g));
+}
+/* an element of D */
+static void bg_elem(BGram *g, Term *t, int depth) {
+    int j;
+    if (bg_rec_var(g, t, depth, &j)) {
+        if (g->C->args[j].isrec && g->C->args[j].npi == 0) return;
+        die("line %d: the boundary of %s: the recursive argument %s is not an element of %s; apply it", g->line, g->C->name, g->C->args[j].name, bg_D(g));
+    }
+    if (t->k == T_PAPP) {   /* a recursive path argument at an interval */
+        if (bg_rec_var(g, t->a, depth, &j) && g->C->args[j].isrecpath) { bg_no_rec(g, t->b, depth); return; }
+        die("line %d: the boundary of %s: only a recursive path argument may be applied to an interval here", g->line, g->C->name);
+    }
+    int nargs = 0; Term *w = t;
+    while (w->k == T_APP) { nargs++; w = w->a; }
+    if (bg_rec_var(g, w, depth, &j)) {   /* a recursive argument of function type, applied */
+        if (!g->C->args[j].isrec || nargs != g->C->args[j].npi)
+            die("line %d: the boundary of %s: the recursive argument %s must be applied to exactly its %d argument%s", g->line, g->C->name, g->C->args[j].name, g->C->args[j].npi, g->C->args[j].npi == 1 ? "" : "s");
+        for (Term *x = t; x->k == T_APP; x = x->a) bg_no_rec(g, x->b, depth);
+        return;
+    }
+    if (w->k != T_CON || cons[w->n].data != g->C->data)
+        die("line %d: the boundary of %s: an element of %s in a boundary must be a recursive argument or an earlier constructor applied; a Kan operation, eliminator, definition or let cannot stand for one (CHM18 3.2)",
+            g->line, g->C->name, bg_D(g));
+    Con *Cp = &cons[w->n];
+    if (Cp->ci >= g->C->ci) die("line %d: the boundary of %s uses the later constructor %s; boundaries may only use earlier constructors", g->line, g->C->name, Cp->name);
+    if (nargs != g->np + Cp->nargs + Cp->nint)
+        die("line %d: the boundary of %s applies %s to %d arguments, expected %d", g->line, g->C->name, Cp->name, nargs, g->np + Cp->nargs + Cp->nint);
+    Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
+    for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
+    for (int i = 0; i < g->np; i++) bg_no_rec(g, args[i], depth);
+    for (int q = 0; q < Cp->nargs; q++) {
+        Term *a = args[g->np + q]; ConArg *A = &Cp->args[q];
+        if (A->isrecpath) bg_path(g, a, depth);
+        else if (!A->isrec) bg_no_rec(g, a, depth);
+        else if (A->npi == 0) bg_elem(g, a, depth);
+        else {   /* a function into D: an abstraction over its arguments whose body is an element */
+            Term *b = a; int k = 0;
+            while (k < A->npi && b->k == T_LAM && !b->isi) { b = b->a; k++; }
+            if (k < A->npi) die("line %d: the boundary of %s: the argument %s of %s (a function into %s) must be an abstraction", g->line, g->C->name, A->name, Cp->name, bg_D(g));
+            bg_elem(g, b, depth + k);
+        }
+    }
+    for (int q = 0; q < Cp->nint; q++) bg_no_rec(g, args[g->np + Cp->nargs + q], depth);
+}
+
 static void elab_data(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
@@ -1027,6 +1113,10 @@ static void elab_data(SDecl *s) {
             for (int j = 0; j < nridx; j++) vl_push(&Dv->args, eval(bc.env, ridx[j]), 1);   /* the boundary lives at the constructor's own index */
             Val *pty = mkval(V_PARTIAL); pty->a = vi(cover); pty->b = Dv;
             C.boundary = check(&bc, sc->boundary, pty);
+            {   /* the boundary must be in the constructor language (CHM18): checked after typing, at the declaration */
+                BGram g = { &C, s->nparams, r, nint, sc->line };
+                for (int i = 0; i < C.boundary->nbr; i++) bg_elem(&g, C.boundary->br[i].body, 0);
+            }
             /* does the boundary depend on the parameters beyond passing them to constructors? (then transport must correct it) */
             for (int i = 0; i < C.boundary->nbr; i++)
                 for (int p = 0; p < s->nparams; p++) if (mentions_essentially(C.boundary->br[i].body, r + nint + (s->nparams - 1 - p))) C.bparams = 1;

@@ -1,0 +1,6 @@
+-- a boundary may not contain a Kan operation: hcomp is not in the constructor language (CHM18 3.2)
+data W : U where
+  | w : W
+  | wl : (i : I) -> W [ ~ i -> w | i -> hcomp W i0 (\_ -> []) w ]
+def g : W -> W := elim W (\_ -> W) w (\i -> wl i)
+def main : Nat := one

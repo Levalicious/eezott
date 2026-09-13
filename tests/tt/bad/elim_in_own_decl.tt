@@ -1,0 +1,5 @@
+-- the eliminator of a type may not be used inside the type's own declaration: it would have too few methods
+data W : Nat -> U where
+  | c0 : W zero
+  | c1 : (x : W zero) -> W (elim W (\_ -> Nat) x)
+def main : Nat := one
