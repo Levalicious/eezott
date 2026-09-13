@@ -72,3 +72,56 @@ def isoToIsEquiv (A B : U) (f : A -> B) (g : B -> A) (s : (b : B) -> Path B (f (
   \y -> ((g y , s y) , \z -> lemIso A B f g s t y (g y) (fst z) (s y) (snd z))
 def isoToEquiv (A B : U) (f : A -> B) (g : B -> A) (s : (b : B) -> Path B (f (g b)) b) (t : (a : A) -> Path A (g (f a)) a) : Equiv A B :=
   (f , isoToIsEquiv A B f g s t)
+
+-- h-levels (Cubical.Foundations.Prelude / HLevels)
+data Empty : U where
+data Unit : U where
+  | tt : Unit
+def isProp (A : U) : U := (x y : A) -> Path A x y
+def isSet (A : U) : U := (x y : A) -> isProp (Path A x y)
+def isGroupoid (A : U) : U := (x y : A) -> isSet (Path A x y)
+def isContrIsProp {A : U} (h : isContr A) : isProp A := \x y -> compPath A x (fst h) y (sym A (fst h) x (snd h x)) (snd h y)
+-- a proposition is a set (isProp->isSet): the square is filled from the corner a
+def isPropIsSet {A : U} (h : isProp A) : isSet A := \a b p q -> \i j ->
+  hcomp A (i \/ ~ i \/ j \/ ~ j) (\k -> [ ~ i -> h a (p j) k | i -> h a (q j) k | ~ j -> h a a k | j -> h a b k ]) a
+def isPropUnit : isProp Unit := \x y -> elim Unit (\x -> Path Unit x y) (elim Unit (\y -> Path Unit tt y) (\_ -> tt) y) x
+def isPropEmpty : isProp Empty := \x y -> elim Empty (\x -> Path Empty x y) x
+def isPropNeg {A : U} : isProp (A -> Empty) := \f g -> \i -> \x -> elim Empty (\_ -> Path Empty (f x) (g x)) (f x) i
+def isPropPi {A : U} {B : A -> U} (h : (x : A) -> isProp (B x)) : isProp ((x : A) -> B x) := \f g -> \i -> \x -> h x (f x) (g x) i
+def isSetPi {A : U} {B : A -> U} (h : (x : A) -> isSet (B x)) : isSet ((x : A) -> B x) :=
+  \f g p q -> \i j -> \x -> h x (f x) (g x) (\k -> p k x) (\k -> q k x) i j
+-- decidable equality and Hedberg's theorem (Cubical.Relation.Nullary.Properties)
+data Dec (A : U) : U where
+  | yes : A -> Dec A
+  | no : (A -> Empty) -> Dec A
+def Discrete (A : U) : U := (x y : A) -> Dec (Path A x y)
+def Stable (A : U) : U := ((A -> Empty) -> Empty) -> A
+def DecStable {A : U} (d : Dec A) : Stable A := elim Dec (\_ -> Stable A) (\a _ -> a) (\na nna -> elim Empty (\_ -> A) (nna na)) d
+def stableEqIsSet {A : U} (st : (x y : A) -> Stable (Path A x y)) : isSet A := \a b p q -> \j i ->
+  let f : (x : A) -> Path A a x -> Path A a x := \x r -> st a x (\h -> h r) in
+  let fIsConst : (x : A) -> (r s : Path A a x) -> Path (Path A a x) (f x r) (f x s) := \x r s -> \k -> st a x (isPropNeg (\h -> h r) (\h -> h s) k) in
+  let rem : (r : Path A a b) -> PathP (\k -> Path A a (r k)) (f a (\_ -> a)) (f b r) := \r -> \k -> f (r k) (\l -> r (l /\ k)) in
+  hcomp A (i \/ ~ i \/ j \/ ~ j) (\k -> [ ~ i -> f a (\_ -> a) k | i -> fIsConst b p q j k | ~ j -> rem p i k | j -> rem q i k ]) a
+def discreteIsSet {A : U} (d : Discrete A) : isSet A := stableEqIsSet (\x y -> DecStable (d x y))
+-- the naturals are discrete, hence a set
+def pred : Nat -> Nat := \n -> elim Nat (\_ -> Nat) zero (\k _ -> k) n
+def injSuc {m n : Nat} (p : Path Nat (suc m) (suc n)) : Path Nat m n := \i -> pred (p i)
+def caseNat (a0 as : U) (n : Nat) : U := elim Nat (\_ -> U) a0 (\_ _ -> as) n
+def znots {n : Nat} (p : Path Nat zero (suc n)) : Empty := transp (\i -> caseNat Unit Empty (p i)) i0 tt
+def snotz {n : Nat} (p : Path Nat (suc n) zero) : Empty := znots (\i -> p (~ i))
+def discreteNat : Discrete Nat := \m -> elim Nat (\m -> (n : Nat) -> Dec (Path Nat m n))
+  (\n -> elim Nat (\n -> Dec (Path Nat zero n)) (yes (\_ -> zero)) (\k _ -> no (\p -> znots p)) n)
+  (\m ihm -> \n -> elim Nat (\n -> Dec (Path Nat (suc m) n)) (no (\p -> snotz p))
+     (\k _ -> elim Dec (\_ -> Dec (Path Nat (suc m) (suc k))) (\p -> yes (\i -> suc (p i))) (\np -> no (\p -> np (injSuc p))) (ihm k)) n) m
+def isSetNat : isSet Nat := discreteIsSet discreteNat
+-- propositional truncation and set quotients, with their recursion principles into propositions and sets
+data PT (A : U) : U where
+  | tinc : A -> PT A
+  | squash1 : (x y : PT A) -> (i : I) -> PT A [ ~ i -> x | i -> y ]
+def PT_rec {A B : U} (Bprop : isProp B) (f : A -> B) : PT A -> B := \t -> elim PT (\_ -> B) (\a -> f a) (\x y ihx ihy -> \i -> Bprop ihx ihy i) t
+data SQ (A : U) (R : A -> A -> U) : U where
+  | inc : A -> SQ A R
+  | eq : (a b : A) -> R a b -> (i : I) -> SQ A R [ ~ i -> inc a | i -> inc b ]
+  | squash : (x y : SQ A R) -> (p q : Path (SQ A R) x y) -> (i j : I) -> SQ A R [ ~ i -> p j | i -> q j | ~ j -> x | j -> y ]
+def SQ_rec {A B : U} {R : A -> A -> U} (Bset : isSet B) (f : A -> B) (resp : (a b : A) -> R a b -> Path B (f a) (f b)) : SQ A R -> B :=
+  \s -> elim SQ (\_ -> B) (\a -> f a) (\a b r -> \i -> resp a b r i) (\x y p q ihx ihy ihp ihq -> \i j -> inS (Bset ihx ihy ihp ihq i j)) s

@@ -73,6 +73,8 @@ check implicit_lam.tt  nat 4
 check implicit_cons.tt nat 3
 check mutual_tree.tt   nat 4
 check mutual_iit.tt    nat 3
+check sq_rec.tt        nat 6
+check hedberg_dec.tt   nat 2
 check comp_nat.tt      nat 3
 check hfill_bool.tt    bool true
 check cong_sym.tt      nat 2
@@ -119,6 +121,7 @@ check glue_forall.tt   bool false
 
 checkN nf_hit_hcomp.tt
 checkN nf_mutual_hit.tt
+checkN nf_pt_rec.tt
 checkN nf_hit_endpoint.tt
 checkN nf_hit_nested.tt
 checkN nf_torus_corner.tt

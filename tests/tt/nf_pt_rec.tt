@@ -1,0 +1,2 @@
+-- the recursion principle of the propositional truncation into a proposition, at a point given by the path constructor
+def main : Unit := PT_rec isPropUnit (\_ -> tt) (squash1 (tinc zero) (tinc one) i1)

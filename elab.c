@@ -379,21 +379,43 @@ static Term *global_level(TKind k, int id, LVal *L) {
     int m = lv_meta_new(); *L = lv_meta(m);
     Term *t = mk_term(T_LMETA, NULL, NULL, NULL, NULL); t->n = m; return t;
 }
-typedef struct { STerm *num; Val *dom; int meta; } Deferred;   /* a numeral argument whose type is not known yet: a meta stands for it */
+/* an argument whose expected type is not known yet (a meta) and which cannot be inferred (a numeral, lambda, pair or system) is
+   deferred: a meta stands for it in the spine, and it is checked once the type is known, at the end of the enclosing check
+   in the same context (after the application's result type has met the expected type) */
+typedef struct { STerm *term; Val *dom; int meta; } Deferred;
 static Deferred *dnums; static int ndnums;
-static Term *check_numeral(Ctx *c, STerm *s, Val *ty);
-/* the deferred numerals whose types are known now are checked and their metas assigned; all: the rest are errors */
-static void resolve_numerals(Ctx *c, int all) {
-    int j = 0;
-    for (int i = 0; i < ndnums; i++) {
-        Val *dom = force(dnums[i].dom);
-        if (dom->k == V_NEU && dom->h == H_META) {
-            if (all) die("line %d: the type of the numeral %llu is not determined; write the implicit argument, f {e} ..", dnums[i].num->line, dnums[i].num->num);
-            dnums[j++] = dnums[i]; continue;
+static int deferrable(STerm *s) { return s->k == S_NUM || s->k == S_LAM || s->k == S_PAIR || s->k == S_SYS; }
+static Term *check(Ctx *c, STerm *s, Val *ty);
+static void resolve_deferred(Ctx *c, int all) {
+    for (;;) {
+        int found = -1;
+        for (int i = 0; i < ndnums && found < 0; i++) {
+            Val *dom = force(dnums[i].dom);
+            if (!(dom->k == V_NEU && dom->h == H_META) && tmetas[dnums[i].meta].ctxn == c->n) found = i;
         }
-        meta_assign(dnums[i].meta, check_numeral(c, dnums[i].num, dom), tmetas[dnums[i].meta].ctxn);
+        if (found < 0) break;
+        Deferred d = dnums[found]; dnums[found] = dnums[--ndnums];
+        meta_assign(d.meta, check(c, d.term, force(d.dom)), tmetas[d.meta].ctxn);   /* may defer further arguments inside */
     }
-    ndnums = j;
+    if (all && ndnums > 0) die("line %d: the type of this argument is not determined by its use; write the implicit argument, f {e} ..", dnums[0].term->line);
+}
+/* the type of an applied term is not known yet (a meta): it is a function type (x : ?D) -> ?C x with fresh metas for the
+   domain and the codomain, at fresh levels; the application determines the shape, later constraints the rest */
+static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
+    ty = force(ty);
+    if (!(ty->k == V_NEU && ty->h == H_META)) return ty;
+    /* in the meta's own context (a prefix of the current one): its solution may only use the meta's variables */
+    int k = tmetas[ty->n].ctxn;
+    if (k > c->n) die("line %d: internal: a meta from a deeper context", line);
+    Ctx c2 = *c; c2.n = k;
+    for (int i = c->n; i > k; i--) c2.env = c2.env->next;
+    int l1 = lv_meta_new(), l2 = lv_meta_new();
+    Term *dom = fresh_meta(&c2, vu_l(lv_meta(l1)), line);
+    Val *cty = mkval(V_PI); cty->name = "x"; cty->dom = eval(c2.env, dom); cty->clo.env = c2.env; cty->clo.t = mk_u_l(lv_meta(l2));
+    Term *cod = fresh_meta(&c2, cty, line);
+    Term *pi = mk_pi("x", dom, mk_app(shift(cod, 0, 1), mk_var(0), 0), 0);
+    if (!conv(k, ty, eval(c2.env, pi))) die("line %d: the type of an applied term is not known here and cannot be a function type", line);
+    return force(ty);
 }
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
     for (int i = 0; i < nargs; i++) {
@@ -402,12 +424,13 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             Term *m = fresh_meta(c, hty->dom, args[i]->line);
             head = mk_app(head, m, hty->irr); hty = force(inst(&hty->clo, eval(c->env, m)));
         }
-        if (hty->k == V_PI && args[i]->k == S_NUM) {   /* a numeral against a type not known yet: checked after the other arguments */
+        hty = refine_to_pi(c, hty, args[i]->line);
+        if (hty->k == V_PI && deferrable(args[i])) {   /* against a type not known yet: checked once the spine has met its expected type */
             Val *dom = force(hty->dom);
             if (dom->k == V_NEU && dom->h == H_META) {
                 int id = meta_new(dom, c->n, c->names, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
                 dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die("out of memory");
-                dnums[ndnums].num = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
+                dnums[ndnums].term = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
                 head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
                 continue;
             }
@@ -498,6 +521,18 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             for (int i = 0; i < nb; i++) ctx_pop(c);
         }
         Term *ety = elim_type(d, lvl, res_irr, dl);
+        {   /* the indices and the target determine the parameters (metas), but they come last: check them first, for their
+               constraints; the spine is then checked in order (their terms are taken from that pass) */
+            int K = block_ncons(d), nbk = D->nblock, m = D->nidx;
+            if (n - ai == nbk + K + m + 1) {
+                Env *ie = pe; Val **iv = xalloc((m + 1) * sizeof(Val *));
+                for (int j = 0; j < m; j++) { Term *it = check(c, args[ai + nbk + K + j], eval(ie, DV->itys[j])); iv[j] = eval(c->env, it); ie = env_push(ie, iv[j]); }
+                Val *tt = mkval(V_DATA); tt->n = d; tt->lvl = dl;
+                for (int i = 0; i < np; i++) vl_push(&tt->args, pv[i], 1);
+                for (int j = 0; j < m; j++) vl_push(&tt->args, iv[j], 1);
+                (void)check(c, args[n - 1], tt);
+            }
+        }
         Term *head = mk_ref_l(T_ELIM, d, dlt); Val *hty = eval(NULL, ety);
         for (int i = 0; i < np; i++) { head = mk_app(head, pt[i], 1); hty = inst(&hty->clo, pv[i]); }
         return app_spine(c, args + ai, n - ai, head, hty, ty);
@@ -918,17 +953,17 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
         if (!conv(c->n, ty, U)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
         if (lv_enforce_leq(got->lvl, U->lvl) != 1) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
-        resolve_numerals(c, 0); return t;
+        resolve_deferred(c, 0); return t;
     }
     if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
         int r = lv_enforce_leq(got->lvl, ty->lvl);
-        if (r == 1) { resolve_numerals(c, 0); return t; }
+        if (r == 1) { resolve_deferred(c, 0); return t; }
         if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
         die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
     }
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
     if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
-    resolve_numerals(c, 0);
+    resolve_deferred(c, 0);
     return t;
 }
 
@@ -1264,7 +1299,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         }
     }
     #undef SLOT
-    resolve_numerals(&c, 0); metas_finish(ms[0]->name, line, mm0); resolve_numerals(&c, 1);
+    resolve_deferred(&c, 0); metas_finish(ms[0]->name, line, mm0); resolve_deferred(&c, 1);
     for (int i = 0; i < nt; i++) ts[i] = zonk(ts[i]);
     LVal *lvs = xalloc((n + 1) * sizeof(LVal)); for (int i = 0; i < n; i++) lvs[i] = datas[d0 + i].lvl;
     solve_metas(ms[0]->name, line, m0, mark, ts, nt, lvs, n);
@@ -1293,7 +1328,7 @@ static void elab_def(SDecl *s) {
     LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);
     Term *val = check(&c, s->val, vty);
-    resolve_numerals(&c, 0); metas_finish(s->name, s->line, mm0); resolve_numerals(&c, 1);
+    resolve_deferred(&c, 0); metas_finish(s->name, s->line, mm0); resolve_deferred(&c, 1);
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];

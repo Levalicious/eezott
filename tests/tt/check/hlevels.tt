@@ -1,0 +1,6 @@
+-- the h-level lemmas at work: a proposition is a set, functions into sets form a set, the naturals are a set and a groupoid
+def isSetUnit : isSet Unit := isPropIsSet isPropUnit
+def isSetNatNat : isSet (Nat -> Nat) := isSetPi (\_ -> isSetNat)
+def isGroupoidNat : isGroupoid Nat := \x y -> isPropIsSet (isSetNat x y)
+def isPropIsPropNat : isProp (isProp Nat) := isPropPi (\x -> isPropPi (\y -> isSetNat x y))
+def main : Nat := one
