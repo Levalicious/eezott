@@ -4,5 +4,5 @@ data Route (V : U) (E : V -> V -> U) : V -> V -> U where
   | step : (a : V) -> (b : V) -> (c : V) -> E a b -> Route V E b c -> Route V E a c
   | commute : (a : V) -> (b : V) -> (r : Route V E a b) -> (s : Route V E a b) -> (i : I) -> Route V E a b [ ~ i -> r | i -> s ]
 def idRoute (V : U) (E : V -> V -> U) : (a : V) -> (b : V) -> Route V E a b -> Route V E a b :=
-  \a b r -> elim Route V E (\a b _ -> Route V E a b) (\a -> stop V E a) (\a b c e r ih -> step V E a b c e ih) (\a b r s ihr ihs -> \i -> commute V E a b ihr ihs i) a b r
+  \a b r -> elim Route (\a b _ -> Route V E a b) (\a -> stop a) (\a b c e r ih -> step a b c e ih) (\a b r s ihr ihs -> \i -> commute a b ihr ihs i) a b r
 def main : Nat := one

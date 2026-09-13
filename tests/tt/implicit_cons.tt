@@ -1,0 +1,8 @@
+-- implicit constructor arguments: {n : Nat} is supplied as a meta at each use and abstracted in the eliminator's method;
+-- the data type's parameters are implicit in constructors and in elim
+data Vec' (A : U) : Nat -> U where
+  | vnil : Vec' A zero
+  | vcons : {n : Nat} -> A -> Vec' A n -> Vec' A (suc n)
+def vlen (A : U) (n : Nat) (v : Vec' A n) : Nat := elim Vec' (\n _ -> Nat) zero (\x xs ih -> suc ih) n v
+def vlen' (A : U) (n : Nat) (v : Vec' A n) : Nat := elim Vec' {A} (\n _ -> Nat) zero (\{m} x xs ih -> suc ih) n v
+def main : Nat := add (vlen Nat two (vcons one (vcons two vnil))) (vlen' Bool one (vcons {_} {zero} true vnil))

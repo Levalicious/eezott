@@ -3,9 +3,9 @@
 data IPo (A : U) (B : U) (C : U) (f : C -> A) (g : C -> B) : Nat -> U where
   | inl : (n : Nat) -> A -> IPo A B C f g n
   | inr : (n : Nat) -> B -> IPo A B C f g n
-  | push : (n : Nat) -> (c : C) -> (i : I) -> IPo A B C f g n [ ~ i -> inl A B C f g n (f c) | i -> inr A B C f g n (g c) ]
+  | push : (n : Nat) -> (c : C) -> (i : I) -> IPo A B C f g n [ ~ i -> inl n (f c) | i -> inr n (g c) ]
 def idN : Nat -> Nat := \x -> x
 def toNat : (n : Nat) -> IPo Nat Nat Nat idN idN n -> Nat :=
-  \n p -> elim IPo Nat Nat Nat idN idN (\_ _ -> Nat) (\n a -> a) (\n b -> b) (\n c -> \i -> c) n p
-def q : Path Nat one one := \i -> toNat two (push Nat Nat Nat idN idN two one i)
-def main : Nat := add (toNat two (transp (\i -> IPo Nat Nat Nat idN idN two) i0 (push Nat Nat Nat idN idN two one i1))) (q i0)
+  \n p -> elim IPo (\_ _ -> Nat) (\n a -> a) (\n b -> b) (\n c -> \i -> c) n p
+def q : Path Nat one one := \i -> toNat two (push two one i)
+def main : Nat := add (toNat two (transp (\i -> IPo Nat Nat Nat idN idN two) i0 (push two one i1))) (q i0)

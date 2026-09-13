@@ -3,8 +3,8 @@ data QVec (A : U) : Nat -> U where
   | qnil : QVec A zero
   | qcons : (n : Nat) -> A -> QVec A n -> QVec A (suc n)
   | swap : (n : Nat) -> (x : A) -> (y : A) -> (v : QVec A n) -> (i : I) -> QVec A (suc (suc n))
-      [ ~ i -> qcons A (suc n) x (qcons A n y v) | i -> qcons A (suc n) y (qcons A n x v) ]
-def qlen : (n : Nat) -> QVec Bool n -> Nat := \n v -> elim QVec Bool (\n _ -> Nat) zero (\n x v ih -> suc ih) (\n x y v ih -> \i -> suc (suc ih)) n v
-def w : QVec Bool two := swap Bool zero true false (qnil Bool) i1
-def p : Path Nat two two := \i -> qlen two (swap Bool zero true false (qnil Bool) i)
-def main : Nat := add (qlen two w) (qlen two (transp (\i -> QVec Bool two) i0 (swap Bool zero true false (qnil Bool) i0)))
+      [ ~ i -> qcons (suc n) x (qcons n y v) | i -> qcons (suc n) y (qcons n x v) ]
+def qlen : (n : Nat) -> QVec Bool n -> Nat := \n v -> elim QVec (\n _ -> Nat) zero (\n x v ih -> suc ih) (\n x y v ih -> \i -> suc (suc ih)) n v
+def w : QVec Bool two := swap zero true false (qnil) i1
+def p : Path Nat two two := \i -> qlen two (swap zero true false (qnil) i)
+def main : Nat := add (qlen two w) (qlen two (transp (\i -> QVec Bool two) i0 (swap zero true false (qnil) i0)))

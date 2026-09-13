@@ -3,8 +3,8 @@
 data Po (A : U) (B : U) (C : U) (f : C -> A) (g : C -> B) : U where
   | inl : A -> Po A B C f g
   | inr : B -> Po A B C f g
-  | push : (c : C) -> (i : I) -> Po A B C f g [ ~ i -> inl A B C f g (f c) | i -> inr A B C f g (g c) ]
+  | push : (c : C) -> (i : I) -> Po A B C f g [ ~ i -> inl (f c) | i -> inr (g c) ]
 def idN : Nat -> Nat := \x -> x
-def toNat : Po Nat Nat Nat idN idN -> Nat := \p -> elim Po Nat Nat Nat idN idN (\_ -> Nat) (\a -> a) (\b -> b) (\c -> \i -> c) p
-def q : Path Nat one one := \i -> toNat (push Nat Nat Nat idN idN one i)
-def main : Nat := add (toNat (transp (\i -> Po Nat Nat Nat idN idN) i0 (push Nat Nat Nat idN idN one i1))) (q i0)
+def toNat : Po Nat Nat Nat idN idN -> Nat := \p -> elim Po (\_ -> Nat) (\a -> a) (\b -> b) (\c -> \i -> c) p
+def q : Path Nat one one := \i -> toNat (push one i)
+def main : Nat := add (toNat (transp (\i -> Po Nat Nat Nat idN idN) i0 (push one i1))) (q i0)

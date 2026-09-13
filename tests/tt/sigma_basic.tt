@@ -1,3 +1,3 @@
-def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec Nat (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
-def q : Sigma Nat (\n -> Vec Nat n) := (two , cons Nat one two (cons Nat zero three (nil Nat)))
+def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
+def q : Sigma Nat (\n -> Vec Nat n) := (two , cons one two (cons zero three (nil)))
 def main : Nat := add (fst q) (vsum (fst q) (snd q))

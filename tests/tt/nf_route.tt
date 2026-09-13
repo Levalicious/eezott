@@ -4,6 +4,6 @@ data Route (V : U) (E : V -> V -> U) : V -> V -> U where
   | step : (a : V) -> (b : V) -> (c : V) -> E a b -> Route V E b c -> Route V E a c
   | commute : (a : V) -> (b : V) -> (r : Route V E a b) -> (s : Route V E a b) -> (i : I) -> Route V E a b [ ~ i -> r | i -> s ]
 def Edge (a : Bool) (b : Bool) : U := Nat
-def r : Route Bool Edge true false := step Bool Edge true false false one (stop Bool Edge false)
-def s : Route Bool Edge true false := step Bool Edge true true false zero (step Bool Edge true false false two (stop Bool Edge false))
-def main : Route Bool Edge true false := commute Bool Edge true false r s i1
+def r : Route Bool Edge true false := step true false false one (stop false)
+def s : Route Bool Edge true false := step true true false zero (step true false false two (stop false))
+def main : Route Bool Edge true false := commute true false r s i1

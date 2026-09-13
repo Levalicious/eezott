@@ -1,0 +1,4 @@
+-- an implicit argument nothing determines cannot be inferred
+def g {A : U} : Nat := one
+def h : Nat := g
+def main : Nat := h

@@ -1,0 +1,4 @@
+-- a hole as the type of a binder, determined by a later use
+def g (A : U) (x : _) (p : Path A x x) : A := x
+def h : Nat := g Nat one (\_ -> one)
+def main : Nat := h

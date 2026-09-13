@@ -1,5 +1,5 @@
 -- a formal composition in an indexed family, eliminated through a motive that depends on the index
-def len (n : Nat) (v : Vec Nat n) : Nat := elim Vec Nat (\n _ -> Nat) zero (\n x xs ih -> suc ih) n v
-def v2 : Vec Nat two := cons Nat one three (cons Nat zero two (nil Nat))
+def len (n : Nat) (v : Vec Nat n) : Nat := elim Vec (\n _ -> Nat) zero (\n x xs ih -> suc ih) n v
+def v2 : Vec Nat two := cons one three (cons zero two (nil))
 def c : Vec Nat two := hcomp (Vec Nat two) i0 (\_ -> []) v2
 def main : Nat := len two c

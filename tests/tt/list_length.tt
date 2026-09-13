@@ -1,2 +1,2 @@
-def length : (A : U) -> List A -> Nat := \A l -> elim List A (\_ -> Nat) zero (\x xs ih -> suc ih) l
-def main : Nat := length Bool (lcons Bool true (lcons Bool false (lcons Bool true (lnil Bool))))
+def length : (A : U) -> List A -> Nat := \A l -> elim List (\_ -> Nat) zero (\x xs ih -> suc ih) l
+def main : Nat := length Bool (lcons true (lcons false (lcons true (lnil))))

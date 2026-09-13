@@ -1,0 +1,3 @@
+-- an explicit parameter to elim that contradicts the target's type
+def bad (v : Vec Nat one) : Nat := elim Vec {Bool} (\n _ -> Nat) zero (\n x xs ih -> suc ih) one v
+def main : Nat := zero

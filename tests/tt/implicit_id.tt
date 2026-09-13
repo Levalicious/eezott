@@ -1,0 +1,7 @@
+-- implicit arguments: inserted as metas, solved by unification; written explicitly with {e}; a hole _ in an explicit position
+def ident {A : U} (x : A) : A := x
+def compose {A B C : U} (g : B -> C) (f : A -> B) (x : A) : C := g (f x)
+def idL {l : Level} {A : U {l}} (x : A) : A := x
+def T : U := idL Nat
+def const {A : U} {B : U} (x : A) (y : B) : A := x
+def main : Nat := add (ident one) (add (ident {Nat} two) (add (compose suc suc one) (add (idL one) (const {_} {Bool} two true))))

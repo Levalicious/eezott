@@ -9,6 +9,7 @@ OFILES=\
 	elab.$O\
 	erase.$O\
 	level.$O\
+	meta.$O\
 
 HFILES=\
 	tt.h\

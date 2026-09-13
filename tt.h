@@ -27,6 +27,11 @@
  * type in a boundary is a recursive argument, an applied recursive path
  * argument, or an earlier constructor applied; a recursive argument never
  * stands at a position of another type. Checked at the declaration.
+ * M10: implicit arguments and holes. A binder {x : A} is implicit: an
+ * application supplies its argument as a metavariable, a term checked
+ * against such a function type is abstracted over it, f {e} supplies it
+ * explicitly, and _ is a hole. Metas are solved by pattern unification
+ * inside conversion and substituted when the declaration ends (meta.c).
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,
@@ -57,12 +62,13 @@ void die(const char *fmt, ...);
 typedef enum { S_VAR, S_U, S_NUM, S_LEVEL, S_LZERO, S_LSUC, S_LMAX, S_PI, S_LAM, S_APP, S_LET, S_ELIM,
                S_I, S_I0, S_I1, S_IAND, S_IOR, S_INEG,
                S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
-               S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE } SKind;
+               S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE, S_HOLE } SKind;
 typedef struct STerm STerm;
-typedef struct { const char *name; STerm *ty; int line; } SBinder;   /* ty NULL for lambda binders */
+typedef struct { const char *name; STerm *ty; int line; int imp; } SBinder;   /* ty NULL for lambda binders; imp: written {x} */
 typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
+    int imp;                          /* an argument written {e}: it supplies the next implicit argument */
     const char *name;                 /* S_VAR name; S_ELIM data name; S_LET bound name */
     int lvl;                          /* S_U: a constant level (when a is NULL) */
     unsigned long long num;           /* S_NUM: a numeral, checked against a type shaped like the naturals */
@@ -101,7 +107,7 @@ typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_EL
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
                T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
                T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE,
-               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA, T_LVAL } TKind;
+               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA, T_LVAL, T_META } TKind;
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -109,8 +115,10 @@ struct Term {
     int irr;            /* T_PI/T_LAM: binder computationally irrelevant; T_APP: argument irrelevant; T_LET: bound value irrelevant */
     int isi;            /* T_PI/T_LAM: the binder is an interval variable */
     int pre;            /* T_U: the sort Pre l of pretypes; T_PI: the domain is a pretype */
+    int imp;            /* T_PI/T_LAM: the binder is implicit: elaboration supplies the argument (a meta) or the abstraction */
     const char *name;   /* binder name (T_PI/T_LAM/T_LET) */
     int n;              /* T_VAR index; T_U constant level (a NULL); T_LZERO the constant; T_LSUC how many; T_LMETA the meta's id; T_GLUE constant level (d NULL);
+                           T_META the meta's id (its spine, applications to the context's variables, follows);
                            T_DEF/T_DATA/T_CON/T_ELIM global id */
     LVal lvl;           /* T_LVAL: an embedded level value (atoms are context levels, so it is stable under binders) */
     Term *a, *b, *c, *d;/* T_U: a=level term (NULL: constant n); T_LSUC: a + n; T_LMAX: a b; T_GLUE: d=level term (NULL: constant n);
@@ -200,11 +208,12 @@ typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* sp
 typedef struct { Arg *a; int n, cap; } VList;
 typedef struct Clo Clo;
 struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
-typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE } HKind;
+typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META } HKind;
 typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
     int pre;            /* V_U: the sort Pre l of pretypes */
+    int imp;            /* V_PI/V_LAM: the binder is implicit */
     LVal lvl;           /* V_U: the level; V_L: the level value; V_GLUE: the universe level; V_DATA/V_CON/H_ELIM: the level the global is taken at */
     int n;              /* V_U level; V_NEU/H_VAR de Bruijn level; V_NEU/H_ELIM data id; V_DATA data id; V_CON con id */
     HKind h;
@@ -244,6 +253,30 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0);
 Val *vsys_at(Val *sys, const Face *f);   /* the branch of a system that is total on f (NULL if none) */
 Val *vouts(Val *A, Val *phi, Val *u, Val *s);
 int val_mentions_ivar(int depth, Val *v, int level);
+Val *vapply_arg(Val *f, Arg *a);             /* apply a spine entry (application, path application or projection) */
+
+/* ---------------- metavariables (meta.c) ---------------- */
+
+/* A meta stands for a term under the binders of the context it was minted
+ * in; its occurrences are the neutral ?m applied to that context's
+ * variables. Solved by pattern unification inside conversion
+ * (transactionally: a solution found by a comparison that fails is undone);
+ * constraints that are not patterns are postponed and retried when the
+ * declaration ends, when every meta must be solved and the solutions are
+ * substituted structurally (zonk). */
+typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known */
+extern Meta *tmetas; extern int ntmetas;
+int meta_new(Val *ty, int ctxn, const char **names, int line);
+Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
+Val *force(Val *v);                          /* a solved meta applied to its spine is its solution applied; else v */
+typedef struct { int u, p; } MMark;
+MMark meta_mark(void); void meta_rollback(MMark m);
+int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */
+void meta_postpone(int depth, Val *a, Val *b);
+void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
+Term *zonk(Term *t);                         /* replace every meta by its solution applied (dies on an unsolved one) */
+void meta_assign(int id, Term *t, int ctxn);  /* solve a meta whose spine is the context by a term of that context */
+int term_mentions_meta(Term *t, int id);
 
 /* ---------------- globals ---------------- */
 
@@ -251,7 +284,7 @@ typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
-    const char *name; Term *ty; int irr;   /* type of the argument, under [params, previous args] */
+    const char *name; Term *ty; int irr, imp;   /* type of the argument, under [params, previous args]; imp: an implicit argument */
     int isrec, npi;                        /* recursive: type is (y_1..y_npi) -> D params idx */
     Term **idx; int nidx;                  /* index terms of the recursive occurrence, under [params, prev args, y's] */
     int isrecpath; Term *px, *py;          /* recursive path argument: type is Path (D params) px py (endpoints under [params, prev args]) */

@@ -3,7 +3,7 @@
 def viaLet : Nat := let n : Nat := 9 in add n 1
 def viaMethod (n : Nat) : Nat := elim Nat (\_ -> Nat) 7 (\k ih -> ih) n
 def viaLam : Nat -> Nat := \_ -> 3
-def v : Vec Nat 2 := cons Nat 1 5 (cons Nat 0 7 (nil Nat))
+def v : Vec Nat 2 := cons 1 5 (cons 0 7 (nil))
 def pr : Sigma Nat (\_ -> Nat) := (4 , 11)
 def big : Nat := 1000000
 def main : Nat := 0
