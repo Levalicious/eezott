@@ -14,18 +14,70 @@
  * therefore relevant; only the positions that never carry run-time content
  * vanish: data-type parameters of constructors and eliminators, motives,
  * indices.  Constructors become Scott selectors and induction a recursive
- * case analysis built with the prelude's fix; the interval becomes the
- * Scott booleans; hcomp is the choice between its sides at i1 and its base.
- * hcomp in the universe has no run-time meaning before Glue and is refused.
+ * case analysis built with the prelude's fix.  The interval is three-valued
+ * Scott data, i0, half and i1, with Kleene's tables: a closed face is i0 or
+ * i1 and selects (tt_sel); half is the symbol of tt_forall, since a face is
+ * 1 in the free De Morgan algebra on one generator exactly when it is 1 at
+ * half (Kleene's chain is a De Morgan algebra and the map is injective on
+ * 0 and 1), and a face never contains a transport, so one symbol is enough.
+ * Faces are erased in sorted disjunctive normal form, so the same face
+ * erases to the same term whether it comes from a source program or from a
+ * quoted normal form.  hcomp is the choice between its sides at i1 and its
+ * base.  hcomp in the universe has no run-time meaning before Glue and is
+ * refused.  eezoc expands a definition at every reference, so the run-time
+ * prelude must stay small.
  * Output is ordinary eezoc source: definitions in dependency order, then
  * `;` and the program's main term.
  */
 #include "tt.h"
+#include <stdlib.h>
 
 int keep_kan;
 static FILE *out;
 static int self_data = -1;      /* while emitting tt_transp_D: references to D go through the fixpoint's self */
 
+/* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
+static IVal face_ival(Term *t, int depth) {
+    switch (t->k) {
+    case T_VAR: return iv_var(depth - 1 - t->n);
+    case T_I0: return iv_zero();
+    case T_I1: return iv_one();
+    case T_IAND: return iv_and(face_ival(t->a, depth), face_ival(t->b, depth));
+    case T_IOR: return iv_or(face_ival(t->a, depth), face_ival(t->b, depth));
+    case T_INEG: return iv_neg(face_ival(t->a, depth));
+    default: die("internal: a face that is not an interval term"); return iv_zero();
+    }
+}
+static int lit_cmp(const void *x, const void *y) { const ILit *a = x, *b = y; return a->var != b->var ? a->var - b->var : a->neg - b->neg; }
+static int conj_cmp(const void *x, const void *y) {
+    const IConj *a = x, *b = y;
+    for (int i = 0; i < a->n && i < b->n; i++) { int c = lit_cmp(&a->l[i], &b->l[i]); if (c) return c; }
+    return a->n - b->n;
+}
+/* the face in sorted disjunctive normal form: tt_ior of tt_iand of literals */
+static void erase_face(Term *t, int depth) {
+    IVal v = face_ival(t, depth);
+    if (iv_is_zero(v)) { fputs("tt_i0", out); return; }
+    if (iv_is_one(v)) { fputs("tt_i1", out); return; }
+    IConj *cs = xalloc((v.n + 1) * sizeof(IConj));
+    for (int i = 0; i < v.n; i++) {
+        cs[i].n = v.c[i].n; cs[i].l = xalloc((cs[i].n + 1) * sizeof(ILit));
+        for (int j = 0; j < cs[i].n; j++) cs[i].l[j] = v.c[i].l[j];
+        qsort(cs[i].l, cs[i].n, sizeof(ILit), lit_cmp);
+    }
+    qsort(cs, v.n, sizeof(IConj), conj_cmp);
+    for (int i = 0; i + 1 < v.n; i++) fputs("tt_ior(", out);
+    for (int i = 0; i < v.n; i++) {
+        if (i) fputs(")(", out);
+        for (int j = 0; j + 1 < cs[i].n; j++) fputs("tt_iand(", out);
+        for (int j = 0; j < cs[i].n; j++) {
+            if (j) fputs(")(", out);
+            if (cs[i].l[j].neg) fprintf(out, "tt_ineg(v%d)", cs[i].l[j].var); else fprintf(out, "v%d", cs[i].l[j].var);
+        }
+        for (int j = 0; j + 1 < cs[i].n; j++) fputc(')', out);
+    }
+    for (int i = 0; i + 1 < v.n; i++) fputc(')', out);
+}
 static void erase(Term *t, int depth) {
     switch (t->k) {
     case T_VAR: fprintf(out, "v%d", depth - 1 - t->n); break;
@@ -49,13 +101,9 @@ static void erase(Term *t, int depth) {
     case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
     case T_PATHP: fputs("tc_path(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
-    case T_I0: fputs("tt_i0", out); break;
-    case T_I1: fputs("tt_i1", out); break;
-    case T_IAND: fputs("tt_iand(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
-    case T_IOR: fputs("tt_ior(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
-    case T_INEG: fputs("tt_ineg(", out); erase(t->a, depth); fputc(')', out); break;
-    case T_SYS:
-        for (int i = 0; i < t->nbr; i++) { erase(t->br[i].face, depth); fputc('(', out); erase(t->br[i].body, depth); fputs(")(", out); }
+    case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: erase_face(t, depth); break;
+    case T_SYS:   /* a system selects its first branch whose face holds */
+        for (int i = 0; i < t->nbr; i++) { fputs("tt_sel(", out); erase_face(t->br[i].face, depth); fputs(")(", out); erase(t->br[i].body, depth); fputs(")(", out); }
         fputs("tt_absurd", out);
         for (int i = 0; i < t->nbr; i++) fputc(')', out);
         break;
@@ -210,12 +258,12 @@ static void mark(Term *t) {
 /* the run-time Glue layer: emitted right after the prelude's equivProof, which its transport rule calls */
 static void emit_glue_runtime(void) {
     /* Glue: an element is the glued element itself where phi holds, and otherwise the pair (sides, base) */
-    fputs("tt_glue := phi -> ts -> a -> phi(ts)(tt_pair(ts)(a))\n", out);
-    fputs("tt_unglue := phi -> te -> b -> phi(tt_fst(tt_snd(te))(b))(tt_snd(b))\n", out);
+    fputs("tt_glue := phi -> ts -> a -> tt_sel(phi)(ts)(tt_pair(ts)(a))\n", out);
+    fputs("tt_unglue := phi -> te -> b -> tt_sel(phi)(tt_fst(tt_snd(te))(b))(tt_snd(b))\n", out);
     fputs("tt_gA := c -> c(m -> a -> phi -> te -> a)\n", out);
     fputs("tt_gphi := c -> c(m -> a -> phi -> te -> phi)\n", out);
     fputs("tt_gte := c -> c(m -> a -> phi -> te -> te)\n", out);
-    fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(tt_ior(phi)(tt_ineg(phi)))(i -> phi(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(tt_ior(phi)(tt_ineg(phi)))(i -> tt_sel(phi)(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
     /* transport along a line of Glue types, as in the checker. At run time every interval value is an endpoint, so the
        face "forall i. phi" cannot be read off phi's values (i \/ ~ i and i1 are the same boolean function): it is taken
        to be i0, i.e. the glued types at the two ends are never assumed to form a line. That is the checker's generic
@@ -223,11 +271,11 @@ static void emit_glue_runtime(void) {
        closed data, and is the only one that is always meaningful. */
     fputs("tt_transp_glue := a -> phi -> te -> line -> psi -> u0 -> "
           "(fa -> (ungl -> (tf -> (a1 -> (phi1 -> (te1 -> "
-          "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_ior(phi1)(psi))(j -> phi1(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
+          "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_ior(phi1)(psi))(j -> tt_sel(phi1)(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
           "(tt_equivProof(tt_fst(te1))(tt_gA(line(tt_i1)))(tt_snd(te1))(a1)(tt_ior(psi)(fa))"
-          "(psi(tt_pair(u0)(j -> a1))(fa(tt_pair(tf(tt_i1))(j -> a1))(tt_absurd)))))"
+          "(tt_sel(psi)(tt_pair(u0)(j -> a1))(tt_sel(fa)(tt_pair(tf(tt_i1))(j -> a1))(tt_absurd)))))"
           "(tt_gte(line(tt_i1))))(tt_gphi(line(tt_i1))))"
-          "(tt_gcomp(i -> tt_gA(line(i)))(tt_ior(psi)(fa))(i -> psi(ungl(i))(fa(tt_fst(tt_snd(tt_gte(line(i))))(tf(i)))(tt_absurd)))(ungl(tt_i0))))"
+          "(tt_gcomp(i -> tt_gA(line(i)))(tt_ior(psi)(fa))(i -> tt_sel(psi)(ungl(i))(tt_sel(fa)(tt_fst(tt_snd(tt_gte(line(i))))(tf(i)))(tt_absurd)))(ungl(tt_i0))))"
           "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
           "(tt_i0)\n", out);
@@ -244,15 +292,20 @@ void erase_program(FILE *f) {
     def_used = xalloc((ndefs + 1) * sizeof(int)); data_used = xalloc((ndatas + 1) * sizeof(int));
     def_used[mainid] = 1; mark(defs[mainid].val);
     fputs("#import prelude\n", out);
-    /* the interval as Scott booleans; the run-time meaning of systems, hcomp, transport and the codes of the basic type formers */
-    fputs("tt_i0 := t -> f -> f\n", out);
-    fputs("tt_i1 := t -> f -> t\n", out);
-    fputs("tt_iand := a -> b -> a(b)(tt_i0)\n", out);
-    fputs("tt_ior := a -> b -> a(tt_i1)(b)\n", out);
-    fputs("tt_ineg := a -> a(tt_i0)(tt_i1)\n", out);
+    /* the interval as three-valued Scott data (i0, half, i1) with Kleene's tables; a closed face is i0 or i1 and
+       selects (tt_sel: 1 -> x, 0 -> y); half is the symbol of tt_forall. Then the run-time meaning of systems,
+       hcomp, transport and the codes of the basic type formers. */
     fputs("tt_absurd := x -> x\n", out);
-    fputs("tt_hcomp := phi -> u -> u0 -> phi(u(tt_i1))(u0)\n", out);
-    fputs("tt_transp := line -> phi -> a -> phi(a)(line(tt_i0)(m -> m)(line)(phi)(a))\n", out);
+    fputs("tt_i0 := z -> h -> o -> z\n", out);
+    fputs("tt_ihalf := z -> h -> o -> h\n", out);
+    fputs("tt_i1 := z -> h -> o -> o\n", out);
+    fputs("tt_iand := x -> y -> x(tt_i0)(y(tt_i0)(tt_ihalf)(tt_ihalf))(y)\n", out);
+    fputs("tt_ior := x -> y -> x(y)(y(tt_ihalf)(tt_ihalf)(tt_i1))(tt_i1)\n", out);
+    fputs("tt_ineg := x -> x(tt_i1)(tt_ihalf)(tt_i0)\n", out);
+    fputs("tt_sel := phi -> x -> y -> phi(y)(tt_absurd)(x)\n", out);
+    fputs("tt_forall := f -> f(tt_ihalf)(tt_i0)(tt_i0)(tt_i1)\n", out);
+    fputs("tt_hcomp := phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(u0)\n", out);
+    fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> m)(line)(phi)(a))\n", out);
     fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
     fputs("tt_transp_u := line -> phi -> a -> a\n", out);
     fputs("tc_u := k -> k(tt_transp_u)\n", out);
@@ -265,7 +318,7 @@ void erase_program(FILE *f) {
     fputs("tt_px := c -> c(m -> l -> x -> y -> x)\n", out);
     fputs("tt_py := c -> c(m -> l -> x -> y -> y)\n", out);
     fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
-          "(i -> phi(p(j))(tt_ineg(j)(tt_px(line(i)))(j(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
+          "(i -> tt_sel(phi)(p(j))(tt_sel(tt_ineg(j))(tt_px(line(i)))(tt_sel(j)(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
     fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(l)(x)(y)\n", out);
     fputs("tt_pair := a -> b -> k -> k(a)(b)\n", out);
     fputs("tt_fst := p -> p(a -> b -> a)\n", out);
@@ -289,7 +342,7 @@ void erase_program(FILE *f) {
             fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
             if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
             if (!strcmp(d->name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
-                fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(phi(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
+                fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(tt_sel(phi)(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
         }
     }
     fclose(out);
