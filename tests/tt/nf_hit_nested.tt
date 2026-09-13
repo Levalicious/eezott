@@ -1,0 +1,5 @@
+-- nested formal compositions over an endpoint application
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def main : S1 := hcomp S1 i0 (\_ -> []) (hcomp S1 i0 (\_ -> []) (loop i0))

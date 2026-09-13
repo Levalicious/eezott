@@ -1,0 +1,9 @@
+-- a formal composition in a higher inductive type, eliminated through the motive at run time:
+-- the eliminator composes over the motive (comp (k. P (hfill k)) phi [phi -> f (u k)] (f u0)), as the checker does
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def f (x : S1) : Nat := elim S1 (\_ -> Nat) one (\i -> one) x
+def c1 : S1 := hcomp S1 i0 (\_ -> []) base
+def c2 : S1 := hcomp S1 i0 (\_ -> []) c1
+def main : Nat := add (f c1) (add (f c2) one)

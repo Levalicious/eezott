@@ -288,5 +288,6 @@ int peano_shape(int d, int *zero, int *suc);  /* a data type shaped like the nat
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
+extern int nf_main;                  /* erase the checker's normal form of main instead of its source */
 
 #endif

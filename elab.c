@@ -336,8 +336,8 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
     }
     /* motive: (i..) -> D p i -> U lvl   under [params] */
     Term *P = mk_pi("x", data_applied(d, m, 0), mk_u_l(lvl), 0);
-    for (int j = m - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), ITY(j), P, 1);
-    t = mk_pi("P", P, t, 1);
+    for (int j = m - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), ITY(j), P, !(D->hit || D->nidx > 0));   /* relevant with the motive */
+    t = mk_pi("P", P, t, !(D->hit || D->nidx > 0));   /* the motive is run-time content when hcomp is a formal element */
     for (int i = np - 1; i >= 0; i--) t = mk_pi(xsprintf("p%d", i), PTY(i), t, 1);
     return t;
     #undef ITY
@@ -957,7 +957,9 @@ static void elab_data(SDecl *s) {
     }
     Term *full = ity;
     for (int i = s->nparams - 1; i >= 0; i--) full = mk_pi(s->params[i].name, D.ptys[i], full, 0);
-    { Term *x = ity; for (int j = 0; j < m; j++) { x->irr = 1; x = x->b; } }
+    /* indices are run-time components of the type's code: hcomp is a formal element of an indexed family and its
+       elimination applies the motive to the indices read off the code */
+    { Term *x = ity; for (int j = 0; j < m; j++) { x->irr = 0; x = x->b; } }
     D.ty = full;
     int d = ndatas;
     datas = realloc(datas, (ndatas + 1) * sizeof(Data)); if (!datas) die("out of memory");
