@@ -210,7 +210,10 @@ static void emit_rec_body(Data *D) {
     }
     if (hx) {   /* the motive at the indices of the composition's type, along the filler */
         fputs("(c -> phi -> u -> u0 -> tt_comp(k -> ", out); emit_motive(D);
-        for (int q = 0; q < D->nidx; q++) emit_index_of_code(D, q);
+        for (int q = 0; q < D->nidx; q++) {
+            emit_index_of_code(D, q);
+            if (D->idxrec[q] >= 0) { fputc('(', out); emit_rec_call(D, D->idxrec[q]); emit_index_of_code(D, q); fputc(')', out); }   /* its image */
+        }
         fputs("(tt_hfill(c)(phi)(u)(u0)(k)))(phi)(k -> tt_sel(phi)(", out); emit_rec_call(D, D - datas);
         fputs("(u(k)))(tt_absurd))(", out); emit_rec_call(D, D - datas); fputs("(u0)))", out);
     }

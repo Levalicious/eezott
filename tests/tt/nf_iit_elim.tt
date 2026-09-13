@@ -1,0 +1,15 @@
+-- the inductive-inductive induction principle: Close's motive sees R's motive at the indices (hu hv), so the method for the
+-- path constructor eqR can take the path from the hypothesis on the closeness premise; here the Cauchy structure on Unit
+mutual
+  data R : U where
+    | rat : Nat -> R
+    | lim : (x : Nat -> R) -> ((d e : Nat) -> Close (add d e) (x d) (x e)) -> R
+    | eqR : (u v : R) -> ((e : Nat) -> Close e u v) -> (i : I) -> R [ ~ i -> u | i -> v ]
+  data Close : Nat -> R -> R -> U where
+    | crat : (e q r : Nat) -> Close e (rat q) (rat r)
+    | clim : (e : Nat) -> (x : Nat -> R) -> (p : (d e' : Nat) -> Close (add d e') (x d) (x e')) -> (q : Nat) -> Close e (lim x p) (rat q)
+end
+def toUnit : R -> Unit := elim R (\_ -> Unit) (\e u hu v hv _ -> Path Unit hu hv)
+  (\q -> tt) (\x p ihx ihp -> tt) (\u v c ihu ihv ihc -> \i -> ihc zero i)
+  (\e q r -> \_ -> tt) (\e x p q ihx ihp -> \_ -> tt)
+def main : Unit := toUnit (eqR (rat one) (rat two) (\e -> crat e one two) i1)
