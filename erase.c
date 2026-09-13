@@ -352,7 +352,9 @@ static void emit_codes(Data *D) {
         }
         fputc(')', out);
     }
-    if (hx) fprintf(out, "(hc -> hphi -> hu -> hu0 -> tt_c_%s_hcomp(hc)(hphi)(hu)(tt_nf(c)(hu0)))", D->name);
+    /* a printed value holds no functions (their combinator normal forms are not canonical): the code and the tube of a
+       closed formal composition are placeholders — its face is i0 and the tube is never consulted — and its base is normalized */
+    if (hx) fprintf(out, "(hc -> hphi -> hu -> hu0 -> tt_c_%s_hcomp(tt_absurd)(hphi)(tt_absurd)(tt_nf(c)(hu0)))", D->name);
     self_data = -1;
     fputc(')', out);
     for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
@@ -403,7 +405,11 @@ static void emit_glue_runtime(void) {
           "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
           "(tt_forall(i -> tt_gphi(line(i))))\n", out);
-    fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> u0\n", out);   /* hcomp in Glue: its base (a representative) */
+    /* hcomp in a Glue type, as in the checker (hcomp_glue): compose in T on phi (a filler tf), compose in A on psi \/ phi
+       with the unglued sides and e.1 of the filler on phi, and glue the filler's end over the result */
+    fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> (tf -> tt_glue(phi)(tf(tt_i1))"
+          "(tt_hcomp(a)(tt_ior(psi)(phi))(i -> tt_sel(psi)(tt_unglue(phi)(te)(u(i)))(tt_sel(phi)(tt_fst(tt_snd(te))(tf(i)))(tt_absurd)))"
+          "(tt_unglue(phi)(te)(u0))))(k -> tt_hfill(tt_fst(te))(psi)(u)(u0)(k))\n", out);
     fputs("tt_nf_glue := a -> phi -> te -> c -> x -> x\n", out);
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }

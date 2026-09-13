@@ -1,0 +1,6 @@
+-- composition along a line of Glue types that ends in the circle (its face holds at i1): the value is the formal
+-- composition in S1 the checker computes, not the base of the composition
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def main : S1 := comp (\i -> Glue S1 (~ i \/ i) [ ~ i -> (S1 , idEquiv S1) | i -> (S1 , idEquiv S1) ]) i0 (\_ -> []) base
