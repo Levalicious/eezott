@@ -34,7 +34,7 @@
 
 int keep_kan;
 static FILE *out;
-static int self_data = -1;      /* while emitting tt_transp_D: references to D go through the fixpoint's self */
+static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 
 /* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
 static IVal face_ival(Term *t, int depth) {
@@ -96,7 +96,7 @@ static void erase(Term *t, int depth) {
     case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:
-        if (t->n == self_data) fprintf(out, "tcs_%s(self)", datas[t->n].name); else fprintf(out, "tc_%s", datas[t->n].name);
+        if (t->n == self_data) fputs("self", out); else fprintf(out, "tc_%s", datas[t->n].name);
         break;
     case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
@@ -109,7 +109,7 @@ static void erase(Term *t, int depth) {
         break;
     case T_HCOMP:
         if (t->n) { fputs("tt_hcompU(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break; }
-        fputs("tt_hcomp(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break;
+        fputs("tt_hcomp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break;
     case T_TRANSP:
         if (!keep_kan && (t->n || t->b->k == T_I1)) { erase(t->c, depth); break; }     /* a constant line: the identity */
         fputs("tt_transp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
@@ -125,6 +125,9 @@ static void erase(Term *t, int depth) {
     }
 }
 
+/* hcomp is a formal element (an extra constructor) of higher inductive types and indexed families, as in the checker */
+static int formal_hcomp(Data *D) { return D->hit || D->nidx > 0; }
+static int nhandlers(Data *D) { return D->ncons + formal_hcomp(D); }
 /* Scott constructor: relevant args, then one handler per constructor, select own handler */
 static void emit_con(Data *D, int ci) {
     Con *C = &cons[D->cons[ci]];
@@ -132,16 +135,33 @@ static void emit_con(Data *D, int ci) {
     if (C->bparams) for (int p = 0; p < D->nparams; p++) fprintf(out, "p%d -> ", p);   /* parameters kept when the boundary needs them */
     for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "a%d -> ", j);
     for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
-    for (int i = 0; i < D->ncons; i++) fprintf(out, "h%d -> ", i);
+    for (int i = 0; i < nhandlers(D); i++) fprintf(out, "h%d -> ", i);
     fprintf(out, "h%d", ci);
     for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "(a%d)", j);
     for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
     fputc('\n', out);
 }
+/* the formal composition of D: tt_c_D_hcomp phi u u0 selects the last handler */
+static void emit_hcomp_con(Data *D) {
+    fprintf(out, "tt_c_%s_hcomp := c -> phi -> u -> u0 -> ", D->name);   /* c: the code of its type (parameters and indices) */
+    for (int i = 0; i < nhandlers(D); i++) fprintf(out, "h%d -> ", i);
+    fprintf(out, "h%d(c)(phi)(u)(u0)\n", D->ncons);
+}
+/* the q-th index read off a code of D: c(m -> h -> p.. -> i.. -> i_q) */
+static void emit_index_of_code(Data *D, int q) {
+    fputs("(c(m -> h -> ", out);
+    for (int p = 0; p < D->nparams; p++) fprintf(out, "p%d -> ", p);
+    for (int j = 0; j < D->nidx; j++) fprintf(out, "i%d -> ", j);
+    fprintf(out, "i%d))", q);
+}
 
-/* tt_rec_D := fix(rec -> m0 -> .. -> x -> x(case_0)..(case_k)) */
+/* tt_rec_D := fix(rec -> [P ->] m0 -> .. -> x -> x(case_0)..(case_k)[(hcomp case)]); the motive P is taken when hcomp is
+   a formal element: the elimination of hcomp phi u u0 is the composition over the motive of the eliminations of the sides,
+     comp (k. P (hfill phi u u0 k)) phi [phi -> rec (u k)] (rec u0)                                (the checker's elim_hcomp) */
 static void emit_rec(Data *D) {
+    int hx = formal_hcomp(D);
     fprintf(out, "tt_rec_%s := fix(rec -> ", D->name);
+    if (hx) fputs("P -> ", out);
     for (int i = 0; i < D->ncons; i++) fprintf(out, "m%d -> ", i);
     fputs("x -> x", out);
     for (int ci = 0; ci < D->ncons; ci++) {
@@ -154,7 +174,7 @@ static void emit_rec(Data *D) {
         for (int j = 0; j < C->nargs; j++) {
             ConArg *A = &C->args[j];
             if (A->isrecpath) {   /* the induction hypothesis over a path argument: k -> rec m.. (a_j k) */
-                fputs("(k -> rec", out);
+                fputs(hx ? "(k -> rec(P)" : "(k -> rec", out);
                 for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
                 fprintf(out, "(a%d(k)))", j);
                 continue;
@@ -164,7 +184,7 @@ static void emit_rec(Data *D) {
             fputc('(', out);
             Term *w = A->ty; int yt = 0;
             for (Term *p = w; p->k == T_PI && yt < A->npi; p = p->b, yt++) if (!p->irr) fprintf(out, "y%d -> ", yt);
-            fputs("rec", out);
+            fputs(hx ? "rec(P)" : "rec", out);
             for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
             fprintf(out, "(a%d", j);
             yt = 0;
@@ -174,9 +194,22 @@ static void emit_rec(Data *D) {
         for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
         fputc(')', out);
     }
+    if (hx) {   /* the motive at the indices of the composition's type, along the filler */
+        fputs("(c -> phi -> u -> u0 -> tt_comp(k -> P", out);
+        for (int q = 0; q < D->nidx; q++) emit_index_of_code(D, q);
+        fputs("(tt_hfill(c)(phi)(u)(u0)(k)))(phi)(k -> tt_sel(phi)(rec(P)", out);
+        for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
+        fputs("(u(k)))(tt_absurd))(rec(P)", out);
+        for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
+        fputs("(u0)))", out);
+    }
     fputs(")\n", out);
 }
 
+static void emit_components(Data *D) {   /* p.. -> i.. -> */
+    for (int p = 0; p < D->nparams; p++) fprintf(out, "p%d -> ", p);
+    for (int j = 0; j < D->nidx; j++) fprintf(out, "i%d -> ", j);
+}
 /* the line of the j-th argument's type of constructor C at i, given the data line and the fillers of the earlier arguments:
      i -> ((v0 -> .. -> v_{np+j-1} -> A_j')(param_0(line i))..(param_{np-1}(line i))(fl_0(i))..(fl_{j-1}(i)))   */
 static void emit_arg_line(Data *D, Con *C, int j) {
@@ -186,24 +219,49 @@ static void emit_arg_line(Data *D, Con *C, int j) {
     erase(C->args[j].ty, np + j);
     fputc(')', out);
     for (int k = 0; k < np; k++) {
-        fputs("(line(i)(m -> ", out);
-        for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
+        fputs("(line(i)(m -> h -> ", out);
+        emit_components(D);
         fprintf(out, "p%d))", k);
     }
     for (int k = 0; k < j; k++) fprintf(out, "(fl%d(i))", k);
     fputc(')', out);
 }
-
-/* tcs_D := tr -> p.. -> k -> k(tr)(p..);  tt_transp_D := fix(self -> p.. -> line -> phi -> x -> x(case..));  tc_D := tcs_D(tt_transp_D) */
-static void emit_codes(Data *D) {
+/* the same at a fixed type: the parameters of the code c */
+static void emit_arg_line_at(Data *D, Con *C, int j) {
     int np = D->nparams;
-    fprintf(out, "tcs_%s := tr -> ", D->name);
-    for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
-    fputs("k -> k(tr)", out);
-    for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
-    fputc('\n', out);
-    fprintf(out, "tt_transp_%s := fix(self -> ", D->name);
-    for (int p = 0; p < np; p++) fprintf(out, "p%d -> ", p);
+    fputs("(i -> (", out);
+    for (int k = 0; k < np + j; k++) fprintf(out, "v%d -> ", k);
+    erase(C->args[j].ty, np + j);
+    fputc(')', out);
+    for (int k = 0; k < np; k++) fprintf(out, "(p%d)", k);
+    for (int k = 0; k < j; k++) fprintf(out, "(fl%d(i))", k);
+    fputc(')', out);
+}
+/* the sides of the j-th argument of constructor C: i -> u(i) projected on that argument */
+static void emit_sides(Data *D, Con *C, int j) {
+    fputs("(i -> u(i)", out);
+    for (int ci = 0; ci < D->ncons; ci++) {
+        Con *K = &cons[D->cons[ci]];
+        fputc('(', out);
+        for (int q = 0; q < K->nargs; q++) if (!K->args[q].irr) fprintf(out, "b%d -> ", q);
+        if (K == C) fprintf(out, "b%d", j); else fputs("tt_absurd", out);
+        fputc(')', out);
+    }
+    if (formal_hcomp(D)) fputs("(c -> phi -> u -> u0 -> tt_absurd)", out);
+    fputc(')', out);
+}
+
+/* tc_D := fix(self -> p.. -> k -> k(TRANSP)(HCOMP)(p..)):
+     TRANSP := line -> phi -> x -> x(case..)  transports constructor arguments along their own type lines with fillers, exactly
+               as the checker does; a formal hcomp transports to the hcomp of the transports;
+     HCOMP  := c -> phi -> u -> u0 -> ..     for a formal element builds it; else composes constructor arguments along
+               their own type lines with fillers (the checker's structural rule) */
+static void emit_codes(Data *D) {
+    int np = D->nparams, m = D->nidx, hx = formal_hcomp(D);
+    fprintf(out, "tc_%s := fix(self -> ", D->name);
+    emit_components(D);
+    fputs("k -> k(", out);
+    emit_components(D);
     fputs("line -> phi -> x -> x", out);
     self_data = D - datas;
     for (int ci = 0; ci < D->ncons; ci++) {
@@ -215,8 +273,8 @@ static void emit_codes(Data *D) {
         for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
         fprintf(out, "tt_c_%s", C->name);
         if (C->bparams) for (int p = 0; p < np; p++) {   /* parameters kept by the constructor: those of the type at the end of the line */
-            fputs("(line(tt_i1)(m -> ", out);
-            for (int q = 0; q < np; q++) fprintf(out, "p%d -> ", q);
+            fputs("(line(tt_i1)(m -> h -> ", out);
+            emit_components(D);
             fprintf(out, "p%d))", p);
         }
         for (int j = 0; j < C->nargs; j++) {
@@ -229,9 +287,35 @@ static void emit_codes(Data *D) {
         }
         fputc(')', out);
     }
+    if (hx)   /* transport of a formal composition: the composition of the transports (the checker's vtransp on a HIT) */
+        fputs("(hc -> hphi -> hu -> hu0 -> tt_hcomp(line(tt_i1))(hphi)(i -> tt_transp(line)(phi)(hu(i)))(tt_transp(line)(phi)(hu0)))", out);
+    fputs(")(", out);
+    emit_components(D);
+    fputs("c -> phi -> u -> u0 -> ", out);
+    if (hx) { fprintf(out, "tt_c_%s_hcomp(c)(phi)(u)(u0)", D->name); }
+    else {
+        fputs("u0", out);
+        for (int ci = 0; ci < D->ncons; ci++) {
+            Con *C = &cons[D->cons[ci]];
+            fputc('(', out);
+            for (int j = 0; j < C->nargs; j++) fprintf(out, "a%d -> ", j);
+            for (int j = 0; j + 1 < C->nargs; j++) fprintf(out, "(fl%d -> ", j);
+            fprintf(out, "tt_c_%s", C->name);
+            for (int j = 0; j < C->nargs; j++) {
+                fputs("(tt_comp", out); emit_arg_line_at(D, C, j); fputs("(phi)", out); emit_sides(D, C, j); fprintf(out, "(a%d))", j);
+            }
+            for (int j = C->nargs - 2; j >= 0; j--) {
+                /* fl_j := fill of the composition of a_j along its line */
+                fputs(")(tt_fill", out); emit_arg_line_at(D, C, j); fputs("(phi)", out); emit_sides(D, C, j); fprintf(out, "(a%d))", j);
+            }
+            fputc(')', out);
+        }
+    }
     self_data = -1;
+    fputc(')', out);
+    for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
+    for (int j = 0; j < m; j++) fprintf(out, "(i%d)", j);
     fputs(")\n", out);
-    fprintf(out, "tc_%s := tcs_%s(tt_transp_%s)\n", D->name, D->name, D->name);
 }
 
 /* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and codes */
@@ -245,7 +329,7 @@ static void mark(Term *t) {
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
     case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
     case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
-    case T_HCOMP: mark(t->b); mark(t->c); mark(t->d);
+    case T_HCOMP: mark(t->a); mark(t->b); mark(t->c); mark(t->d);
         if (t->n) for (int i = 0; i < ndefs; i++) if ((!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
         break;
     case T_GLUE: mark(t->a); mark(t->b); mark(t->c);
@@ -260,10 +344,10 @@ static void emit_glue_runtime(void) {
     /* Glue: an element is the glued element itself where phi holds, and otherwise the pair (sides, base) */
     fputs("tt_glue := phi -> ts -> a -> tt_sel(phi)(ts)(tt_pair(ts)(a))\n", out);
     fputs("tt_unglue := phi -> te -> b -> tt_sel(phi)(tt_fst(tt_snd(te))(b))(tt_snd(b))\n", out);
-    fputs("tt_gA := c -> c(m -> a -> phi -> te -> a)\n", out);
-    fputs("tt_gphi := c -> c(m -> a -> phi -> te -> phi)\n", out);
-    fputs("tt_gte := c -> c(m -> a -> phi -> te -> te)\n", out);
-    fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(tt_ior(phi)(tt_ineg(phi)))(i -> tt_sel(phi)(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    fputs("tt_gA := c -> c(m -> h -> a -> phi -> te -> a)\n", out);
+    fputs("tt_gphi := c -> c(m -> h -> a -> phi -> te -> phi)\n", out);
+    fputs("tt_gte := c -> c(m -> h -> a -> phi -> te -> te)\n", out);
+    fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(tt_ior(phi)(tt_ineg(phi)))(i -> tt_sel(phi)(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
     /* transport along a line of Glue types, as in the checker. At run time every interval value is an endpoint, so the
        face "forall i. phi" cannot be read off phi's values (i \/ ~ i and i1 are the same boolean function): it is taken
        to be i0, i.e. the glued types at the two ends are never assumed to form a line. That is the checker's generic
@@ -271,7 +355,7 @@ static void emit_glue_runtime(void) {
        closed data, and is the only one that is always meaningful. */
     fputs("tt_transp_glue := a -> phi -> te -> line -> psi -> u0 -> "
           "(fa -> (ungl -> (tf -> (a1 -> (phi1 -> (te1 -> "
-          "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_ior(phi1)(psi))(j -> tt_sel(phi1)(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
+          "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_gA(line(tt_i1)))(tt_ior(phi1)(psi))(j -> tt_sel(phi1)(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
           "(tt_equivProof(tt_fst(te1))(tt_gA(line(tt_i1)))(tt_snd(te1))(a1)(tt_ior(psi)(fa))"
           "(tt_sel(psi)(tt_pair(u0)(j -> a1))(tt_sel(fa)(tt_pair(tf(tt_i1))(j -> a1))(tt_absurd)))))"
           "(tt_gte(line(tt_i1))))(tt_gphi(line(tt_i1))))"
@@ -279,7 +363,8 @@ static void emit_glue_runtime(void) {
           "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
           "(tt_i0)\n", out);
-    fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(a)(phi)(te)\n", out);
+    fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> u0\n", out);   /* hcomp in Glue: its base (a representative) */
+    fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(a)(phi)(te)\n", out);
 }
 
 void erase_program(FILE *f) {
@@ -304,28 +389,37 @@ void erase_program(FILE *f) {
     fputs("tt_ineg := x -> x(tt_i1)(tt_ihalf)(tt_i0)\n", out);
     fputs("tt_sel := phi -> x -> y -> phi(y)(tt_absurd)(x)\n", out);
     fputs("tt_forall := f -> f(tt_ihalf)(tt_i0)(tt_i0)(tt_i1)\n", out);
-    fputs("tt_hcomp := phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(u0)\n", out);
-    fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> m)(line)(phi)(a))\n", out);
-    fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    /* a code is k -> k(transport rule)(hcomp rule)(components); hcomp at phi = 1 is the side at i1, else the code's rule */
+    fputs("tt_hcomp := c -> phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(c(m -> h -> h)(c)(phi)(u)(u0))\n", out);
+    fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> h -> m)(line)(phi)(a))\n", out);
+    fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
+    fputs("tt_hfill := c -> phi -> u -> u0 -> k -> tt_hcomp(c)(tt_ior(phi)(tt_ineg(k)))(i -> tt_sel(phi)(u(tt_iand(i)(k)))(tt_sel(tt_ineg(k))(u0)(tt_absurd)))(u0)\n", out);
+    fputs("tt_fill := line -> phi -> u -> u0 -> i -> tt_comp(j -> line(tt_iand(i)(j)))(tt_ior(phi)(tt_ineg(i)))(j -> tt_sel(phi)(u(tt_iand(i)(j)))(tt_sel(tt_ineg(i))(u0)(tt_absurd)))(u0)\n", out);
+    fputs("tt_hc_id := c -> phi -> u -> u0 -> u0\n", out);
     fputs("tt_transp_u := line -> phi -> a -> a\n", out);
-    fputs("tc_u := k -> k(tt_transp_u)\n", out);
-    fputs("tt_dom := c -> c(m -> d -> b -> d)\n", out);
-    fputs("tt_cod := c -> c(m -> d -> b -> b)\n", out);
+    fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)\n", out);
+    fputs("tt_dom := c -> c(m -> h -> d -> b -> d)\n", out);
+    fputs("tt_cod := c -> c(m -> h -> d -> b -> b)\n", out);
+    fputs("tt_hc_pi := d -> b -> c -> phi -> u -> u0 -> x -> tt_hcomp(b(x))(phi)(i -> u(i)(x))(u0(x))\n", out);
     fputs("tt_transp_pi := d -> b -> line -> phi -> f -> x -> (v -> tt_transp(i -> tt_cod(line(i))(v(i)))(phi)(f(v(tt_i0))))"
           "(i -> tt_transp(j -> tt_dom(line(tt_ior(i)(tt_ineg(j)))))(tt_ior(phi)(i))(x))\n", out);
-    fputs("tc_pi := d -> b -> k -> k(tt_transp_pi)(d)(b)\n", out);
-    fputs("tt_pline := c -> c(m -> l -> x -> y -> l)\n", out);
-    fputs("tt_px := c -> c(m -> l -> x -> y -> x)\n", out);
-    fputs("tt_py := c -> c(m -> l -> x -> y -> y)\n", out);
+    fputs("tc_pi := d -> b -> k -> k(tt_transp_pi)(tt_hc_pi)(d)(b)\n", out);
+    fputs("tt_pline := c -> c(m -> h -> l -> x -> y -> l)\n", out);
+    fputs("tt_px := c -> c(m -> h -> l -> x -> y -> x)\n", out);
+    fputs("tt_py := c -> c(m -> h -> l -> x -> y -> y)\n", out);
+    fputs("tt_hc_path := l -> x -> y -> c -> phi -> u -> u0 -> j -> tt_hcomp(l(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
+          "(i -> tt_sel(phi)(u(i)(j))(tt_sel(tt_ineg(j))(x)(tt_sel(j)(y)(tt_absurd))))(u0(j))\n", out);
     fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
           "(i -> tt_sel(phi)(p(j))(tt_sel(tt_ineg(j))(tt_px(line(i)))(tt_sel(j)(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
-    fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(l)(x)(y)\n", out);
+    fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(tt_hc_path)(l)(x)(y)\n", out);
     fputs("tt_pair := a -> b -> k -> k(a)(b)\n", out);
     fputs("tt_fst := p -> p(a -> b -> a)\n", out);
     fputs("tt_snd := p -> p(a -> b -> b)\n", out);
     fputs("tt_transp_sigma := d -> b -> line -> phi -> p -> tt_pair(tt_transp(i -> tt_dom(line(i)))(phi)(tt_fst(p)))"
           "(tt_transp(i -> tt_cod(line(i))(tt_transp(j -> tt_dom(line(tt_iand(i)(j))))(tt_ior(phi)(tt_ineg(i)))(tt_fst(p))))(phi)(tt_snd(p)))\n", out);
-    fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(d)(b)\n", out);
+    fputs("tt_hc_sigma := d -> b -> c -> phi -> u -> u0 -> tt_pair(tt_hcomp(d)(phi)(i -> tt_fst(u(i)))(tt_fst(u0)))"
+          "(tt_comp(i -> b(tt_hfill(d)(phi)(j -> tt_fst(u(j)))(tt_fst(u0))(i)))(phi)(i -> tt_snd(u(i)))(tt_snd(u0)))\n", out);
+    fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(tt_hc_sigma)(d)(b)\n", out);
     /* declaration order: data types and definitions interleaved by line number */
     int di = 0, fi = 0;
     while (di < ndatas || fi < ndefs) {
@@ -334,8 +428,9 @@ void erase_program(FILE *f) {
             Data *D = &datas[di++];
             if (!data_used[D - datas]) continue;
             for (int ci = 0; ci < D->ncons; ci++) emit_con(D, ci);
-            emit_rec(D);
+            if (formal_hcomp(D)) emit_hcomp_con(D);
             emit_codes(D);
+            emit_rec(D);
         } else {
             Def *d = &defs[fi++];
             if (!def_used[d - defs]) continue;
