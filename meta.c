@@ -63,6 +63,7 @@ void meta_postpone(int depth, Val *a, Val *b) {
    is a solution) and incomplete only when the other side needs it, in which case a free variable is out of scope and the
    constraint is postponed. */
 static int pattern_spine(Val *m, int *lv, int *isi) {
+    int ctxn = tmetas[m->n].ctxn;   /* the first ctxn entries are the meta's context; the rest are applications of the meta */
     for (int i = 0; i < m->args.n; i++) {
         Arg *a = &m->args.a[i];
         if (a->proj || a->papp) return 0;
@@ -70,7 +71,8 @@ static int pattern_spine(Val *m, int *lv, int *isi) {
         if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
         else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
         else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
-        else { l = -2 - i; ii = x->k == V_I; }   /* not a variable: an ignorable position */
+        else if (i < ctxn) { l = -2 - i; ii = x->k == V_I; }   /* a context position that is not a variable: ignorable */
+        else return 0;                                          /* an application to a term: not a pattern */
         for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
         lv[i] = l; isi[i] = ii;
     }
@@ -106,19 +108,13 @@ static void solve(int id, Term *body, int k, int *isi) {
     if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = realloc(undo, ucap * sizeof(int)); if (!undo) die("out of memory"); }
     undo[nundo++] = id;
 }
+/* Miller pattern unification: the spine must be a pattern (see pattern_spine), the other side is quoted and its free variables renamed to
+   the spine's binders; the meta occurring in it is refused, a free variable outside the spine postpones the constraint; anything that is
+   not a pattern is postponed. The solution is then the most general one. */
 int unify_meta(int depth, Val *m, Val *other) {
     int k = m->args.n; int *lv = xalloc((k + 1) * sizeof(int)), *isi = xalloc((k + 1) * sizeof(int));
-    int pattern = pattern_spine(m, lv, isi);
+    if (!pattern_spine(m, lv, isi)) { meta_postpone(depth, m, other); return 1; }
     Term *body = quote(depth, other);
-    if (!pattern) {   /* not a pattern: only a closed solution is determined (it does not depend on the spine) */
-        Ren r0 = { lv, 0, depth, m->n, 0, 0 };
-        body = ren_vars(body, &r0, 0);
-        if (r0.occurs) return 0;
-        if (r0.scope) { meta_postpone(depth, m, other); return 1; }
-        for (int i = 0; i < k; i++) isi[i] = m->args.a[i].v && force(m->args.a[i].v)->k == V_I;
-        solve(m->n, body, k, isi);
-        return 1;
-    }
     Ren r = { lv, k, depth, m->n, 0, 0 };
     body = ren_vars(body, &r, 0);
     if (r.occurs) return 0;
