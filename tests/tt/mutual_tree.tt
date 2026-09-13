@@ -1,0 +1,11 @@
+-- a mutual block: rose trees as a tree and a forest declared together; each eliminator takes both motives and all methods
+mutual
+  data Tree : U where
+    | node : Nat -> Forest -> Tree
+  data Forest : U where
+    | fnil : Forest
+    | fcons : Tree -> Forest -> Forest
+end
+def tsize : Tree -> Nat := elim Tree (\_ -> Nat) (\_ -> Nat) (\n f ihf -> suc ihf) zero (\t f iht ihf -> add iht ihf)
+def fsize : Forest -> Nat := elim Forest (\_ -> Nat) (\_ -> Nat) (\n f ihf -> suc ihf) zero (\t f iht ihf -> add iht ihf)
+def main : Nat := add (tsize (node one (fcons (node two fnil) (fcons (node three fnil) fnil)))) (fsize (fcons (node one fnil) fnil))

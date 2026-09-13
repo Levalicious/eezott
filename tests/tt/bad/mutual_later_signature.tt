@@ -1,0 +1,8 @@
+-- a member's signature may only use the earlier members' type formers
+mutual
+  data A : B -> U where
+    | ma : (b : B) -> A b
+  data B : U where
+    | mb : B
+end
+def main : Nat := one

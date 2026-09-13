@@ -183,6 +183,9 @@ Data *data_at(int d, LVal L) {
     if (!D->at[n]) D->at[n] = data_instance(D, L);
     return D->at[n];
 }
+int block_ncons(int d) { Data *D = &datas[d]; int K = 0; for (int i = 0; i < D->nblock; i++) K += datas[D->block + i].ncons; return K; }
+/* the eliminators of a block share a prefix [params, P_0..P_{nb-1}, methods(K)]: is its i-th entry computationally irrelevant? */
+static int prefix_irr(int d, int i) { Data *D = &datas[d]; if (i < D->nparams) return 1; i -= D->nparams; if (i < D->nblock) { Data *M = &datas[D->block + i]; return !(M->hit || M->nidx > 0); } return 0; }
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d) { Term *t = mk(k); t->a = a; t->b = b; t->c = c; t->d = d; return t; }
 
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
@@ -676,7 +679,7 @@ static Val *elim_apply_list(int data, VList *args);
 /* ---- induction hypotheses (native closure N_IH) ----
    cap = base (params, motive, methods), tele (params, previous args), ys, aj; i1=data i2=con i3=j; ys count = cap.n - nb - nt - 1 */
 static Val *ih_apply(Native *c, Val *y) {
-    int nb = datas[c->i1].nparams + 1 + datas[c->i1].ncons;
+    int nb = datas[c->i1].nparams + datas[c->i1].nblock + block_ncons(c->i1);
     Con *C = con_at(c->i2, c->l); int j = c->i3; int nt = datas[c->i1].nparams + j;
     ConArg *ca = &C->args[j];
     Native *d = xalloc(sizeof *d); *d = *c; d->cap = vl_copy(&c->cap);
@@ -687,7 +690,7 @@ static Val *ih_apply(Native *c, Val *y) {
     Env *e = NULL; for (int i = 0; i < nt; i++) e = env_push(e, d->cap.a[nb + i].v);
     for (int i = 0; i < ny; i++) e = env_push(e, d->cap.a[nb + nt + i].v);
     VList args = {0};
-    for (int i = 0; i < nb; i++) vl_push(&args, d->cap.a[i].v, i < datas[c->i1].nparams + 1);
+    for (int i = 0; i < nb; i++) vl_push(&args, d->cap.a[i].v, prefix_irr(c->i1, i));
     for (int i = 0; i < ca->nidx; i++) vl_push(&args, eval(e, ca->idx[i]), 1);
     Val *t = d->cap.a[d->cap.n - 1].v; for (int i = 0; i < ny; i++) t = vapp(t, d->cap.a[nb + nt + i].v, 0);
     vl_push(&args, t, 0);
@@ -701,17 +704,17 @@ static Val *vsys(VBranch *br, int n);
 static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 static Val *elim_reduce(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
-    int np = D->nparams, k = D->ncons;
+    int np = D->nparams, nb = D->nblock, K = block_ncons(data);
     Val *target = args->a[args->n - 1].v;
     if (target->k != V_CON) return NULL;
     Con *c = con_at(target->n, target->lvl);
     if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
-    Val *res = args->a[np + 1 + c->ci].v;
+    Val *res = args->a[np + nb + c->bord].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
     for (int j = 0; j < c->nargs; j++) {
         if (c->args[j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. idx (p k) */
-            Native *ih = xalloc(sizeof *ih); ih->code = N_ELIM_PATH_IH; ih->i1 = data;
-            for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
+            Native *ih = xalloc(sizeof *ih); ih->code = N_ELIM_PATH_IH; ih->i1 = c->args[j].rec;
+            for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, prefix_irr(data, i));
             Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, target->args.a[i].v);
             for (int q = 0; q < c->args[j].nidx; q++) vl_push(&ih->cap, eval(e, c->args[j].idx[q]), 1);
             vl_push(&ih->cap, target->args.a[np + j].v, 0);
@@ -721,19 +724,19 @@ static Val *elim_reduce(int data, VList *args) {
             continue;
         }
         if (!c->args[j].isrec) continue;
-        Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = data; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
-        for (int i = 0; i < np + 1 + k; i++) vl_push(&ih->cap, args->a[i].v, 0);
+        Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
+        for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
         for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);
         for (int i = 0; i < j; i++) vl_push(&ih->cap, target->args.a[np + i].v, 0);
         vl_push(&ih->cap, target->args.a[np + j].v, 0);
         Val *ihv;
         if (c->args[j].npi == 0) {
-            Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, ih->cap.a[np + 1 + k + i].v);
+            Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, ih->cap.a[np + nb + K + i].v);
             VList a2 = {0};
-            for (int i = 0; i < np + 1 + k; i++) vl_push(&a2, args->a[i].v, i < np + 1);
+            for (int i = 0; i < np + nb + K; i++) vl_push(&a2, args->a[i].v, prefix_irr(data, i));
             for (int i = 0; i < c->args[j].nidx; i++) vl_push(&a2, eval(e, c->args[j].idx[i]), 1);
             vl_push(&a2, target->args.a[np + j].v, 0);
-            ihv = elim_apply_list(data, &a2);
+            ihv = elim_apply_list(c->args[j].rec, &a2);
         } else { ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "y"; }
         res = vapp(res, ihv, 0);
     }
@@ -749,7 +752,7 @@ static Val *elim_reduce(int data, VList *args) {
                 e0 = env_push(e0, vi(end ? iv_one() : iv_zero()));
                 Val *b = eval(e0, c->boundary);
                 if (b->k == V_SYS) die("internal: boundary of %s not total at an endpoint", c->name);
-                VList a2 = vl_copy(args); a2.n = np + 1 + k + D->nidx;   /* the boundary lives at the target's indices */
+                VList a2 = vl_copy(args); a2.n = np + nb + K + D->nidx;   /* the boundary lives at the target's indices */
                 vl_push(&a2, b, 0);
                 ends[end] = elim_apply_list(data, &a2);
             }
@@ -759,12 +762,12 @@ static Val *elim_reduce(int data, VList *args) {
         for (int q = 0; q < c->nint; q++) res = vapp(res, target->args.a[np + c->nargs + q].v, 0);
         if (!c->boundary) return res;
         Val *bsys = eval(env, c->boundary);
-        VList base = vl_copy(args); base.n = np + 1 + k + D->nidx;
+        VList base = vl_copy(args); base.n = np + nb + K + D->nidx;
         Val *img = vsys_map(bsys, elim_of_branch, &base);
         IVal phi = iv_zero();
         if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) phi = iv_or(phi, bsys->br[i].phi->iv); } else phi = iv_one();
-        Val *P = args->a[np].v;
-        for (int j = 0; j < D->nidx; j++) P = vapp(P, args->a[np + 1 + k + j].v, 1);
+        Val *P = args->a[np + D->bpos].v;
+        for (int j = 0; j < D->nidx; j++) P = vapp(P, args->a[np + nb + K + j].v, 1);
         return vouts(vapp(P, target, 0), vi(phi), img, res);
     }
     return res;
@@ -777,14 +780,14 @@ static Val *vcomp(Val *line, Val *phi, Val *u, Val *u0);
 static Val *apply_to(Val *b, void *E) { return vapp((Val *)E, b, 0); }
 static Val *elim_hcomp(int data, VList *args) {
     Data *D = &datas[data];
-    int np = D->nparams, k = D->ncons, m = D->nidx;
+    int np = D->nparams, nb = D->nblock, K = block_ncons(data), m = D->nidx;
     Val *t = args->a[args->n - 1].v;
     if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
     Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
     for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
     Native *nt = xalloc(sizeof *nt); nt->code = N_ELIM_MOTIVE_LINE; nt->i1 = m;
-    vl_push(&nt->cap, args->a[np].v, 0);
-    for (int j = 0; j < m; j++) vl_push(&nt->cap, args->a[np + 1 + k + j].v, 0);
+    vl_push(&nt->cap, args->a[np + D->bpos].v, 0);
+    for (int j = 0; j < m; j++) vl_push(&nt->cap, args->a[np + nb + K + j].v, 0);
     vl_push(&nt->cap, vnative(N_FILL, 1, 0, 0, 4, t->a, t->b, t->c, t->dom), 0);
     Val *line = mkval(V_LAM); line->clo.fn = nfn; line->clo.data = nt; line->isi = 1; line->name = "k";
     return vcomp(line, t->b, vnative(N_ELIM_SIDES, 0, 0, 0, 2, E, t->c), vapp(E, t->dom, 0));
@@ -836,7 +839,7 @@ Val *vapp(Val *f, Val *a, int irr) {
         if (f->h == H_ELIM) {
             Val *v = neu_app(f, ar);
             Data *D = &datas[f->n];
-            int arity = D->nparams + 1 + D->ncons + D->nidx + 1;
+            int arity = D->nparams + D->nblock + block_ncons(f->n) + D->nidx + 1;
             if (v->args.n == arity) { elim_lvl = f->lvl; Val *r = elim_reduce(f->n, &v->args); if (r) return r; r = elim_hcomp(f->n, &v->args); if (r) return r; }
             return v;
         }

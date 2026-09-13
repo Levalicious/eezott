@@ -35,6 +35,7 @@
 int keep_kan, nf_main;
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
+static void emit_sel(int nb, int m);
 
 /* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
 static IVal face_ival(Term *t, int depth) {
@@ -96,8 +97,11 @@ static void erase(Term *t, int depth) {
     case T_DEF: fprintf(out, "tt_%s", defs[t->n].name); break;
     case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
-    case T_DATA:
-        if (t->n == self_data) fputs("self", out); else fprintf(out, "tc_%s", datas[t->n].name);
+    case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
+        if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
+            if (datas[t->n].nblock == 1) fputs("self", out);
+            else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }
+        } else fprintf(out, "tc_%s", datas[t->n].name);
         break;
     case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
@@ -128,6 +132,8 @@ static void erase(Term *t, int depth) {
 
 /* hcomp is a formal element (an extra constructor) of higher inductive types and indexed families, as in the checker */
 static int formal_hcomp(Data *D) { return D->hit || D->nidx > 0; }
+/* the selector of member m of a tuple of nb: r0 -> .. -> r_{nb-1} -> r_m */
+static void emit_sel(int nb, int m) { for (int i = 0; i < nb; i++) fprintf(out, "r%d -> ", i); fprintf(out, "r%d", m); }
 static int nhandlers(Data *D) { return D->ncons + formal_hcomp(D); }
 /* Scott constructor: relevant args, then one handler per constructor, select own handler */
 static void emit_con(Data *D, int ci) {
@@ -158,26 +164,34 @@ static void emit_index_of_code(Data *D, int q) {
 
 /* tt_rec_D := fix(rec -> [P ->] m0 -> .. -> x -> x(case_0)..(case_k)[(hcomp case)]); the motive P is taken when hcomp is
    a formal element: the elimination of hcomp phi u u0 is the composition over the motive of the eliminations of the sides,
-     comp (k. P (hfill phi u u0 k)) phi [phi -> rec (u k)] (rec u0)                                (the checker's elim_hcomp) */
-static void emit_rec(Data *D) {
-    int hx = formal_hcomp(D);
-    fprintf(out, "tt_rec_%s := fix(rec -> ", D->name);
-    if (hx) fputs("P -> ", out);
-    for (int i = 0; i < D->ncons; i++) fprintf(out, "m%d -> ", i);
+     comp (k. P (hfill phi u u0 k)) phi [phi -> rec (u k)] (rec u0)                                (the checker's elim_hcomp)
+   The eliminators of a block share the prefix [P_0.. (of the members with a formal hcomp), m_0 .. m_{K-1} (every member's
+   constructors)]; the eliminator of member m applied to the prefix is emit_rec_call. */
+static void emit_rec_call(Data *D, int m) {
+    Data *B = &datas[D->block]; int nb = D->nblock, K = block_ncons(D - datas);
+    if (nb == 1) fputs("rec", out);
+    else { fputs("recs(", out); for (int i = 0; i < nb; i++) fprintf(out, "r%d -> ", i); fprintf(out, "r%d)", m - D->block); }
+    for (int i = 0; i < nb; i++) if (formal_hcomp(&B[i])) { if (nb == 1) fputs("(P)", out); else fprintf(out, "(P%d)", i); }
+    for (int i = 0; i < K; i++) fprintf(out, "(m%d)", i);
+}
+static void emit_motive(Data *D) { if (D->nblock == 1) fputs("P", out); else fprintf(out, "P%d", D->bpos); }
+/* the body of member D's eliminator: [P.. ->] m.. -> x -> x(case..)[(hcomp case)] */
+static void emit_rec_body(Data *D) {
+    Data *B = &datas[D->block]; int nb = D->nblock, K = block_ncons(D - datas), hx = formal_hcomp(D);
+    for (int i = 0; i < nb; i++) if (formal_hcomp(&B[i])) { if (nb == 1) fputs("P -> ", out); else fprintf(out, "P%d -> ", i); }
+    for (int i = 0; i < K; i++) fprintf(out, "m%d -> ", i);
     fputs("x -> x", out);
     for (int ci = 0; ci < D->ncons; ci++) {
         Con *C = &cons[D->cons[ci]];
         fputc('(', out);
         for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "a%d -> ", j);
         for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
-        fprintf(out, "m%d", ci);
+        fprintf(out, "m%d", C->bord);
         for (int j = 0; j < C->nargs; j++) if (!C->args[j].irr) fprintf(out, "(a%d)", j);
         for (int j = 0; j < C->nargs; j++) {
             ConArg *A = &C->args[j];
             if (A->isrecpath) {   /* the induction hypothesis over a path argument: k -> rec m.. (a_j k) */
-                fputs(hx ? "(k -> rec(P)" : "(k -> rec", out);
-                for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
-                fprintf(out, "(a%d(k)))", j);
+                fputs("(k -> ", out); emit_rec_call(D, A->rec); fprintf(out, "(a%d(k)))", j);
                 continue;
             }
             if (!A->isrec) continue;
@@ -185,8 +199,7 @@ static void emit_rec(Data *D) {
             fputc('(', out);
             Term *w = A->ty; int yt = 0;
             for (Term *p = w; p->k == T_PI && yt < A->npi; p = p->b, yt++) if (!p->irr) fprintf(out, "y%d -> ", yt);
-            fputs(hx ? "rec(P)" : "rec", out);
-            for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
+            emit_rec_call(D, A->rec);
             fprintf(out, "(a%d", j);
             yt = 0;
             for (Term *p = w; p->k == T_PI && yt < A->npi; p = p->b, yt++) if (!p->irr) fprintf(out, "(y%d)", yt);
@@ -196,14 +209,15 @@ static void emit_rec(Data *D) {
         fputc(')', out);
     }
     if (hx) {   /* the motive at the indices of the composition's type, along the filler */
-        fputs("(c -> phi -> u -> u0 -> tt_comp(k -> P", out);
+        fputs("(c -> phi -> u -> u0 -> tt_comp(k -> ", out); emit_motive(D);
         for (int q = 0; q < D->nidx; q++) emit_index_of_code(D, q);
-        fputs("(tt_hfill(c)(phi)(u)(u0)(k)))(phi)(k -> tt_sel(phi)(rec(P)", out);
-        for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
-        fputs("(u(k)))(tt_absurd))(rec(P)", out);
-        for (int i = 0; i < D->ncons; i++) fprintf(out, "(m%d)", i);
-        fputs("(u0)))", out);
+        fputs("(tt_hfill(c)(phi)(u)(u0)(k)))(phi)(k -> tt_sel(phi)(", out); emit_rec_call(D, D - datas);
+        fputs("(u(k)))(tt_absurd))(", out); emit_rec_call(D, D - datas); fputs("(u0)))", out);
     }
+}
+static void emit_rec(Data *D) {
+    fprintf(out, "tt_rec_%s := fix(rec -> ", D->name);
+    emit_rec_body(D);
     fputs(")\n", out);
 }
 
@@ -257,9 +271,8 @@ static void emit_sides(Data *D, Con *C, int j) {
                as the checker does; a formal hcomp transports to the hcomp of the transports;
      HCOMP  := c -> phi -> u -> u0 -> ..     for a formal element builds it; else composes constructor arguments along
                their own type lines with fillers (the checker's structural rule) */
-static void emit_codes(Data *D) {
+static void emit_code_body(Data *D) {   /* p.. i.. -> k -> k(TRANSP)(HCOMP)(NF)(p..)(i..) */
     int np = D->nparams, m = D->nidx, hx = formal_hcomp(D);
-    fprintf(out, "tc_%s := fix(self -> ", D->name);
     emit_components(D);
     fputs("k -> k(", out);
     emit_components(D);
@@ -360,17 +373,48 @@ static void emit_codes(Data *D) {
     fputc(')', out);
     for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
     for (int j = 0; j < m; j++) fprintf(out, "(i%d)", j);
+}
+static void emit_codes(Data *D) {
+    fprintf(out, "tc_%s := fix(self -> ", D->name);
+    emit_code_body(D);
     fputs(")\n", out);
+}
+/* a block of several: the codes as one fixpoint over a tuple (the members' codes refer to each other), then each member's
+   code as a selection; likewise the eliminators */
+static void emit_block_codes(Data *B) {
+    int nb = B->nblock;
+    fprintf(out, "tcb_%s := fix(selfs -> k -> k", B->name);
+    for (int i = 0; i < nb; i++) { fputc('(', out); emit_code_body(&B[i]); fputc(')', out); }
+    fputs(")\n", out);
+    for (int i = 0; i < nb; i++) { fprintf(out, "tc_%s := tcb_%s(", B[i].name, B->name); emit_sel(nb, i); fputs(")\n", out); }
+}
+static void emit_block_recs(Data *B) {
+    int nb = B->nblock;
+    fprintf(out, "ttrecs_%s := fix(recs -> k -> k", B->name);
+    for (int i = 0; i < nb; i++) { fputc('(', out); emit_rec_body(&B[i]); fputc(')', out); }
+    fputs(")\n", out);
+    for (int i = 0; i < nb; i++) { fprintf(out, "tt_rec_%s := ttrecs_%s(", B[i].name, B->name); emit_sel(nb, i); fputs(")\n", out); }
 }
 
 /* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and codes */
 static int *def_used, *data_used;
+static void mark(Term *t);
+/* a data type is used with its whole block: the members' eliminators and codes refer to each other */
+static void mark_data(int d) {
+    Data *B = &datas[datas[d].block];
+    for (int i = 0; i < datas[d].nblock; i++) {
+        Data *M = &B[i]; int id = M - datas;
+        if (data_used[id]) continue;
+        data_used[id] = 1; mark(M->ty);
+        for (int ci = 0; ci < M->ncons; ci++) mark(cons[M->cons[ci]].ty);
+    }
+}
 static void mark(Term *t) {
     if (!t) return;
     switch (t->k) {
     case T_DEF: if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); } break;
-    case T_CON: if (!data_used[cons[t->n].data]) { data_used[cons[t->n].data] = 1; mark(datas[cons[t->n].data].ty); for (int ci = 0; ci < datas[cons[t->n].data].ncons; ci++) mark(cons[datas[cons[t->n].data].cons[ci]].ty); } break;
-    case T_ELIM: case T_DATA: if (!data_used[t->n]) { data_used[t->n] = 1; mark(datas[t->n].ty); for (int ci = 0; ci < datas[t->n].ncons; ci++) mark(cons[datas[t->n].cons[ci]].ty); } break;
+    case T_CON: mark_data(cons[t->n].data); break;
+    case T_ELIM: case T_DATA: mark_data(t->n); break;
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
     case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
     case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
@@ -481,7 +525,16 @@ void erase_program(FILE *f) {
     while (di < ndatas || fi < ndefs) {
         int take_data = fi >= ndefs || (di < ndatas && datas[di].line < defs[fi].line);
         if (take_data) {
-            Data *D = &datas[di++];
+            Data *D = &datas[di];
+            if (D->nblock > 1) {   /* a mutual block, emitted as a whole at its first member */
+                Data *B = &datas[D->block]; int nb = B->nblock; di = D->block + nb;
+                if (!data_used[B - datas]) continue;
+                for (int i = 0; i < nb; i++) { for (int ci = 0; ci < B[i].ncons; ci++) emit_con(&B[i], ci); if (formal_hcomp(&B[i])) emit_hcomp_con(&B[i]); }
+                emit_block_codes(B);
+                emit_block_recs(B);
+                continue;
+            }
+            di++;
             if (!data_used[D - datas]) continue;
             for (int ci = 0; ci < D->ncons; ci++) emit_con(D, ci);
             if (formal_hcomp(D)) emit_hcomp_con(D);

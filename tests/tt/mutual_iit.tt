@@ -1,0 +1,12 @@
+-- inductive-inductive: a type and a relation on it declared together (the shape of the Cauchy reals of HoTT 11.3, without
+-- the path constructor): R's constructor lim needs Close, Close's constructors mention R's constructors
+mutual
+  data R : U where
+    | rat : Nat -> R
+    | lim : (x : Nat -> R) -> ((d e : Nat) -> Close (add d e) (x d) (x e)) -> R
+  data Close : Nat -> R -> R -> U where
+    | crat : (e q r : Nat) -> Close e (rat q) (rat r)
+    | clim : (e : Nat) -> (x : Nat -> R) -> (p : (d e' : Nat) -> Close (add d e') (x d) (x e')) -> (q : Nat) -> Close e (lim x p) (rat q)
+end
+def toNat : R -> Nat := elim R (\_ -> Nat) (\e x y _ -> Nat) (\q -> q) (\x p ihx ihp -> ihx zero) (\e q r -> zero) (\e x p q ihx ihp -> zero)
+def main : Nat := add (toNat (lim (\_ -> rat one) (\d e -> crat (add d e) one one))) (toNat (rat two))

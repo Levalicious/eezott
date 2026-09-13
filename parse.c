@@ -4,6 +4,7 @@
  *   program  := decl*
  *   decl     := 'def' name binder* ':' term ':=' term
  *             | 'data' name binder* ':' term 'where' ('|' name ':' term system?)*   (a system: the boundary of a path constructor)
+ *             | 'mutual' binder* ('data' name ':' term 'where' ...)+ 'end'          (a block sharing the binders as parameters)
  *   binder   := '(' name+ ':' term ')' | '{' name+ ':' term '}'      (implicit)
  *   term     := binder+ '->' term            dependent function type
  *             | '\' (name | '{' name '}')+ '->' term    lambda / path abstraction
@@ -30,7 +31,7 @@ typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK
                TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U, TK_I, TK_I0, TK_I1,
                TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS,
                TK_COMMA, TK_SIGMA, TK_FST, TK_SND, TK_GLUE, TK_GLUEEL, TK_UNGLUE,
-               TK_LBRACE, TK_RBRACE, TK_LEVEL, TK_LZERO, TK_LSUC, TK_LMAX } TokKind;
+               TK_LBRACE, TK_RBRACE, TK_LEVEL, TK_LZERO, TK_LSUC, TK_LMAX, TK_MUTUAL, TK_END } TokKind;
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
@@ -70,7 +71,7 @@ static void lex(const char *src) {
             #define KW(str, kind) if (n == (int)strlen(str) && !strncmp(s, str, n)) { addtok(kind, s, n, line); continue; }
             KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM)
             KW("U", TK_U) KW("I", TK_I) KW("i0", TK_I0) KW("i1", TK_I1)
-            KW("Level", TK_LEVEL) KW("lzero", TK_LZERO) KW("lsuc", TK_LSUC) KW("lmax", TK_LMAX)
+            KW("Level", TK_LEVEL) KW("lzero", TK_LZERO) KW("lsuc", TK_LSUC) KW("lmax", TK_LMAX) KW("mutual", TK_MUTUAL) KW("end", TK_END)
             KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS) KW("Sigma", TK_SIGMA) KW("fst", TK_FST) KW("snd", TK_SND) KW("Glue", TK_GLUE) KW("glue", TK_GLUEEL) KW("unglue", TK_UNGLUE)
             #undef KW
             addtok(TK_NAME, s, n, line); continue;
@@ -88,7 +89,7 @@ static const char *tokname(TokKind k) {
                                "'~'", "'/\\'", "'\\/'",
                                "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'", "'I'", "'i0'", "'i1'",
                                "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'", "','", "'Sigma'", "'fst'", "'snd'", "'Glue'", "'glue'", "'unglue'",
-                               "'{'", "'}'", "'Level'", "'lzero'", "'lsuc'", "'lmax'" };
+                               "'{'", "'}'", "'Level'", "'lzero'", "'lsuc'", "'lmax'", "'mutual'", "'end'" };
     return n[k];
 }
 static Tok *expect(TokKind k) {
@@ -277,6 +278,22 @@ static STerm *parse_term(void) {
     return a;
 }
 
+/* a data declaration after its 'data' token: name, parameters, index telescope, constructors */
+static void parse_data_decl(SDecl *d) {
+    d->isdata = 1; d->name = tokstr(expect(TK_NAME));
+    d->params = parse_binders(&d->nparams);
+    expect(TK_COLON); d->ty = parse_term();
+    expect(TK_WHERE);
+    int cap = 0;
+    while (peek()->k == TK_BAR) {
+        next(); Tok *c = expect(TK_NAME); expect(TK_COLON);
+        if (d->ncons == cap) { cap = cap ? 2 * cap : 4; d->cons = realloc(d->cons, cap * sizeof(SCon)); if (!d->cons) die("out of memory"); }
+        d->cons[d->ncons].name = tokstr(c); d->cons[d->ncons].line = c->line;
+        in_con_type = 1; d->cons[d->ncons].ty = parse_term(); in_con_type = 0;
+        d->cons[d->ncons].boundary = peek()->k == TK_LB ? parse_system() : NULL;   /* path constructor: its boundary */
+        d->ncons++;
+    }
+}
 SDecl *parse_program(const char *src, const char *fname) {
     file = fname; lex(src); pos = 0;
     SDecl *head = NULL, **tail = &head;
@@ -290,20 +307,21 @@ SDecl *parse_program(const char *src, const char *fname) {
             expect(TK_DEFEQ); STerm *val = parse_term();
             d->ty = wrap_pi(b, n, ty); d->val = wrap_lam(b, n, val);
         } else if (t->k == TK_DATA) {
-            d->isdata = 1; d->name = tokstr(expect(TK_NAME));
-            d->params = parse_binders(&d->nparams);
-            expect(TK_COLON); d->ty = parse_term();
-            expect(TK_WHERE);
+            parse_data_decl(d);
+        } else if (t->k == TK_MUTUAL) {   /* a block: the binders are the parameters of every member */
+            d->isdata = 2; d->params = parse_binders(&d->nparams); d->name = "mutual";
             int cap = 0;
-            while (peek()->k == TK_BAR) {
-                next(); Tok *c = expect(TK_NAME); expect(TK_COLON);
-                if (d->ncons == cap) { cap = cap ? 2 * cap : 4; d->cons = realloc(d->cons, cap * sizeof(SCon)); if (!d->cons) die("out of memory"); }
-                d->cons[d->ncons].name = tokstr(c); d->cons[d->ncons].line = c->line;
-                in_con_type = 1; d->cons[d->ncons].ty = parse_term(); in_con_type = 0;
-                d->cons[d->ncons].boundary = peek()->k == TK_LB ? parse_system() : NULL;   /* path constructor: its boundary */
-                d->ncons++;
+            while (peek()->k == TK_DATA) {
+                Tok *dt = next(); SDecl *m = xalloc(sizeof *m); m->line = dt->line;
+                parse_data_decl(m);
+                if (m->nparams) die("%s:%d: data %s in a mutual block: the parameters are declared on the block", file, m->line, m->name);
+                if (d->nmembers == cap) { cap = cap ? 2 * cap : 4; d->members = realloc(d->members, cap * sizeof(SDecl *)); if (!d->members) die("out of memory"); }
+                d->members[d->nmembers++] = m;
             }
-        } else die("%s:%d: expected 'def' or 'data', found %s", file, t->line, tokname(t->k));
+            if (d->nmembers == 0) die("%s:%d: an empty mutual block", file, t->line);
+            expect(TK_END);
+            if (d->nmembers == 1) { SDecl *m = d->members[0]; m->params = d->params; m->nparams = d->nparams; m->next = NULL; d = m; }   /* one member: a plain data type */
+        } else die("%s:%d: expected 'def', 'data' or 'mutual', found %s", file, t->line, tokname(t->k));
         *tail = d; tail = &d->next;
     }
     return head;
