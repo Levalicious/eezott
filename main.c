@@ -39,6 +39,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
+        else if (!strcmp(argv[i], "-N")) nf_main = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }

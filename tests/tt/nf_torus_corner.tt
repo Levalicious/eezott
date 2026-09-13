@@ -1,0 +1,7 @@
+-- the torus's square at a corner reduces through two boundaries (sq i1 i0 = l2 i0 = pt)
+data T2 : U where
+  | pt : T2
+  | l1 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | l2 : (i : I) -> T2 [ ~ i -> pt | i -> pt ]
+  | sq : (i j : I) -> T2 [ ~ i -> l2 j | i -> l2 j | ~ j -> l1 i | j -> l1 i ]
+def main : T2 := sq i1 i0

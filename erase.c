@@ -32,7 +32,7 @@
 #include "tt.h"
 #include <stdlib.h>
 
-int keep_kan;
+int keep_kan, nf_main;
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 
@@ -147,9 +147,9 @@ static void emit_hcomp_con(Data *D) {
     for (int i = 0; i < nhandlers(D); i++) fprintf(out, "h%d -> ", i);
     fprintf(out, "h%d(c)(phi)(u)(u0)\n", D->ncons);
 }
-/* the q-th index read off a code of D: c(m -> h -> p.. -> i.. -> i_q) */
+/* the q-th index read off a code of D: c(m -> h -> n -> p.. -> i.. -> i_q) */
 static void emit_index_of_code(Data *D, int q) {
-    fputs("(c(m -> h -> ", out);
+    fputs("(c(m -> h -> n -> ", out);
     for (int p = 0; p < D->nparams; p++) fprintf(out, "p%d -> ", p);
     for (int j = 0; j < D->nidx; j++) fprintf(out, "i%d -> ", j);
     fprintf(out, "i%d))", q);
@@ -219,7 +219,7 @@ static void emit_arg_line(Data *D, Con *C, int j) {
     erase(C->args[j].ty, np + j);
     fputc(')', out);
     for (int k = 0; k < np; k++) {
-        fputs("(line(i)(m -> h -> ", out);
+        fputs("(line(i)(m -> h -> n -> ", out);
         emit_components(D);
         fprintf(out, "p%d))", k);
     }
@@ -273,7 +273,7 @@ static void emit_codes(Data *D) {
         for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
         fprintf(out, "tt_c_%s", C->name);
         if (C->bparams) for (int p = 0; p < np; p++) {   /* parameters kept by the constructor: those of the type at the end of the line */
-            fputs("(line(tt_i1)(m -> h -> ", out);
+            fputs("(line(tt_i1)(m -> h -> n -> ", out);
             emit_components(D);
             fprintf(out, "p%d))", p);
         }
@@ -311,6 +311,48 @@ static void emit_codes(Data *D) {
             fputc(')', out);
         }
     }
+    /* NF := p.. i.. -> c -> x -> x(case..): constructor arguments normalized at their own types, path constructors at
+       endpoints reduced through their boundary (the boundary's elements normalized), formal compositions kept */
+    fputs(")(", out);
+    emit_components(D);
+    fputs("c -> x -> x", out);
+    for (int ci = 0; ci < D->ncons; ci++) {
+        Con *C = &cons[D->cons[ci]];
+        int r = C->nargs;
+        fputc('(', out);
+        for (int j = 0; j < r; j++) fprintf(out, "a%d -> ", j);
+        for (int q = 0; q < C->nint; q++) fprintf(out, "i%d -> ", q);
+        if (C->nint > 0 && C->boundary) {   /* ((v.. -> tt_sel(face)(nf body)..(the constructor))(p..)(a..)(i..)) */
+            fputs("((", out);
+            for (int k = 0; k < np + r + C->nint; k++) fprintf(out, "v%d -> ", k);
+            for (int b = 0; b < C->boundary->nbr; b++) { fputs("tt_sel(", out); erase_face(C->boundary->br[b].face, np + r + C->nint); fputs(")(tt_nf(c)(", out); erase(C->boundary->br[b].body, np + r + C->nint); fputs("))(", out); }
+            fprintf(out, "tt_c_%s", C->name);
+            if (C->bparams) for (int p = 0; p < np; p++) fprintf(out, "(v%d)", p);
+            for (int j = 0; j < r; j++) fprintf(out, "(v%d)", np + j);
+            for (int q = 0; q < C->nint; q++) fprintf(out, "(v%d)", np + r + q);
+            for (int b = 0; b < C->boundary->nbr; b++) fputc(')', out);
+            fputc(')', out);
+            for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
+            for (int j = 0; j < r; j++) fprintf(out, "(a%d)", j);
+            for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
+            fputc(')', out);
+        } else {
+            fprintf(out, "tt_c_%s", C->name);
+            if (C->bparams) for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
+            for (int j = 0; j < r; j++) {   /* nf of a_j at its type: ((v.. -> A_j)(p..)(a_0..a_{j-1})) */
+                fputs("(tt_nf((", out);
+                for (int k = 0; k < np + j; k++) fprintf(out, "v%d -> ", k);
+                erase(C->args[j].ty, np + j);
+                fputc(')', out);
+                for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
+                for (int k = 0; k < j; k++) fprintf(out, "(a%d)", k);
+                fprintf(out, ")(a%d))", j);
+            }
+            for (int q = 0; q < C->nint; q++) fprintf(out, "(i%d)", q);
+        }
+        fputc(')', out);
+    }
+    if (hx) fprintf(out, "(hc -> hphi -> hu -> hu0 -> tt_c_%s_hcomp(hc)(hphi)(hu)(tt_nf(c)(hu0)))", D->name);
     self_data = -1;
     fputc(')', out);
     for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
@@ -344,9 +386,9 @@ static void emit_glue_runtime(void) {
     /* Glue: an element is the glued element itself where phi holds, and otherwise the pair (sides, base) */
     fputs("tt_glue := phi -> ts -> a -> tt_sel(phi)(ts)(tt_pair(ts)(a))\n", out);
     fputs("tt_unglue := phi -> te -> b -> tt_sel(phi)(tt_fst(tt_snd(te))(b))(tt_snd(b))\n", out);
-    fputs("tt_gA := c -> c(m -> h -> a -> phi -> te -> a)\n", out);
-    fputs("tt_gphi := c -> c(m -> h -> a -> phi -> te -> phi)\n", out);
-    fputs("tt_gte := c -> c(m -> h -> a -> phi -> te -> te)\n", out);
+    fputs("tt_gA := c -> c(m -> h -> n -> a -> phi -> te -> a)\n", out);
+    fputs("tt_gphi := c -> c(m -> h -> n -> a -> phi -> te -> phi)\n", out);
+    fputs("tt_gte := c -> c(m -> h -> n -> a -> phi -> te -> te)\n", out);
     fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(tt_ior(phi)(tt_ineg(phi)))(i -> tt_sel(phi)(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
     /* transport along a line of Glue types, as in the checker, including the face "forall i. phi" on which the glued
        types form a line along i: tt_forall evaluates the line's face at half, and a face is 1 in the free De Morgan
@@ -362,7 +404,8 @@ static void emit_glue_runtime(void) {
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
           "(tt_forall(i -> tt_gphi(line(i))))\n", out);
     fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> u0\n", out);   /* hcomp in Glue: its base (a representative) */
-    fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(a)(phi)(te)\n", out);
+    fputs("tt_nf_glue := a -> phi -> te -> c -> x -> x\n", out);
+    fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }
 
 void erase_program(FILE *f) {
@@ -372,8 +415,9 @@ void erase_program(FILE *f) {
     for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "main")) mainid = i;
     if (mainid < 0) die("no 'main' definition to run");
     if (defs[mainid].irr) die("'main' is a type; a program must be a value");
+    if (nf_main) defs[mainid].val = quote(0, defs[mainid].vval);   /* the checker's normal form instead of the source */
     def_used = xalloc((ndefs + 1) * sizeof(int)); data_used = xalloc((ndatas + 1) * sizeof(int));
-    def_used[mainid] = 1; mark(defs[mainid].val);
+    def_used[mainid] = 1; mark(defs[mainid].val); mark(defs[mainid].ty);
     fputs("#import prelude\n", out);
     /* the interval as three-valued Scott data (i0, half, i1) with Kleene's tables; a closed face is i0 or i1 and
        selects (tt_sel: 1 -> x, 0 -> y); half is the symbol of tt_forall. Then the run-time meaning of systems,
@@ -388,28 +432,34 @@ void erase_program(FILE *f) {
     fputs("tt_sel := phi -> x -> y -> phi(y)(tt_absurd)(x)\n", out);
     fputs("tt_forall := f -> f(tt_ihalf)(tt_i0)(tt_i0)(tt_i1)\n", out);
     /* a code is k -> k(transport rule)(hcomp rule)(components); hcomp at phi = 1 is the side at i1, else the code's rule */
-    fputs("tt_hcomp := c -> phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(c(m -> h -> h)(c)(phi)(u)(u0))\n", out);
-    fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> h -> m)(line)(phi)(a))\n", out);
+    fputs("tt_hcomp := c -> phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(c(m -> h -> n -> h)(c)(phi)(u)(u0))\n", out);
+    fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> h -> n -> m)(line)(phi)(a))\n", out);
     fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
     fputs("tt_hfill := c -> phi -> u -> u0 -> k -> tt_hcomp(c)(tt_ior(phi)(tt_ineg(k)))(i -> tt_sel(phi)(u(tt_iand(i)(k)))(tt_sel(tt_ineg(k))(u0)(tt_absurd)))(u0)\n", out);
     fputs("tt_fill := line -> phi -> u -> u0 -> i -> tt_comp(j -> line(tt_iand(i)(j)))(tt_ior(phi)(tt_ineg(i)))(j -> tt_sel(phi)(u(tt_iand(i)(j)))(tt_sel(tt_ineg(i))(u0)(tt_absurd)))(u0)\n", out);
     fputs("tt_hc_id := c -> phi -> u -> u0 -> u0\n", out);
     fputs("tt_transp_u := line -> phi -> a -> a\n", out);
-    fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)\n", out);
-    fputs("tt_dom := c -> c(m -> h -> d -> b -> d)\n", out);
-    fputs("tt_cod := c -> c(m -> h -> d -> b -> b)\n", out);
+    /* the printed value: a normalizer per code (tt_nf c x); data types reduce path constructors at endpoints through their
+       boundaries and keep formal compositions; functions are printed as they are */
+    fputs("tt_nf := c -> x -> c(m -> h -> n -> n)(c)(x)\n", out);
+    fputs("tt_nf_id := c -> x -> x\n", out);
+    fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)(tt_nf_id)\n", out);
+    fputs("tt_dom := c -> c(m -> h -> n -> d -> b -> d)\n", out);
+    fputs("tt_cod := c -> c(m -> h -> n -> d -> b -> b)\n", out);
     fputs("tt_hc_pi := d -> b -> c -> phi -> u -> u0 -> x -> tt_hcomp(b(x))(phi)(i -> u(i)(x))(u0(x))\n", out);
     fputs("tt_transp_pi := d -> b -> line -> phi -> f -> x -> (v -> tt_transp(i -> tt_cod(line(i))(v(i)))(phi)(f(v(tt_i0))))"
           "(i -> tt_transp(j -> tt_dom(line(tt_ior(i)(tt_ineg(j)))))(tt_ior(phi)(i))(x))\n", out);
-    fputs("tc_pi := d -> b -> k -> k(tt_transp_pi)(tt_hc_pi)(d)(b)\n", out);
-    fputs("tt_pline := c -> c(m -> h -> l -> x -> y -> l)\n", out);
-    fputs("tt_px := c -> c(m -> h -> l -> x -> y -> x)\n", out);
-    fputs("tt_py := c -> c(m -> h -> l -> x -> y -> y)\n", out);
+    fputs("tt_nf_pi := d -> b -> c -> x -> x\n", out);
+    fputs("tc_pi := d -> b -> k -> k(tt_transp_pi)(tt_hc_pi)(tt_nf_pi)(d)(b)\n", out);
+    fputs("tt_pline := c -> c(m -> h -> n -> l -> x -> y -> l)\n", out);
+    fputs("tt_px := c -> c(m -> h -> n -> l -> x -> y -> x)\n", out);
+    fputs("tt_py := c -> c(m -> h -> n -> l -> x -> y -> y)\n", out);
     fputs("tt_hc_path := l -> x -> y -> c -> phi -> u -> u0 -> j -> tt_hcomp(l(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
           "(i -> tt_sel(phi)(u(i)(j))(tt_sel(tt_ineg(j))(x)(tt_sel(j)(y)(tt_absurd))))(u0(j))\n", out);
     fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
           "(i -> tt_sel(phi)(p(j))(tt_sel(tt_ineg(j))(tt_px(line(i)))(tt_sel(j)(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
-    fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(tt_hc_path)(l)(x)(y)\n", out);
+    fputs("tt_nf_path := l -> x -> y -> c -> p -> p\n", out);
+    fputs("tc_path := l -> x -> y -> k -> k(tt_transp_path)(tt_hc_path)(tt_nf_path)(l)(x)(y)\n", out);
     fputs("tt_pair := a -> b -> k -> k(a)(b)\n", out);
     fputs("tt_fst := p -> p(a -> b -> a)\n", out);
     fputs("tt_snd := p -> p(a -> b -> b)\n", out);
@@ -417,7 +467,8 @@ void erase_program(FILE *f) {
           "(tt_transp(i -> tt_cod(line(i))(tt_transp(j -> tt_dom(line(tt_iand(i)(j))))(tt_ior(phi)(tt_ineg(i)))(tt_fst(p))))(phi)(tt_snd(p)))\n", out);
     fputs("tt_hc_sigma := d -> b -> c -> phi -> u -> u0 -> tt_pair(tt_hcomp(d)(phi)(i -> tt_fst(u(i)))(tt_fst(u0)))"
           "(tt_comp(i -> b(tt_hfill(d)(phi)(j -> tt_fst(u(j)))(tt_fst(u0))(i)))(phi)(i -> tt_snd(u(i)))(tt_snd(u0)))\n", out);
-    fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(tt_hc_sigma)(d)(b)\n", out);
+    fputs("tt_nf_sigma := d -> b -> c -> x -> tt_pair(tt_nf(d)(tt_fst(x)))(tt_nf(b(tt_fst(x)))(tt_snd(x)))\n", out);
+    fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(tt_hc_sigma)(tt_nf_sigma)(d)(b)\n", out);
     /* declaration order: data types and definitions interleaved by line number */
     int di = 0, fi = 0;
     while (di < ndatas || fi < ndefs) {
@@ -441,6 +492,6 @@ void erase_program(FILE *f) {
     fclose(out);
     /* eezoc reads `defs ; expr`: the separator must follow the last definition on its line */
     if (sz && buf[sz - 1] == '\n') buf[sz - 1] = 0;
-    fprintf(f, "%s;\ntt_%s\n", buf, defs[mainid].name);
+    fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
     free(buf);
 }

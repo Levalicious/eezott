@@ -35,6 +35,11 @@ run_typed() {   # file mode ttflags -> bitstring (or ERROR)
     local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
     echo "$bcl" | "$EEZO" $2 2>&1
 }
+checkN() {      # file: a program whose main is a higher inductive value; its run-time value must equal the run-time value of
+                # the checker's normal form of main (eezott -N), printed through the same normalizer
+    local a b; a=$(run_typed "$1" "" ""); b=$(run_typed "$1" "" "-N")
+    if [ "$a" = "$b" ] && [ "${a#TYPECHECK_ERROR}" = "$a" ] && [ "${a#EEZOC_ERROR}" = "$a" ]; then pass "$1 = its normal form (eezott -N)"; else fail "$1 = its normal form (eezott -N)" "$b" "$a"; fi
+}
 check() {       # file kind value
     local want; want=$(oracle "$2" "$3")
     for mode in "" "-n"; do
@@ -106,6 +111,13 @@ check level_list.tt    nat 2
 check hit_hcomp_elim.tt nat 3
 check hcomp_vec_motive.tt nat 2
 check glue_forall.tt   bool false
+
+checkN nf_hit_hcomp.tt
+checkN nf_hit_endpoint.tt
+checkN nf_hit_nested.tt
+checkN nf_torus_corner.tt
+checkN nf_vec_hcomp.tt
+checkN nf_route.tt
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

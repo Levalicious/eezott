@@ -1,0 +1,5 @@
+-- a path constructor at an endpoint is its boundary: the printed value is normalized through the boundary
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def main : S1 := loop i1
