@@ -2,5 +2,5 @@
 data List2 (l : Level) (A : U {l}) : U {l} where
   | nil2 : List2 l A
   | cons2 : A -> List2 l A -> List2 l A
-def len (l : Level) (A : U {l}) (xs : List2 l A) : Nat := elim List2 l A (\_ -> Nat) zero (\x xs ih -> suc ih) xs
-def main : Nat := len 1 U (cons2 1 U Nat (cons2 1 U Bool (nil2 1 U)))
+def len (l : Level) (A : U {l}) (xs : List2 l A) : Nat := elim List2 (\_ -> Nat) zero (\x xs ih -> suc ih) xs
+def main : Nat := len 1 U (cons2 Nat (cons2 Bool (nil2)))

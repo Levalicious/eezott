@@ -1,4 +1,4 @@
 -- a data type used one universe up: List U
-def length : (A : U) -> List A -> Nat := \A l -> elim List A (\_ -> Nat) zero (\x xs ih -> suc ih) l
-def ts : List U := lcons U Nat (lcons U Bool (lnil U))
+def length : (A : U) -> List A -> Nat := \A l -> elim List (\_ -> Nat) zero (\x xs ih -> suc ih) l
+def ts : List U := lcons Nat (lcons Bool (lnil))
 def main : Nat := length U ts

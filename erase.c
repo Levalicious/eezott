@@ -80,6 +80,7 @@ static void erase_face(Term *t, int depth) {
 }
 static void erase(Term *t, int depth) {
     switch (t->k) {
+    case T_META: die("internal: a metavariable reached erasure");
     case T_VAR: fprintf(out, "v%d", depth - 1 - t->n); break;
     case T_LAM:
         if (t->irr) { erase(t->a, depth + 1); break; }

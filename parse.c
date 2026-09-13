@@ -4,16 +4,16 @@
  *   program  := decl*
  *   decl     := 'def' name binder* ':' term ':=' term
  *             | 'data' name binder* ':' term 'where' ('|' name ':' term system?)*   (a system: the boundary of a path constructor)
- *   binder   := '(' name+ ':' term ')'
+ *   binder   := '(' name+ ':' term ')' | '{' name+ ':' term '}'      (implicit)
  *   term     := binder+ '->' term            dependent function type
- *             | '\' name+ '->' term          lambda / path abstraction
+ *             | '\' (name | '{' name '}')+ '->' term    lambda / path abstraction
  *             | 'let' name ':' term ':=' term 'in' term
  *             | ior ('->' term)?             non-dependent arrow
  *   ior      := iand ('\/' iand)*            interval join
  *   iand     := neg ('/\' neg)*              interval meet
  *   neg      := '~' neg | app                interval reversal
- *   app      := atom atom*
- *   atom     := name | 'U' [0-9]+? | 'I' | 'i0' | 'i1' | 'elim' name | '(' term ')'
+ *   app      := atom (atom | '{' term '}')*    ({e} supplies the next implicit argument)
+ *   atom     := name | '_' | 'U' [0-9]+? | 'I' | 'i0' | 'i1' | 'elim' name | '(' term ')'      ('_': a hole)
  *             | 'PathP' | 'Path' | 'Partial' | 'transp' | 'hcomp' | 'comp'   (heads, applied like functions)
  *             | 'Sub' | 'inS' | 'outS'                                     (cubical subtypes A [ phi |-> u ])
  *             | 'Sigma' | 'fst' | 'snd' | '(' term ',' term ')'                (dependent pairs)
@@ -104,24 +104,24 @@ static STerm *parse_term(void);
 static STerm *parse_ior(void);
 
 static int binder_ahead(void) {
-    if (peek()->k != TK_LP) return 0;
+    if (peek()->k != TK_LP && peek()->k != TK_LBRACE) return 0;
     int i = 1;
     if (peekat(i)->k != TK_NAME) return 0;
     while (peekat(i)->k == TK_NAME) i++;
     return peekat(i)->k == TK_COLON;
 }
 static void parse_binder_group(SBinder **out, int *n, int *cap) {
-    expect(TK_LP);
+    Tok *o = next(); int imp = o->k == TK_LBRACE;   /* {x : A}: implicit */
     int start = *n;
     while (peek()->k == TK_NAME) {
         Tok *t = next();
         if (*n == *cap) { *cap = *cap ? 2 * *cap : 4; *out = realloc(*out, *cap * sizeof(SBinder)); if (!*out) die("out of memory"); }
-        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*n)++;
+        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*n)++;
     }
     expect(TK_COLON);
     STerm *ty = parse_term();
     for (int i = start; i < *n; i++) (*out)[i].ty = ty;
-    expect(TK_RP);
+    expect(imp ? TK_RBRACE : TK_RP);
 }
 static SBinder *parse_binders(int *n) {
     SBinder *b = NULL; int cap = 0; *n = 0;
@@ -148,7 +148,7 @@ static STerm *parse_system(void) {
 static STerm *parse_atom(void) {
     Tok *t = peek();
     switch (t->k) {
-    case TK_NAME: { next(); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
+    case TK_NAME: { next(); if (t->n == 1 && t->s[0] == '_') return st(S_HOLE, t->line); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
     case TK_NUM: {
         next(); STerm *r = st(S_NUM, t->line);
         errno = 0; r->num = strtoull(tokstr(t), NULL, 10);
@@ -202,9 +202,11 @@ static int atom_ahead(void) {
 static STerm *parse_app(void) {
     STerm *f = parse_atom();
     while (atom_ahead()) {
-        if (peek()->k == TK_LP && binder_ahead()) break;
+        if ((peek()->k == TK_LP || peek()->k == TK_LBRACE) && binder_ahead()) break;
         if (peek()->k == TK_LB && in_con_type) break;
+        int imp = peek()->k == TK_LBRACE;   /* f {e}: e supplies the next implicit argument (a plain argument when there is none) */
         STerm *a = parse_atom();
+        if (imp) a->imp = 1;
         STerm *r = st(S_APP, f->line); r->a = f; r->b = a; f = r;
     }
     return f;
@@ -243,10 +245,12 @@ static STerm *parse_term(void) {
     if (t->k == TK_LAM) {
         next();
         SBinder *b = NULL; int n = 0, cap = 0;
-        while (peek()->k == TK_NAME) {
+        while (peek()->k == TK_NAME || (peek()->k == TK_LBRACE && peekat(1)->k == TK_NAME && peekat(2)->k == TK_RBRACE)) {
+            int imp = peek()->k == TK_LBRACE; if (imp) next();   /* \{x}: an implicit lambda */
             Tok *x = next();
+            if (imp) expect(TK_RBRACE);
             if (n == cap) { cap = cap ? 2 * cap : 4; b = realloc(b, cap * sizeof(SBinder)); if (!b) die("out of memory"); }
-            b[n].name = tokstr(x); b[n].ty = NULL; b[n].line = x->line; n++;
+            b[n].name = tokstr(x); b[n].ty = NULL; b[n].line = x->line; b[n].imp = imp; n++;
         }
         if (n == 0) die("%s:%d: lambda needs at least one binder", file, t->line);
         expect(TK_ARROW);

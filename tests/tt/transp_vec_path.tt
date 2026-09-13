@@ -1,3 +1,3 @@
-def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec Nat (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
+def vsum : (n : Nat) -> Vec Nat n -> Nat := \n v -> elim Vec (\n _ -> Nat) zero (\n x xs ih -> add x ih) n v
 def pN : Path U Nat Nat := \i -> Nat
-def main : Nat := vsum two (transp (\i -> Vec (pN i) two) i0 (cons Nat one two (cons Nat zero three (nil Nat))))
+def main : Nat := vsum two (transp (\i -> Vec (pN i) two) i0 (cons one two (cons zero three (nil))))

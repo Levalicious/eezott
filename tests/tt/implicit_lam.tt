@@ -1,0 +1,5 @@
+-- implicit lambdas: written \{A}, or inserted when a term is checked against an implicit function type
+def K : {A : U} -> A -> A := \{A} x -> x
+def K2 : {A : U} -> A -> A := \x -> x
+def app {A B : U} (f : {X : U} -> X -> X) (a : A) (b : B) : A := f a
+def main : Nat := add (K one) (add (K2 two) (app K one true))

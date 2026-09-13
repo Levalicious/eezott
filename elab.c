@@ -37,6 +37,12 @@ static void ctx_push(Ctx *c, const char *name, Val *ty, Val *val) {
 static void ctx_pop(Ctx *c) { c->n--; c->env = c->env->next; }
 static void ctx_bind(Ctx *c, const char *name, Val *ty) { ctx_push(c, name, ty, ty->k == V_LEVEL ? vlvar(c->n) : vvar(c->n)); }
 static void ctx_bind_i(Ctx *c, const char *name) { ctx_push(c, name, mkval(V_INTERVAL), vivar(c->n)); }
+/* a fresh meta of a type, applied to the context: a level meta when the type is Level (solved by the level store) */
+static Term *fresh_meta(Ctx *c, Val *ty, int line) {
+    ty = force(ty);
+    if (ty->k == V_LEVEL) { int m = lv_meta_new(); Term *t = mk_term(T_LMETA, NULL, NULL, NULL, NULL); t->n = m; return t; }
+    return meta_term(meta_new(ty, c->n, c->names, line), c->n);
+}
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
 static Ctx ctx_restrict(Ctx *c, const Face *f) {
@@ -95,8 +101,14 @@ static Term *infer(Ctx *c, STerm *s, Val **ty);
 static Term *check(Ctx *c, STerm *s, Val *ty);
 
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
+/* a type whose sort is not known yet (a meta, e.g. an implicit parameter still to be inferred) is in a universe at a fresh level */
+static Val *refine_to_universe(Ctx *c, Val *ty) {
+    ty = force(ty);
+    if (ty->k == V_NEU && ty->h == H_META) { int l = lv_meta_new(); if (conv(c->n, ty, vu_l(lv_meta(l)))) ty = force(ty); }
+    return ty;
+}
 static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) {
-    Val *ty; Term *t = infer(c, s, &ty);
+    Val *ty; Term *t = infer(c, s, &ty); ty = refine_to_universe(c, ty);
     if (ty->k != V_U) die("line %d: expected a type, but %s : %s", s->line, "the term", show(c, ty));
     *lvl = ty->lvl; *pre = ty->pre; return t;
 }
@@ -114,9 +126,9 @@ static Term *check_line(Ctx *c, STerm *s, LVal *lvl) {
         ctx_pop(c);
         Term *t = mk_lam(s->binders[0].name, body, 0); t->isi = 1; return t;
     }
-    Val *ty; Term *t = infer(c, s, &ty);
+    Val *ty; Term *t = infer(c, s, &ty); ty = force(ty);
     if (ty->k != V_PI || !ty->isi) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
-    Val *cod = inst(&ty->clo, vivar(c->n));
+    Val *cod = refine_to_universe(c, inst(&ty->clo, vivar(c->n)));
     if (cod->k != V_U) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
     if (cod->pre) die("line %d: expected a line of types (i : I) -> U, but the line yields pretypes: %s", s->line, show(c, ty));
     *lvl = cod->lvl; return t;
@@ -331,14 +343,14 @@ static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
                 ih = mk_pi(xsprintf("y%d", tt), shift2(ys[tt], tt, h + (r - j), tt + j, h + (r - j) + ci + 1), ih, yirr[tt]);
             mt = mk_pi(xsprintf("ih%d", j), ih, mt, res_irr);
         }
-        for (int j = r - 1; j >= 0; j--) mt = mk_pi(C->args[j].name, shift(ATY(C, j), j, ci + 1), mt, C->args[j].irr);
+        for (int j = r - 1; j >= 0; j--) { mt = mk_pi(C->args[j].name, shift(ATY(C, j), j, ci + 1), mt, C->args[j].irr); mt->imp = C->args[j].imp; }
         t = mk_pi(xsprintf("m_%s", C->name), mt, t, 0);
     }
     /* motive: (i..) -> D p i -> U lvl   under [params] */
     Term *P = mk_pi("x", data_applied(d, m, 0), mk_u_l(lvl), 0);
     for (int j = m - 1; j >= 0; j--) P = mk_pi(xsprintf("i%d", j), ITY(j), P, !(D->hit || D->nidx > 0));   /* relevant with the motive */
     t = mk_pi("P", P, t, !(D->hit || D->nidx > 0));   /* the motive is run-time content when hcomp is a formal element */
-    for (int i = np - 1; i >= 0; i--) t = mk_pi(xsprintf("p%d", i), PTY(i), t, 1);
+    for (int i = np - 1; i >= 0; i--) { t = mk_pi(xsprintf("p%d", i), PTY(i), t, 1); t->imp = 1; }   /* the parameters are implicit */
     return t;
     #undef ITY
     #undef PTY
@@ -357,8 +369,39 @@ static Term *global_level(TKind k, int id, LVal *L) {
     int m = lv_meta_new(); *L = lv_meta(m);
     Term *t = mk_term(T_LMETA, NULL, NULL, NULL, NULL); t->n = m; return t;
 }
+typedef struct { STerm *num; Val *dom; int meta; } Deferred;   /* a numeral argument whose type is not known yet: a meta stands for it */
+static Deferred *dnums; static int ndnums;
+static Term *check_numeral(Ctx *c, STerm *s, Val *ty);
+/* the deferred numerals whose types are known now are checked and their metas assigned; all: the rest are errors */
+static void resolve_numerals(Ctx *c, int all) {
+    int j = 0;
+    for (int i = 0; i < ndnums; i++) {
+        Val *dom = force(dnums[i].dom);
+        if (dom->k == V_NEU && dom->h == H_META) {
+            if (all) die("line %d: the type of the numeral %llu is not determined; write the implicit argument, f {e} ..", dnums[i].num->line, dnums[i].num->num);
+            dnums[j++] = dnums[i]; continue;
+        }
+        meta_assign(dnums[i].meta, check_numeral(c, dnums[i].num, dom), tmetas[dnums[i].meta].ctxn);
+    }
+    ndnums = j;
+}
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
     for (int i = 0; i < nargs; i++) {
+        hty = force(hty);
+        while (hty->k == V_PI && hty->imp && !args[i]->imp) {   /* an implicit argument not written: a meta */
+            Term *m = fresh_meta(c, hty->dom, args[i]->line);
+            head = mk_app(head, m, hty->irr); hty = force(inst(&hty->clo, eval(c->env, m)));
+        }
+        if (hty->k == V_PI && args[i]->k == S_NUM) {   /* a numeral against a type not known yet: checked after the other arguments */
+            Val *dom = force(hty->dom);
+            if (dom->k == V_NEU && dom->h == H_META) {
+                int id = meta_new(dom, c->n, c->names, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
+                dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die("out of memory");
+                dnums[ndnums].num = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
+                head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
+                continue;
+            }
+        }
         if (hty->k == V_PATHP) {
             Term *r = check_interval(c, args[i]);
             head = mk_term(T_PAPP, head, r, quote(c->n, hty->b), quote(c->n, hty->c));
@@ -394,21 +437,22 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             die("line %d: elim %s inside the declaration of %s: the type is not complete yet", s->line, h->name, h->name);
         if (d < 0) die("line %d: elim of unknown data type '%s'", h->line, h->name);
         Data *D = &datas[d]; int np = D->nparams, m = D->nidx;
-        if (n < np + 1) die("line %d: elim %s needs its %d parameter%s and a motive", h->line, D->name, np, np == 1 ? "" : "s");
         /* the data type is taken at a fresh level (a meta, solved at the end of the definition), or at its
            own hidden level inside its own declaration */
         LVal dl; Term *dlt = global_level(T_DATA, d, &dl);
         Data *DV = data_at(d, dl);
-        Env *pe = NULL; Val **pv = xalloc((np + 1) * sizeof(Val *));
-        for (int i = 0; i < np; i++) {
-            Term *p = check(c, args[i], eval(pe, DV->ptys[i]));
-            pv[i] = eval(c->env, p); pe = env_push(pe, pv[i]);
+        Env *pe = NULL; Val **pv = xalloc((np + 1) * sizeof(Val *)); Term **pt = xalloc((np + 1) * sizeof(Term *)); int ai = 0;
+        for (int i = 0; i < np; i++) {   /* the parameters are implicit: written {p}, or metas */
+            Val *pty = eval(pe, DV->ptys[i]);
+            pt[i] = (ai < n && args[ai]->imp) ? check(c, args[ai++], pty) : fresh_meta(c, pty, h->line);
+            pv[i] = eval(c->env, pt[i]); pe = env_push(pe, pv[i]);
         }
+        if (n < ai + 1) die("line %d: elim %s needs a motive", h->line, D->name);
         /* motive: peel its lambdas against the expected binders (indices, then the target),
            then read the universe of what remains */
         LVal lvl; int res_irr;
         {
-            STerm *ms = args[np]; Env *ie = pe; int nb = 0, depth = c->n;
+            STerm *ms = args[ai]; Env *ie = pe; int nb = 0, depth = c->n;
             Val **iv = xalloc((m + 2) * sizeof(Val *));
             #define TARGET_TYPE(dst) do { \
                 Val *dv_ = mkval(V_DATA); dv_->n = d; dv_->lvl = dl; \
@@ -443,7 +487,9 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             for (int i = 0; i < nb; i++) ctx_pop(c);
         }
         Term *ety = elim_type(d, lvl, res_irr, dl);
-        return app_spine(c, args, n, mk_ref_l(T_ELIM, d, dlt), eval(NULL, ety), ty);
+        Term *head = mk_ref_l(T_ELIM, d, dlt); Val *hty = eval(NULL, ety);
+        for (int i = 0; i < np; i++) { head = mk_app(head, pt[i], 1); hty = inst(&hty->clo, pv[i]); }
+        return app_spine(c, args + ai, n - ai, head, hty, ty);
     }
     case S_PATHP: {
         LVal lvl; Term *line, *x, *y;
@@ -667,6 +713,9 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         if ((id = find_data(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DATA, id, &L); *ty = eval(NULL, data_at(id, L)->ty); return mk_ref_l(T_DATA, id, lt); }
         die("line %d: unbound name '%s'", s->line, s->name);
     }
+    case S_HOLE: {   /* a hole standing for a type: a meta in a universe at a fresh level */
+        int l = lv_meta_new(); Val *U = vu_l(lv_meta(l)); *ty = U; return fresh_meta(c, U, s->line);
+    }
     case S_U:
         if (s->a) {   /* U {l}: a universe at a level expression */
             Term *lt = check(c, s->a, vlevel()); LVal L = eval_level(c->env, lt);
@@ -690,6 +739,7 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     case S_PI: {
         SBinder *b = &s->binders[0];
         if (b->ty->k == S_I) {   /* a function from the interval is a pretype: it has no Kan structure */
+            if (b->imp) die("line %d: an interval binder cannot be implicit", s->line);
             ctx_bind_i(c, b->name);
             LVal lb; int pb; Term *cod = check_type_sort(c, s->a, &lb, &pb);
             ctx_pop(c);
@@ -704,7 +754,7 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         ctx_pop(c);
         LVal l = lv_max(la, lb);
         *ty = (pa || pb) ? vupre_l(l) : vu_l(l);   /* a function type from or into a pretype is a pretype */
-        Term *t = mk_pi(b->name, dom, cod, irr); t->pre = pa; return t;
+        Term *t = mk_pi(b->name, dom, cod, irr); t->pre = pa; t->imp = b->imp; return t;
     }
     case S_LAM: die("line %d: cannot infer the type of a lambda; add an annotation", s->line);
     case S_SYS: die("line %d: cannot infer the type of a system; it must be checked against a Partial type", s->line);
@@ -765,9 +815,19 @@ static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
     return body;
 }
 static Term *check(Ctx *c, STerm *s, Val *ty) {
+    ty = force(ty);
+    if (ty->k == V_PI && ty->imp && !(s->k == S_LAM && s->binders[0].imp)) {   /* an implicit function type: abstract over the argument */
+        const char *nm = xsprintf("{%s}", ty->name ? ty->name : "_");   /* not a name the program can write: no capture */
+        ctx_bind(c, nm, ty->dom);
+        Term *body = check(c, s, inst(&ty->clo, c->env->v));
+        ctx_pop(c);
+        Term *t = mk_lam(nm, body, ty->irr); t->imp = 1; return t;
+    }
+    if (s->k == S_HOLE) return fresh_meta(c, ty, s->line);
     if (s->k == S_NUM) return check_numeral(c, s, ty);
     if (s->k == S_LAM) {
         SBinder *b = &s->binders[0];
+        if (b->imp && !(ty->k == V_PI && ty->imp)) die("line %d: the implicit lambda \\{%s} is checked against %s, not an implicit function type", s->line, b->name, show(c, ty));
         if (ty->k == V_PATHP) {
             ctx_bind_i(c, b->name);
             int lvl = c->n - 1;
@@ -789,7 +849,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         ctx_bind(c, b->name, ty->dom);
         Term *body = check(c, s->a, inst(&ty->clo, vvar(c->n - 1)));
         ctx_pop(c);
-        return mk_lam(b->name, body, ty->irr);
+        Term *t = mk_lam(b->name, body, ty->irr); t->imp = b->imp; return t;
     }
     if (s->k == S_LET) {
         LVal l; int p; Term *tyt = check_type_sort(c, s->a, &l, &p);
@@ -836,15 +896,28 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         return mk_term(T_PAIR, a, b, NULL, NULL);
     }
     if (s->k == S_SYS) return check_system(c, s, ty);
-    Val *got; Term *t = infer(c, s, &got);
+    Val *got; Term *t = infer(c, s, &got); got = force(got);
+    while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied */
+        Term *m = fresh_meta(c, got->dom, s->line);
+        t = mk_app(t, m, got->irr); got = force(inst(&got->clo, eval(c->env, m)));
+    }
+    if (got->k == V_U && ty->k == V_NEU && ty->h == H_META) {
+        /* a universe against a type not known yet: subtyping holds between sorts only, so the type is a universe of the same
+           sort at a level to be determined; the level is a fresh level meta, bounded below by got's (the level store decides it) */
+        Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
+        if (!conv(c->n, ty, U)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+        if (lv_enforce_leq(got->lvl, U->lvl) != 1) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
+        resolve_numerals(c, 0); return t;
+    }
     if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
         int r = lv_enforce_leq(got->lvl, ty->lvl);
-        if (r == 1) return t;
+        if (r == 1) { resolve_numerals(c, 0); return t; }
         if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
         die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
     }
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
     if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+    resolve_numerals(c, 0);
     return t;
 }
 
@@ -1022,7 +1095,8 @@ static void elab_data(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
     for (int i = 0; i < s->nparams; i++) if (s->params[i].ty->k == S_LEVEL) c.abs = 1;   /* level-explicit: absolute constants */
-    int m0 = lstore_nmetas(); LMark mark = lstore_mark();
+    for (int i = 0; i < s->nparams; i++) if (s->params[i].imp) die("line %d: data %s: a parameter is always explicit in the type former (it is implicit in the constructors)", s->line, s->name);
+    int m0 = lstore_nmetas(); LMark mark = lstore_mark(); int mm0 = ntmetas;
     Data D = {0}; D.name = s->name; D.line = s->line; D.nparams = s->nparams;
     D.ptys = xalloc((s->nparams + 1) * sizeof(Term *));
     for (int i = 0; i < s->nparams; i++) {
@@ -1063,7 +1137,7 @@ static void elab_data(SDecl *s) {
         for (int j = 0; j < r; j++) {
             ConArg *A = &C.args[j];
             if (x->pre) die("line %d: constructor %s: the argument %s is a pretype; constructor arguments must be types in a universe", sc->line, sc->name, x->name);
-            A->name = x->name; A->ty = x->a; A->irr = x->irr;
+            A->name = x->name; A->ty = x->a; A->irr = x->irr; A->imp = x->imp;
             /* a recursive path argument: Path (D params) px py */
             if (A->ty->k == T_PATHP && A->ty->a->k == T_LAM) {
                 Term **idx; int nidx;
@@ -1112,7 +1186,7 @@ static void elab_data(SDecl *s) {
             for (int i = 0; i < s->nparams; i++) vl_push(&Dv->args, vvar(i), 0);
             for (int j = 0; j < nridx; j++) vl_push(&Dv->args, eval(bc.env, ridx[j]), 1);   /* the boundary lives at the constructor's own index */
             Val *pty = mkval(V_PARTIAL); pty->a = vi(cover); pty->b = Dv;
-            C.boundary = check(&bc, sc->boundary, pty);
+            C.boundary = zonk(check(&bc, sc->boundary, pty));   /* its implicit arguments are determined by the constructor's own type */
             {   /* the boundary must be in the constructor language (CHM18): checked after typing, at the declaration */
                 BGram g = { &C, s->nparams, r, nint, sc->line };
                 for (int i = 0; i < C.boundary->nbr; i++) bg_elem(&g, C.boundary->br[i].body, 0);
@@ -1131,7 +1205,7 @@ static void elab_data(SDecl *s) {
         }
         if (nint > 0) D.hit = 1;
         Term *closed = cty;
-        for (int i = s->nparams - 1; i >= 0; i--) closed = mk_pi(s->params[i].name, D.ptys[i], closed, !C.bparams);
+        for (int i = s->nparams - 1; i >= 0; i--) { closed = mk_pi(s->params[i].name, D.ptys[i], closed, !C.bparams); closed->imp = 1; }   /* the parameters are implicit */
         C.ty = closed;
         int cid = ncons;
         cons = realloc(cons, (ncons + 1) * sizeof(Con)); if (!cons) die("out of memory");
@@ -1155,6 +1229,8 @@ static void elab_data(SDecl *s) {
         for (int j = 0; j < DD->nidx; j++) SLOT(C->ridx[j]);
     }
     #undef SLOT
+    resolve_numerals(&c, 0); metas_finish(DD->name, s->line, mm0); resolve_numerals(&c, 1);
+    for (int i = 0; i < nt; i++) ts[i] = zonk(ts[i]);
     solve_metas(DD->name, s->line, m0, mark, ts, nt, &DD->lvl, 1);
     for (int i = 0; i < nt; i++) *slots[i] = ts[i];
     /* polymorphic if some parameter, index or constructor mentions the hidden level (the type's own universe does not
@@ -1175,11 +1251,12 @@ static void elab_def(SDecl *s) {
     check_fresh(s->name, s->line);
     Ctx c = {0};
     c.abs = declares_level(s->ty);   /* level-explicit: absolute constants */
-    int m0 = lstore_nmetas(); LMark mark = lstore_mark();
+    int m0 = lstore_nmetas(); LMark mark = lstore_mark(); int mm0 = ntmetas;
     LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);
     Term *val = check(&c, s->val, vty);
-    Term *ts[2] = { ty, val };
+    resolve_numerals(&c, 0); metas_finish(s->name, s->line, mm0); resolve_numerals(&c, 1);
+    Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
     Def D = {0}; D.name = s->name; D.line = s->line;

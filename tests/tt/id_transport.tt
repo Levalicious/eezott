@@ -1,7 +1,7 @@
 -- J computing on refl: substitution along an identity between values
-def subst : (a : Bool) -> (b : Bool) -> Id Bool a b -> Bool := \a b p -> elim Id Bool a (\b _ -> Bool) a b p
+def subst : (a : Bool) -> (b : Bool) -> Id Bool a b -> Bool := \a b p -> elim Id (\b _ -> Bool) a b p
 -- transport between types needs an identity type one universe up
 data Id1 (A : U 1) (a : A) : A -> U 1 where
   | refl1 : Id1 A a a
-def cast : (A : U) -> (B : U) -> Id1 U A B -> A -> B := \A B p -> elim Id1 U A (\B _ -> A -> B) (\x -> x) B p
-def main : Bool := and (not (subst true true (refl Bool true))) (cast Bool Bool (refl1 U Bool) false)
+def cast : (A : U) -> (B : U) -> Id1 U A B -> A -> B := \A B p -> elim Id1 (\B _ -> A -> B) (\x -> x) B p
+def main : Bool := and (not (subst true true (refl))) (cast Bool Bool (refl1) false)

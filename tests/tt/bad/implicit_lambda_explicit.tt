@@ -1,0 +1,3 @@
+-- an implicit lambda against an explicit function type
+def f : Nat -> Nat := \{x} -> x
+def main : Nat := f one

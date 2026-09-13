@@ -1,2 +1,2 @@
-def length : (A : U) -> List A -> Nat := \A l -> elim List A (\_ -> Nat) zero (\x xs ih -> suc ih) l
-def main : Nat := length Nat (transp (\i -> List Nat) i0 (lcons Nat one (lnil Nat)))
+def length : (A : U) -> List A -> Nat := \A l -> elim List (\_ -> Nat) zero (\x xs ih -> suc ih) l
+def main : Nat := length Nat (transp (\i -> List Nat) i0 (lcons one (lnil)))

@@ -1,3 +1,3 @@
 -- a formal composition in an indexed family, printed with its code (parameters and index)
-def v2 : Vec Nat two := cons Nat one three (cons Nat zero two (nil Nat))
+def v2 : Vec Nat two := cons one three (cons zero two (nil))
 def main : Vec Nat two := hcomp (Vec Nat two) i0 (\_ -> []) v2

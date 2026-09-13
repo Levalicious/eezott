@@ -68,6 +68,9 @@ check funext_apply.tt  nat 3
 check transp_const.tt  nat 2
 check transp_pi.tt     nat 2
 check hcomp_nat.tt     nat 2
+check implicit_id.tt   nat 9
+check implicit_lam.tt  nat 4
+check implicit_cons.tt nat 3
 check comp_nat.tt      nat 3
 check hfill_bool.tt    bool true
 check cong_sym.tt      nat 2
