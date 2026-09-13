@@ -1,0 +1,8 @@
+-- strict positivity across a block: A's constructor has B in a negative position
+mutual
+  data A : U where
+    | mk : (B -> Nat) -> A
+  data B : U where
+    | mb : A -> B
+end
+def main : Nat := one

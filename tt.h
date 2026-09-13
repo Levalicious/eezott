@@ -32,6 +32,11 @@
  * against such a function type is abstracted over it, f {e} supplies it
  * explicitly, and _ is a hole. Metas are solved by pattern unification
  * inside conversion and substituted when the declaration ends (meta.c).
+ * M11: mutual blocks.  mutual (params) data A .. data B .. end declares
+ * inductive types together (inductive-inductive when a later member's
+ * indices use an earlier member's constructors); strict positivity is
+ * checked across the block, and every member's induction principle takes
+ * the motives and methods of the whole block.
  * M5a: two sorts. U l is the universe of types with Kan structure; Pre l is
  * the sort of pretypes: Partial phi A, Sub A phi u and every function type
  * from I or from/into a pretype. Pretypes may be the types of binders,
@@ -86,6 +91,7 @@ typedef struct SDecl {
     STerm *ty;                        /* def: type; data: index telescope ending in U */
     STerm *val;                       /* def */
     SCon *cons; int ncons;            /* data */
+    struct SDecl **members; int nmembers;   /* a mutual block (isdata == 2): its data declarations, sharing the block's params */
     struct SDecl *next;
 } SDecl;
 
@@ -286,12 +292,14 @@ typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int
 typedef struct {
     const char *name; Term *ty; int irr, imp;   /* type of the argument, under [params, previous args]; imp: an implicit argument */
     int isrec, npi;                        /* recursive: type is (y_1..y_npi) -> D params idx */
+    int rec;                               /* the data type of the recursive occurrence (a member of the constructor's block) */
     Term **idx; int nidx;                  /* index terms of the recursive occurrence, under [params, prev args, y's] */
     int isrecpath; Term *px, *py;          /* recursive path argument: type is Path (D params) px py (endpoints under [params, prev args]) */
 } ConArg;
 typedef struct Con Con; typedef struct Data Data;
 struct Con {
     const char *name; int data, ci; Term *ty; int line;
+    int bord;                              /* ordinal among the constructors of the whole block (mutual declaration) */
     ConArg *args; int nargs; int nrec;
     Term **ridx;                           /* return index terms, under [params, args] */
     int nint;                              /* path constructor: number of interval binders after the arguments */
@@ -309,11 +317,14 @@ struct Data {
     int *cons; int ncons;
     int poly;
     int hit;                               /* has path constructors: hcomp is a normal form */
+    int block, nblock, bpos, bcons0;       /* the block (mutual declaration): its first member, member count, this member's position,
+                                              ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
 };
 
 Val *def_at(int id, LVal L); Val *def_ty_at(int id, LVal L);   /* a definition taken at a level (memoised for constants) */
 Data *data_at(int d, LVal L); Con *con_at(int ci, LVal L);   /* a data type / constructor taken at a level: its terms instantiated */
+int block_ncons(int d);                                      /* constructors of the whole block of d */
 int ref_poly(TKind k, int id);                               /* does the global take a level? */
 
 extern Def *defs; extern int ndefs;
