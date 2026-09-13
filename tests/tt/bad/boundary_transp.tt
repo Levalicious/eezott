@@ -1,0 +1,5 @@
+-- a boundary may not contain a transport, even along a constant line
+data W : U where
+  | w : W
+  | wl : (i : I) -> W [ ~ i -> w | i -> transp (\_ -> W) i0 w ]
+def main : Nat := one

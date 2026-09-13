@@ -1,0 +1,6 @@
+-- a recursive argument may not appear at a position whose type is not the data type (its image under the eliminator is an
+-- induction hypothesis); the only function out of W available here is W's own eliminator, refused while W is incomplete
+data W : U where
+  | c0 : Nat -> W
+  | c1 : (x : W) -> (i : I) -> W [ ~ i -> x | i -> c0 (elim W (\_ -> Nat) x) ]
+def main : Nat := one
