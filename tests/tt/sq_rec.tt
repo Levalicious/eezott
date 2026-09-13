@@ -1,0 +1,4 @@
+-- the recursion principle of a set quotient into a set (Nat is a set by Hedberg): a function on Nat / (a ~ b iff a+a = b+b)
+def Rel (a b : Nat) : U := Path Nat (add a a) (add b b)
+def double : SQ Nat Rel -> Nat := SQ_rec isSetNat (\a -> add a a) (\a b r -> r)
+def main : Nat := add (double (inc two)) (double (eq one one (\_ -> two) i1))

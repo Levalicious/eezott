@@ -57,7 +57,11 @@ void meta_postpone(int depth, Val *a, Val *b) {
     posts[nposts].depth = depth; posts[nposts].a = a; posts[nposts].b = b; nposts++;
 }
 
-/* is the spine a list of distinct variables? their de Bruijn levels in lv[], whether each is an interval variable in isi[] */
+/* the spine as a pattern: the de Bruijn levels of its variables in lv[] (distinct: a repeated variable is not a pattern), whether
+   each is an interval variable in isi[]. An entry that is not a variable (a let-bound variable's value, an interval variable the
+   context restricted to an endpoint, any other term) is an ignorable position: the solution may not use it, which is sound (it
+   is a solution) and incomplete only when the other side needs it, in which case a free variable is out of scope and the
+   constraint is postponed. */
 static int pattern_spine(Val *m, int *lv, int *isi) {
     for (int i = 0; i < m->args.n; i++) {
         Arg *a = &m->args.a[i];
@@ -65,9 +69,8 @@ static int pattern_spine(Val *m, int *lv, int *isi) {
         Val *x = force(a->v); int l, ii = 0;
         if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
         else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
-        else if (x->k == V_I && (iv_is_zero(x->iv) || iv_is_one(x->iv))) { l = -2 - i; ii = 1; }   /* an interval variable the context restricted to an endpoint: the solution ignores this position */
         else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
-        else return 0;
+        else { l = -2 - i; ii = x->k == V_I; }   /* not a variable: an ignorable position */
         for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
         lv[i] = l; isi[i] = ii;
     }
