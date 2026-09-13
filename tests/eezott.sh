@@ -118,6 +118,7 @@ checkN nf_hit_nested.tt
 checkN nf_torus_corner.tt
 checkN nf_vec_hcomp.tt
 checkN nf_route.tt
+checkN nf_glue_comp.tt
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
