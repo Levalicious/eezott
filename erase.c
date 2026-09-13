@@ -348,11 +348,9 @@ static void emit_glue_runtime(void) {
     fputs("tt_gphi := c -> c(m -> h -> a -> phi -> te -> phi)\n", out);
     fputs("tt_gte := c -> c(m -> h -> a -> phi -> te -> te)\n", out);
     fputs("tt_gcomp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(tt_ior(phi)(tt_ineg(phi)))(i -> tt_sel(phi)(tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0)))(tt_transp(line)(tt_i0)(u0))\n", out);
-    /* transport along a line of Glue types, as in the checker. At run time every interval value is an endpoint, so the
-       face "forall i. phi" cannot be read off phi's values (i \/ ~ i and i1 are the same boolean function): it is taken
-       to be i0, i.e. the glued types at the two ends are never assumed to form a line. That is the checker's generic
-       route (transport in the base, then the equivalence's contraction at i1); it agrees with every other route on
-       closed data, and is the only one that is always meaningful. */
+    /* transport along a line of Glue types, as in the checker, including the face "forall i. phi" on which the glued
+       types form a line along i: tt_forall evaluates the line's face at half, and a face is 1 in the free De Morgan
+       algebra exactly when it is 1 at half. */
     fputs("tt_transp_glue := a -> phi -> te -> line -> psi -> u0 -> "
           "(fa -> (ungl -> (tf -> (a1 -> (phi1 -> (te1 -> "
           "(fib -> tt_glue(phi1)(tt_fst(fib))(tt_hcomp(tt_gA(line(tt_i1)))(tt_ior(phi1)(psi))(j -> tt_sel(phi1)(tt_snd(fib)(tt_ineg(j)))(a1))(a1)))"
@@ -362,7 +360,7 @@ static void emit_glue_runtime(void) {
           "(tt_gcomp(i -> tt_gA(line(i)))(tt_ior(psi)(fa))(i -> tt_sel(psi)(ungl(i))(tt_sel(fa)(tt_fst(tt_snd(tt_gte(line(i))))(tf(i)))(tt_absurd)))(ungl(tt_i0))))"
           "(i -> tt_transp(j -> tt_fst(tt_gte(line(tt_iand(i)(j)))))(tt_ior(psi)(tt_ineg(i)))(u0)))"
           "(i -> tt_unglue(tt_gphi(line(i)))(tt_gte(line(i)))(u0)))"
-          "(tt_i0)\n", out);
+          "(tt_forall(i -> tt_gphi(line(i))))\n", out);
     fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> u0\n", out);   /* hcomp in Glue: its base (a representative) */
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(a)(phi)(te)\n", out);
 }

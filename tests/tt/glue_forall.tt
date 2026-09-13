@@ -1,0 +1,6 @@
+-- transport along a line of Glue types whose face holds everywhere along the line: the glued types form a line
+-- (forall i. phi = 1, computed at run time by evaluating the face at half), so transport goes through them
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def L (j : I) : I -> U := \i -> Glue Bool j [ j -> (Bool , notEquiv) ]
+def main : Bool := and (transp (L i1) i0 true) (transp (\i -> Glue Bool (i \/ ~ i) [ ~ i -> (Bool , notEquiv) | i -> (Bool , idEquiv Bool) ]) i0 true)

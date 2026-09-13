@@ -105,6 +105,7 @@ check level_fam.tt     nat 3
 check level_list.tt    nat 2
 check hit_hcomp_elim.tt nat 3
 check hcomp_vec_motive.tt nat 2
+check glue_forall.tt   bool false
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
