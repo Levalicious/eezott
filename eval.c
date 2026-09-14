@@ -786,7 +786,7 @@ static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 static Val *elim_reduce(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, nb = D->nblock, K = block_ncons(data);
-    Val *target = args->a[args->n - 1].v;
+    Val *target = force(args->a[args->n - 1].v);   /* a rigid definition application unfolds for the elimination */
     if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
     if (target->k != V_CON) return NULL;
     Con *c = con_at(target->n, target->lvl);
@@ -867,7 +867,7 @@ static Val *apply_to(Val *b, void *E) { return vapp((Val *)E, b, 0); }
 static Val *elim_hcomp(int data, VList *args) {
     Data *D = &datas[data];
     int np = D->nparams, nb = D->nblock, K = block_ncons(data), m = D->nidx;
-    Val *t = args->a[args->n - 1].v;
+    Val *t = force(args->a[args->n - 1].v);
     if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
     Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
     for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
@@ -917,9 +917,16 @@ Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
 }
 
 /* ---- application ---- */
+/* a rigid definition application to its value: the definition applied to its spine */
+Val *unfold_def(Val *v) {
+    Val *f = def_at(v->n, v->lvl);
+    for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
+    return f;
+}
+
 Val *vapp(Val *f, Val *a, int irr) {
     Arg ar = {0}; ar.v = a; ar.irr = irr;
-    f = force(f);
+    f = fmeta(f);   /* a definition application stays rigid here; force() unfolds it where a canonical form is needed */
     switch (f->k) {
     case V_LAM: return inst(&f->clo, a);
     case V_NEU:
@@ -1006,7 +1013,9 @@ Val *eval(Env *env, Term *t) {
     case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->clo.env = env; v->clo.t = t->a; return v; }
     case T_APP: return vapp(eval(env, t->a), eval(env, t->b), t->irr);
     case T_LET: return eval(env_push(env, eval(env, t->b)), t->c);
-    case T_DEF: return def_at(t->n, t->a ? eval_level(env, t->a) : lv_const(0));
+    case T_DEF: {   /* rigid: a definition application (H_DEF), unfolded where a canonical form is needed */
+        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v;
+    }
     case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_NUM: return vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num);
@@ -1128,6 +1137,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
         case H_OUTS: head = vouts(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
         case H_UNGLUE: head = vunglue(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
         case H_META: { Val *fv = force(v); if (fv != v) return subst_val(fv, lv, s); head = mkval(V_NEU); head->h = H_META; head->n = v->n; break; }
+        case H_DEF: head = mkval(V_NEU); head->h = H_DEF; head->n = v->n; head->lvl = v->lvl; break;
         default: die("internal: unknown neutral head");
         }
         for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } head = apply_arg(head, &a); }
@@ -1158,15 +1168,15 @@ static Val *vtfill(Val *line, Val *phi, Val *u0) { return vnative(N_TFILL, 0, 0,
 static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL, 0, 0, 0, 4, line, phi, u, u0); } /* λi. comp (λj. line (i∧j)) (φ ∨ ~i) [..] u0 */
 
 static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
-static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
+static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; v = force(v); if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
 static Val *native_apply(Native *nt, Val *arg) {
     switch (nt->code) {
     case N_IH: return ih_apply(nt, arg);
     case N_CONST: return CAP(nt, 0);
-    case N_LINE_DOM: { Val *pi = vapp(CAP(nt, 0), arg, 0); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: domain of a non-function line"); return pi->dom; }
+    case N_LINE_DOM: { Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: domain of a non-function line"); return pi->dom; }
     case N_LINE_COD_V: {    /* λi. B_i (v i), cap: line, vfn */
-        Val *pi = vapp(CAP(nt, 0), arg, 0); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: codomain of a non-function line");
+        Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: codomain of a non-function line");
         return inst(&pi->clo, vapp(CAP(nt, 1), arg, 0));
     }
     case N_TRANSP_V: {      /* v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1, cap: Aline, phi, u1 */
@@ -1178,20 +1188,20 @@ static Val *native_apply(Native *nt, Val *arg) {
         return vapp(CAP(nt, 0), nt->i1 ? ior(r, ineg(arg)) : ior(arg, r), 0);
     }
     case N_LINE_IAND: return vapp(CAP(nt, 0), iand(CAP(nt, 1), arg), 0);   /* λj. line (i ∧ j) */
-    case N_HCOMP_PI_SIDES: return vapp(vapp(CAP(nt, 0), arg, 0), CAP(nt, 1), nt->i1);   /* λi. (u i) x */
+    case N_HCOMP_PI_SIDES: return vapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 1), nt->i1);   /* λi. (u i) x */
     case N_PATH_HCOMP_SIDES: {   /* λi. [φ ↦ (u i) @ j, j ↦ y, ~j ↦ x], cap: u, phi, j, x, y */
         VBranch br[3];
-        br[0].phi = CAP(nt, 1); br[0].v = vpapp(vapp(CAP(nt, 0), arg, 0), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4));
+        br[0].phi = CAP(nt, 1); br[0].v = vpapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4));
         br[1].phi = CAP(nt, 2); br[1].v = CAP(nt, 4);
         br[2].phi = ineg(CAP(nt, 2)); br[2].v = CAP(nt, 3);
         return vsys(br, 3);
     }
     case N_LINE_PATH_AT: {       /* λi. (line i).line @ j  (the type of paths at i, applied to j), cap: line, j */
-        Val *pt = vapp(CAP(nt, 0), arg, 0); if (pt->k != V_PATHP) die("internal: path line expected");
+        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
         return vapp(pt->a, CAP(nt, 1), 0);
     }
     case N_PATH_TRANSP_SIDES: {  /* λi. [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i], cap: line, phi, p, j */
-        Val *pt = vapp(CAP(nt, 0), arg, 0); if (pt->k != V_PATHP) die("internal: path line expected");
+        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
         Val *p0 = vapp(CAP(nt, 0), izero(), 0);
         VBranch br[3];
         br[0].phi = CAP(nt, 1); br[0].v = vpapp(CAP(nt, 2), CAP(nt, 3), p0->b, p0->c);
@@ -1222,7 +1232,7 @@ static Val *native_apply(Native *nt, Val *arg) {
     }
     case N_TFILL: return vtransp(vnative(N_LINE_IAND, 0, 0, 0, 2, CAP(nt, 0), arg), ior(CAP(nt, 1), ineg(arg)), CAP(nt, 2));
     case N_DATA_ARG_LINE: {      /* λi. A_j evaluated at (params of line i, fills k<j at i); cap: line, fill_0..fill_{j-1}; i1=con, i2=j */
-        Val *Di = vapp(CAP(nt, 0), arg, 0); if (Di->k != V_DATA) die("internal: data line expected");
+        Val *Di = force(vapp(CAP(nt, 0), arg, 0)); if (Di->k != V_DATA) die("internal: data line expected");
         Con *C = con_at(nt->i1, Di->lvl); int np = datas[C->data].nparams;
         Env *e = NULL;
         for (int i = 0; i < np; i++) e = env_push(e, Di->args.a[i].v);
@@ -1295,7 +1305,7 @@ static Val *native_apply(Native *nt, Val *arg) {
     }
     case N_TRANSP_MAP: return vsys_map(vapp(CAP(nt, 2), arg, 0), transp_branch, nt);   /* λi. transp line phi (u i) over the partial element; cap: line, phi, u */
     case N_SYS_PROJ: {           /* λi. proj_k (u i) over the partial element; cap: u; i1 = k */
-        Val *ui = vapp(CAP(nt, 0), arg, 0);
+        Val *ui = force(vapp(CAP(nt, 0), arg, 0));
         int k = nt->i1;
         return vsys_map(ui, proj_arg, &k);
     }
@@ -1306,6 +1316,7 @@ static Val *native_apply(Native *nt, Val *arg) {
 
 /* all branches of the partial element u (at a fresh i) are constructor c? */
 static int sides_all_con(Val *u, int con) {
+    u = force(u);   /* a rigid definition application unfolds to the partial element */
     Val *ui = vapp(u, fresh_ivar(), 0);
     if (ui->k == V_NUM) ui = num_view(ui);
     if (ui->k == V_SYS) {
@@ -1447,7 +1458,7 @@ Val *transp_path_apply(void *data, Val *j) {
 }
 
 Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(vapp(u, ione(), 0), NULL); if (!t) die("internal: total system without a total branch"); return t; }
+    if (iv_is_one(phi->iv)) { Val *t = vsys_at(force(vapp(u, ione(), 0)), NULL); if (!t) die("internal: total system without a total branch"); return t; }
     A = force(A); u0 = force(u0);
     if (A->k == V_NEU && A->h == H_META) die("hcomp at a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
     switch (A->k) {
@@ -1726,6 +1737,7 @@ Term *quote(int depth, Val *v) {
         else if (v->h == H_OUTS) h = mk_term(T_OUTS, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
         else if (v->h == H_UNGLUE) h = mk_term(T_UNGLUE, quote(depth, v->dom), quote(depth, v->a), quote(depth, v->b), quote(depth, v->c));
         else if (v->h == H_META) { h = mk_term(T_META, NULL, NULL, NULL, NULL); h->n = v->n; }
+        else if (v->h == H_DEF) return quote(depth, unfold_def(v));   /* the normal form unfolds a rigid definition application */
         else h = mk_var(depth - 1 - v->n);
         for (int i = 0; i < v->args.n; i++) {
             Arg *a = &v->args.a[i];
@@ -1772,8 +1784,41 @@ int conv(int depth, Val *a, Val *b) {
     if (!r) { lstore_rollback(m); meta_rollback(mm); }
     return r;
 }
+static int conv1_b(int depth, Val *a, Val *b);
+static int conv_fail_logged;
+int conv_depth_now;
 static int conv1(int depth, Val *a, Val *b) {
-    a = force(a); b = force(b);
+    conv_depth_now++;
+    int r = conv1_b(depth, a, b);
+    conv_depth_now--;
+    if (!r && conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE")) {
+        conv_fail_logged++;
+        fprintf(stderr, "[conv] #%d depth %d call-depth %d: ", conv_fail_logged, depth, conv_depth_now);
+        const char *nm[2048] = {0};
+        term_print(stderr, quote(0, a), nm, 0); fputs("   !=   ", stderr);
+        term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr);
+        if ((a->k == V_I || b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
+    }
+    return r;
+}
+static int conv1_b(int depth, Val *a, Val *b) {
+    a = fmeta(a); b = fmeta(b);
+    /* definition applications stay rigid: the same definition compares by spine congruence, and the spine's arguments
+       at .() binders (irr bit 2) are skipped - proofs differing only there are equal by construction (compareIrrelevant
+       in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
+    for (;;) {
+        int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
+        if (ad && bd) {
+            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
+               Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
+            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_DEF, a->n, a->lvl, b->lvl)
+                && conv_spine(depth, &a->args, &b->args)) return 1;
+            a = fmeta(unfold_def(a)); b = fmeta(unfold_def(b)); continue;
+        }
+        if (ad) { a = fmeta(unfold_def(a)); continue; }
+        if (bd) { b = fmeta(unfold_def(b)); continue; }
+        break;
+    }
     /* a level variable is a level value in the context and a neutral variable under a binder opened by conversion */
     if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) return lv_enforce_eq(a->lvl, lv_var(b->n)) == 1;
     if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) return lv_enforce_eq(b->lvl, lv_var(a->n)) == 1;

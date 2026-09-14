@@ -1,0 +1,7 @@
+#import word
+#import nat
+-- an irrelevant hypothesis: usable to derive Empty and to feed other irrelevant binders; ignored by conversion
+def absurd01 .(e : Id Nat 0 1) : Nat := elim Empty (\_ -> Nat) (zeroNotOne e)
+def pass_on (x : Nat) .(h : Lt x 10) : Path Nat (mod x 10) x := mod_small 9 x h
+def same_proofs (x : Nat) .(h1 h2 : Lt x 10) : Path (Path Nat (mod x 10) x) (pass_on x h1) (pass_on x h2) := prefl (Path Nat (mod x 10) x) (pass_on x h1)
+def bound_of_word : (w : Word) -> Path Nat (mod (fst w) M64) (fst w) := \w -> mod_small M63 (fst w) (snd w)

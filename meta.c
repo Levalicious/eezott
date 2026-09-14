@@ -39,12 +39,18 @@ Term *meta_term(int id, int ctxn) {
     for (int i = ctxn - 1; i >= 0; i--) t = mk_app(t, mk_var(i), 0);
     return t;
 }
-Val *force(Val *v) {
+Val *fmeta(Val *v) {
     while (v->k == V_NEU && v->h == H_META && tmetas[v->n].sol) {
         Val *r = tmetas[v->n].sol;
         for (int i = 0; i < v->args.n; i++) r = vapply_arg(r, &v->args.a[i]);
         v = r;
     }
+    return v;
+}
+
+Val *force(Val *v) {
+    v = fmeta(v);
+    while (v->k == V_NEU && v->h == H_DEF) { v = fmeta(unfold_def(v)); }
     return v;
 }
 MMark meta_mark(void) { MMark m = { nundo, nposts }; return m; }

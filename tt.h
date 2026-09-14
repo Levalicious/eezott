@@ -225,7 +225,9 @@ typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* sp
 typedef struct { Arg *a; int n, cap; } VList;
 typedef struct Clo Clo;
 struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
-typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META } HKind;
+typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META, H_DEF } HKind;
+/* H_DEF: a definition application kept rigid in conversion (the H_DEF plan): unfolded only by force/quote and where
+   a canonical form is needed; conv compares the same definition's spine, skipping the arguments of .() binders */
 typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
@@ -289,7 +291,9 @@ typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char *
 extern Meta *tmetas; extern int ntmetas;
 int meta_new(Val *ty, int ctxn, const char **names, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
-Val *force(Val *v);                          /* a solved meta applied to its spine is its solution applied; else v */
+Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
+Val *fmeta(Val *v);                          /* metas only: definition applications stay rigid (what conversion compares) */
+Val *unfold_def(Val *v);                     /* a rigid definition application to its value: the definition applied to the spine */
 typedef struct { int u, p; } MMark;
 MMark meta_mark(void); void meta_rollback(MMark m);
 int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */

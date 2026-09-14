@@ -96,6 +96,7 @@ static void expect_conv(Ctx *c, int line, Val *got, Val *want, const char *what)
 }
 
 int is_type_like(int depth, Val *ty) {
+    ty = force(ty);
     switch (ty->k) {
     case V_U: case V_LEVEL: return 1;
     case V_PI: return is_type_like(depth + 1, inst(&ty->clo, ty->isi ? vivar(depth) : vvar(depth)));
@@ -115,6 +116,7 @@ static Term *check1(Ctx *c, STerm *s, Val *ty);
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
 /* a type whose sort is not known yet (a meta, e.g. an implicit parameter still to be inferred) is in a universe at a fresh level */
 static Val *refine_to_universe(Ctx *c, Val *ty) {
+    ty = force(ty);
     ty = force(ty);
     if (ty->k == V_NEU && ty->h == H_META) { int l = lv_meta_new(); if (conv(c->n, ty, vu_l(lv_meta(l)))) ty = force(ty); }
     return ty;
@@ -490,6 +492,7 @@ static void resolve_deferred(Ctx *c, int all) {
    domain and the codomain, at fresh levels; the application determines the shape, later constraints the rest */
 static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
     ty = force(ty);
+    ty = force(ty);
     if (!(ty->k == V_NEU && ty->h == H_META)) return ty;
     /* in the meta's own context (a prefix of the current one): its solution may only use the meta's variables */
     int k = tmetas[ty->n].ctxn;
@@ -505,6 +508,7 @@ static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
     return force(ty);
 }
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
+    hty = force(hty);
     for (int i = 0; i < nargs; i++) {
         hty = force(hty);
         while (hty->k == V_PI && hty->imp && !args[i]->imp) {   /* an implicit argument not written: a meta */
@@ -667,7 +671,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_HCOMP: {
         need_args(h, n, 4, "hcomp");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         /* u : (i : I) -> Partial phi A */
         Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
@@ -680,7 +684,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             Val *side = vsys_at(vapp(uv, vi(iv_zero()), 0), &fs[i]);
             if (!side) die("line %d: hcomp: the sides do not cover their face", args[2]->line);
             if (!conv(c->n, side, restrict_val(u0v, &fs[i])))
-                die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s", args[3]->line, show(c, pv));
+                die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s\n  side = %s\n  base = %s", args[3]->line, show(c, pv), show(c, side), show(c, restrict_val(u0v, &fs[i])));
         }
         Term *t = mk_term(T_HCOMP, A, phi, u, u0); t->n = (Av->k == V_U);
         return app_spine(c, args + 4, n - 4, t, Av, ty);
@@ -718,7 +722,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_SUB: {   /* Sub A phi u : U,  u : Partial phi A */
         need_args(h, n, 3, "Sub");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = Av;
         Term *u = check(c, args[2], pty);
@@ -726,7 +730,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_SIGMA: {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
         need_args(h, n, 2, "Sigma");
-        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = eval(c->env, A);
+        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = force(eval(c->env, A));
         Term *B;
         if (args[1]->k == S_LAM) {
             ctx_bind(c, args[1]->binders[0].name, Av);
@@ -747,7 +751,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_FST: case S_SND: {
         need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
-        Val *pty; Term *p = infer(c, args[0], &pty);
+        Val *pty; Term *p = infer(c, args[0], &pty); pty = force(pty);
         if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", args[0]->line, show(c, pty));
         if (h->k == S_SND && pty->irr && !c->irrpos)
             die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
@@ -758,7 +762,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
         need_args(h, n, 3, "Glue");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
         Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu_l(lvl);
@@ -772,7 +776,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
     case S_UNGLUE: {
         need_args(h, n, 1, "unglue");
-        Val *bty; Term *b = infer(c, args[0], &bty);
+        Val *bty; Term *b = infer(c, args[0], &bty); bty = force(bty);
         if (bty->k != V_GLUE) die("line %d: unglue applied to a term of type %s, expected a Glue type", args[0]->line, show(c, bty));
         Term *t = mk_term(T_UNGLUE, b, quote(c->n, bty->a), quote(c->n, bty->b), quote(c->n, bty->c));
         return app_spine(c, args + 1, n - 1, t, bty->a, ty);
@@ -780,7 +784,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     case S_INS: die("line %d: inS must be checked against a Sub type", h->line);
     case S_OUTS: {  /* outS s : A  for s : Sub A phi u */
         need_args(h, n, 1, "outS");
-        Val *sty; Term *s = infer(c, args[0], &sty);
+        Val *sty; Term *s = infer(c, args[0], &sty); sty = force(sty);
         if (sty->k != V_SUB) die("line %d: outS applied to a term of type %s, expected a Sub type", args[0]->line, show(c, sty));
         Term *t = mk_term(T_OUTS, quote(c->n, sty->a), quote(c->n, sty->b), quote(c->n, sty->c), s);
         return app_spine(c, args + 1, n - 1, t, sty->a, ty);
