@@ -302,7 +302,8 @@ int term_mentions_meta(Term *t, int id);
 
 typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly;
                  int native; Val *vfallback;          /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
-                 int isword, wordop; } Def;           /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
+                 int isword, wordop;                  /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
+                 int seq; } Def;                      /* declaration order across files (erasure emits in it) */
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
@@ -338,7 +339,9 @@ struct Data {
     int block, nblock, bpos, bcons0;       /* the block (mutual declaration): its first member, member count, this member's position,
                                               ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
+    int seq;                               /* declaration order across files */
 };
+extern int decl_seq;                       /* the next declaration's sequence number */
 
 Val *def_at(int id, LVal L); Val *def_ty_at(int id, LVal L);   /* a definition taken at a level (memoised for constants) */
 Data *data_at(int d, LVal L); Con *con_at(int ci, LVal L);   /* a data type / constructor taken at a level: its terms instantiated */

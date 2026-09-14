@@ -10,6 +10,8 @@
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
+LIB="${SCRIPT_DIR}/../stdlib/tt"
+tt() { "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }   # the prelude loaded as an import; the library on the import path
 EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
 EEZO="${SCRIPT_DIR}/../eezo/eezo"
 TT="${SCRIPT_DIR}/tt"
@@ -31,8 +33,7 @@ oracle() {      # kind value -> expected bitstring
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
-    local src; src=$(cat "$TT/prelude.tt" "$TT/$1")
-    local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" $3 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
+    local erased; erased=$(tt $3 "$TT/$1" 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
     local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" -f xbcl 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
     echo "$bcl" | "$EEZO" -f xbcl $2 2>&1
 }
@@ -42,7 +43,7 @@ checkN() {      # file: a program whose main is a higher inductive value; its ru
     if [ "$a" = "$b" ] && [ "${a#TYPECHECK_ERROR}" = "$a" ] && [ "${a#EEZOC_ERROR}" = "$a" ]; then pass "$1 = its normal form (eezott -N)"; else fail "$1 = its normal form (eezott -N)" "$b" "$a"; fi
 }
 checkNF() {     # file name value: the checker's normal form of the definition (eezott -n), printed as a decimal literal (M15)
-    local got; got=$(cat "$TT/prelude.tt" "$TT/$1" | "$EEZOTT" -c -n "$2" 2>&1 >/dev/null | grep "^$2 = ")
+    local got; got=$(tt -c -n "$2" "$TT/$1" 2>&1 >/dev/null | grep "^$2 = ")
     if [ "$got" = "$2 = $3" ]; then pass "$1: $2 = $3 (eezott -n)"; else fail "$1: $2 = $3 (eezott -n)" "$2 = $3" "$got"; fi
 }
 check() {       # file kind value
@@ -168,7 +169,7 @@ checkNF word_ops.tt      w5 5
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
-    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+    if tt -c "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
 done
 
 # self-contained programs that must be rejected (no prelude: they use the prelude's names in ways the prelude forbids)
@@ -180,14 +181,14 @@ done
 for f in "$TT"/check/*.tt; do
     [ -e "$f" ] || continue
     name=check/$(basename "$f")
-    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then pass "$name typechecks"; else fail "$name typechecks" "acceptance" "$(cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c 2>&1 | head -1)"; fi
+    if tt -c "$f" >/dev/null 2>&1; then pass "$name typechecks"; else fail "$name typechecks" "acceptance" "$(tt -c "$f" 2>&1 | head -1)"; fi
 done
 
 for f in "$TT"/unerasable/*.tt; do
     [ -e "$f" ] || continue
     name=unerasable/$(basename "$f")
-    if ! cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
-    elif cat "$TT/prelude.tt" "$f" | "$EEZOTT" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
+    if ! tt -c "$f" >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
+    elif tt "$f" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
     else pass "$name typechecks but is refused at erasure"; fi
 done
 

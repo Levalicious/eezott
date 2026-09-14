@@ -24,6 +24,7 @@ typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; i
    of a pair): the irrelevant component of a pair may be projected only there (M16a; Abel's rule - a type's relevant argument
    positions are not irrelevant positions) */
 int word_type = -1, word_nat = -1;
+int decl_seq;
 static const char *wordop_names[] = { "wadd", "wsub", "wmul", "wand", "wor", "wxor", "wshl", "wshr", "weq", "wlt", "waddc", "wsubb", "wmull", "wdivmod" };
 int wordop_code(const char *name) { for (int i = 0; i < 14; i++) if (!strcmp(name, wordop_names[i])) return i + 1; return 0; }
 const char *wordop_name(int code) { return wordop_names[code - 1]; }
@@ -1326,7 +1327,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
     datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die("out of memory");
     for (int i = 0; i < n; i++) {
         SDecl *s = ms[i];
-        Data D = {0}; D.name = s->name; D.line = s->line; D.nparams = nparams; D.ptys = ptys;
+        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.nparams = nparams; D.ptys = ptys;
         LVal l; Term *ity = check_type(&c, s->ty, &l);
         Term *w = ity; int m = 0;
         for (Term *x = ity; x->k == T_PI; x = x->b) m++;
@@ -1509,7 +1510,7 @@ static void elab_def(SDecl *s) {
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
-    Def D = {0}; D.name = s->name; D.line = s->line;
+    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++;
     D.poly = term_mentions_hidden(ty) || term_mentions_hidden(val);
     if (!D.poly) { ty = subst_hidden(ty, lv_const(0)); val = subst_hidden(val, lv_const(0)); }
     D.ty = ty; D.val = val;

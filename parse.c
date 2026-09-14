@@ -44,6 +44,7 @@ static void addtok(TokKind k, const char *s, int n, int line) {
 static int isident(int c) { return isalnum(c) || c == '_' || c == '\''; }
 
 static void lex(const char *src) {
+    ntoks = 0;   /* each file is lexed on its own (imports, M16b) */
     int line = 1; const char *p = src;
     while (*p) {
         if (*p == '\n') { line++; p++; continue; }

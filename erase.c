@@ -556,7 +556,7 @@ void erase_program(FILE *f) {
     /* declaration order: data types and definitions interleaved by line number */
     int di = 0, fi = 0;
     while (di < ndatas || fi < ndefs) {
-        int take_data = fi >= ndefs || (di < ndatas && datas[di].line < defs[fi].line);
+        int take_data = fi >= ndefs || (di < ndatas && datas[di].seq < defs[fi].seq);
         if (take_data) {
             Data *D = &datas[di];
             if (D->nblock > 1) {   /* a mutual block, emitted as a whole at its first member */
