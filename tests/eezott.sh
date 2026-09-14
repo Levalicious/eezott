@@ -167,6 +167,8 @@ checkN  word_divmod.tt
 checkN  word_wrap.tt
 check   word_ring.tt   word 0
 checkN  word_ring.tt
+check   bignat_fold.tt  nat 123
+checkN  bignat_fold.tt
 checkNF word_ops.tt      w5 5
 
 for f in "$TT"/bad/*.tt; do

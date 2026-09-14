@@ -1,0 +1,7 @@
+#import bignat
+-- the BigNat folds at closed instances: the kernel's bignum computes both sides, refl checks them
+def t1 : Path Nat (bval (badd (lcons 5 (lnil {Nat})) (lcons 7 (lnil {Nat})))) 12 := prefl Nat 12
+def t2 : Path Nat (bval (badd (lcons 18446744073709551615 (lnil {Nat})) (lcons 1 (lnil {Nat})))) 18446744073709551616 := prefl Nat 18446744073709551616
+def t3 : Path Nat (bval (badd (lcons 1 (lcons 2 (lnil {Nat}))) (lcons 3 (lnil {Nat})))) 18446744073709551621 := prefl Nat 18446744073709551621
+def t4 : Path Nat (bval (badd (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Nat}))) (lcons 1 (lnil {Nat})))) 340282366920938463463374607431768211456 := prefl Nat 340282366920938463463374607431768211456
+def main : Nat := bval (badd (lcons 100 (lnil {Nat})) (lcons 23 (lnil {Nat})))
