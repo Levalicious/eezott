@@ -109,14 +109,14 @@ int main(int argc, char **argv) {
     if (show) {
         int found = 0;
         for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, show)) {
-            const char *names[1024]; fprintf(stderr, "%s : ", show); term_print(stderr, quote(0, defs[i].vty), names, 0); fputc('\n', stderr); found = 1;
+            const char *names[1024]; fprintf(stderr, "%s : ", show); term_print(stderr, quote(0, force(defs[i].vty)), names, 0); fputc('\n', stderr); found = 1;
         }
         if (!found) die("-t: no definition named '%s'", show);
     }
     if (nf) {
         int found = 0;
         for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, nf)) {
-            const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, defs[i].vval), names, 0); fputc('\n', stderr); found = 1;
+            const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, force(defs[i].vval)), names, 0); fputc('\n', stderr); found = 1;
         }
         if (!found) die("-n: no definition named '%s'", nf);
     }

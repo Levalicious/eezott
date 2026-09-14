@@ -787,7 +787,18 @@ static Val *elim_reduce(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, nb = D->nblock, K = block_ncons(data);
     Val *target = force(args->a[args->n - 1].v);   /* a rigid definition application unfolds for the elimination */
-    if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
+    if (target->k == V_NUM) {
+        /* an elimination on a literal whose method uses its induction hypothesis is work proportional to the
+           literal - 1e19 steps for the machine-word bounds. Name it rather than overflow the C stack. */
+        static int elim_num_depth;
+        int bits = bn_bitlen(target->num);
+        if (getenv("EEZOTT_ELIM_TRACE") && bits > 40)
+            fprintf(stderr, "[elim] %s on a literal of ~2^%d (depth %d)\n", datas[data].name, bits, elim_num_depth);
+        if (bits > 40 && elim_num_depth > 64)
+            die_resource("elimination of %s recursed %d deep on a literal of ~2^%d bits: the induction hypothesis is used, so this is work proportional to the literal", datas[data].name, elim_num_depth, bits);
+        elim_num_depth++;
+        target = num_view(target);   /* a literal eliminates as one constructor */
+    }
     if (target->k != V_CON) return NULL;
     Con *c = con_at(target->n, target->lvl);
     if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
@@ -1694,7 +1705,7 @@ static Term *quote_iv(int depth, IVal a) {
     return r;
 }
 Term *quote(int depth, Val *v) {
-    v = force(v);
+    v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
     case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); Term *t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
     case V_L: return quote_level(depth, v->lvl);
@@ -1737,7 +1748,7 @@ Term *quote(int depth, Val *v) {
         else if (v->h == H_OUTS) h = mk_term(T_OUTS, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
         else if (v->h == H_UNGLUE) h = mk_term(T_UNGLUE, quote(depth, v->dom), quote(depth, v->a), quote(depth, v->b), quote(depth, v->c));
         else if (v->h == H_META) { h = mk_term(T_META, NULL, NULL, NULL, NULL); h->n = v->n; }
-        else if (v->h == H_DEF) return quote(depth, unfold_def(v));   /* the normal form unfolds a rigid definition application */
+        else if (v->h == H_DEF) h = mk_ref_l(T_DEF, v->n, quote_level(depth, v->lvl));
         else h = mk_var(depth - 1 - v->n);
         for (int i = 0; i < v->args.n; i++) {
             Arg *a = &v->args.a[i];
@@ -1879,7 +1890,7 @@ static int conv1_b(int depth, Val *a, Val *b) {
         if (a->h == H_TRANSP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c))) return 0; }
         else if (a->h == H_HCOMP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c) && conv(depth, a->dom, b->dom))) return 0; }
         else if (a->h == H_OUTS || a->h == H_UNGLUE) { if (!conv(depth, a->dom, b->dom)) return 0; }
-        else if (a->n != b->n || !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) return 0;
+        else if (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl))) return 0;   /* a variable's n is its level, not a global id */
         return conv_spine(depth, &a->args, &b->args);
     case V_DATA: case V_CON: return a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl) && conv_spine(depth, &a->args, &b->args);
     default: return 0;

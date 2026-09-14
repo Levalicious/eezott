@@ -19,7 +19,10 @@
  */
 #include "tt.h"
 
-typedef struct { const char **names; Val **tys; int *irrs; int n, cap; Env *env; int abs; int irrpos; } Ctx;   /* irrs[i]: variable i is irrelevant */
+typedef struct { const char **names; Val **tys; int *irrs; int n, cap; Env *env; int abs; int irrpos, irrlen; } Ctx;
+/* irrs[i]: variable i is irrelevant; irrpos > 0: irrelevant things may be used here (a type, an irrelevant argument or
+   component); irrlen > 0: a conversion failure is not an error (the component is never inspected - Agda's convError
+   suppression) - only the genuinely irrelevant term positions, never a type being checked */
 /* irrpos > 0: the term being checked is in an irrelevant position (the argument of an irrelevant binder, the irrelevant component
    of a pair): the irrelevant component of a pair may be projected only there (M16a; Abel's rule - a type's relevant argument
    positions are not irrelevant positions) */
@@ -56,7 +59,7 @@ static Term *fresh_meta(Ctx *c, Val *ty, int line) {
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
 static Ctx ctx_restrict(Ctx *c, const Face *f) {
-    Ctx r = {0}; r.n = c->n; r.cap = c->n; r.irrs = c->irrs; r.irrpos = c->irrpos;   /* irrelevance is the same under a face */
+    Ctx r = {0}; r.n = c->n; r.cap = c->n; r.irrs = c->irrs; r.irrpos = c->irrpos; r.irrlen = c->irrlen;   /* irrelevance is the same under a face */
     r.names = xalloc((c->n + 1) * sizeof(char *)); r.tys = xalloc((c->n + 1) * sizeof(Val *));
     Val **vs = xalloc((c->n + 1) * sizeof(Val *));
     for (int i = 0; i < c->n; i++) { r.names[i] = c->names[i]; r.tys[i] = restrict_val(c->tys[i], f); vs[c->n - 1 - i] = env_get(c->env, i); }
@@ -84,7 +87,7 @@ static int term_binders(Term *t) {
     return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET || t->k == T_SIGMA);   /* a Sigma binds its codomain's variable too */
 }
 static const char *show(Ctx *c, Val *v) {
-    Term *t = quote(c->n, v);
+    Term *t = quote(c->n, force(v));   /* messages show the canonical value: force unfolds rigid definition applications */
     const char **names = xalloc((c->n + term_binders(t) + 1) * sizeof(char *));
     if (c->n) memcpy(names, c->names, c->n * sizeof(char *));
     char *buf = NULL; size_t sz = 0; FILE *f = open_memstream(&buf, &sz);
@@ -92,7 +95,9 @@ static const char *show(Ctx *c, Val *v) {
     char *s = xstrdup(buf); free(buf); return s;
 }
 static void expect_conv(Ctx *c, int line, Val *got, Val *want, const char *what) {
-    if (!conv(c->n, got, want)) die("line %d: %s has type %s, expected %s", line, what, show(c, got), show(c, want));
+    /* in an irrelevant position a conversion failure is not an error: the component is never used (Agda's
+       convError suppression; the discipline the Word design's .() proofs rely on) */
+    if (!conv(c->n, got, want) && !c->irrlen) die("line %d: %s has type %s, expected %s", line, what, show(c, got), show(c, want));
 }
 
 int is_type_like(int depth, Val *ty) {
@@ -533,9 +538,9 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             continue;
         }
         if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
-        if (hty->irr & 2) c->irrpos++;   /* the argument of an irrelevant binder */
+        if (hty->irr & 2) { c->irrpos++; c->irrlen++; }   /* the argument of an irrelevant binder */
         Term *a = check(c, args[i], hty->dom);
-        if (hty->irr & 2) c->irrpos--;
+        if (hty->irr & 2) { c->irrpos--; c->irrlen--; }
         head = mk_app(head, a, hty->irr);
         hty = inst(&hty->clo, eval(c->env, a));
     }
@@ -1024,7 +1029,7 @@ bad:
 static Term *check(Ctx *c, STerm *s, Val *ty) {
     ty = force(ty);
     if (ty->k == V_DATA && datas[ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
-        c->irrpos++; Term *t = check1(c, s, ty); c->irrpos--; return t;
+        c->irrpos++; c->irrlen++; Term *t = check1(c, s, ty); c->irrpos--; c->irrlen--; return t;
     }
     return check1(c, s, ty);
 }
@@ -1105,9 +1110,9 @@ static Term *check1(Ctx *c, STerm *s, Val *ty) {
     if (s->k == S_PAIR) {
         if (ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", s->line, show(c, ty));
         Term *a = check(c, s->a, ty->dom);
-        if (ty->irr) c->irrpos++;
+        if (ty->irr) { c->irrpos++; c->irrlen++; }
         Term *b = check(c, s->b, inst(&ty->clo, eval(c->env, a)));
-        if (ty->irr) c->irrpos--;
+        if (ty->irr) { c->irrpos--; c->irrlen--; }
         Term *t = mk_term(T_PAIR, a, b, NULL, NULL); t->irr = ty->irr;
         if (is_word_type(c, ty)) t->n = 1;
         return t;
@@ -1122,18 +1127,18 @@ static Term *check1(Ctx *c, STerm *s, Val *ty) {
         /* a universe against a type not known yet: subtyping holds between sorts only, so the type is a universe of the same
            sort at a level to be determined; the level is a fresh level meta, bounded below by got's (the level store decides it) */
         Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
-        if (!conv(c->n, ty, U)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
-        if (lv_enforce_leq(got->lvl, U->lvl) != 1) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
+        if (!conv(c->n, ty, U) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+        if (lv_enforce_leq(got->lvl, U->lvl) != 1 && !c->irrlen) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
         resolve_deferred(c, 0); return t;
     }
     if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
         int r = lv_enforce_leq(got->lvl, ty->lvl);
-        if (r == 1) { resolve_deferred(c, 0); return t; }
+        if (r == 1 || c->irrlen) { resolve_deferred(c, 0); return t; }
         if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
         die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
     }
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
-    if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+    if (!conv(c->n, got, ty) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
     resolve_deferred(c, 0);
     return t;
 }
