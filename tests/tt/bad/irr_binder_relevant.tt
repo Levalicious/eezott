@@ -1,0 +1,2 @@
+#import nat
+def leak (x : Nat) .(h : Lt x 10) : Lt x 10 := h

@@ -107,19 +107,24 @@ static STerm *parse_term(void);
 static STerm *parse_ior(void);
 
 static int binder_ahead(void) {
-    if (peek()->k != TK_LP && peek()->k != TK_LBRACE) return 0;
-    int i = 1;
+    int i = 0;
+    if (peek()->k == TK_DOT) i = 1;   /* .(x : A): an irrelevant binder */
+    if (peekat(i)->k != TK_LP && peekat(i)->k != TK_LBRACE) return 0;
+    i++;
     if (peekat(i)->k != TK_NAME) return 0;
     while (peekat(i)->k == TK_NAME) i++;
     return peekat(i)->k == TK_COLON;
 }
 static void parse_binder_group(SBinder **out, int *n, int *cap) {
+    int irrel = 0;
+    if (peek()->k == TK_DOT) { next(); irrel = 1; }   /* .(x : A): irrelevant (M16b) */
     Tok *o = next(); int imp = o->k == TK_LBRACE;   /* {x : A}: implicit */
+    if (irrel && imp) die("%s:%d: a binder cannot be both irrelevant and implicit", file, o->line);
     int start = *n;
     while (peek()->k == TK_NAME) {
         Tok *t = next();
         if (*n == *cap) { *cap = *cap ? 2 * *cap : 4; *out = realloc(*out, *cap * sizeof(SBinder)); if (!*out) die("out of memory"); }
-        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*n)++;
+        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*out)[*n].irrel = irrel; (*n)++;
     }
     expect(TK_COLON);
     STerm *ty = parse_term();

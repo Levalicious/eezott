@@ -19,7 +19,7 @@
  */
 #include "tt.h"
 
-typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; int irrpos; } Ctx;
+typedef struct { const char **names; Val **tys; int *irrs; int n, cap; Env *env; int abs; int irrpos; } Ctx;   /* irrs[i]: variable i is irrelevant */
 /* irrpos > 0: the term being checked is in an irrelevant position (the argument of an irrelevant binder, the irrelevant component
    of a pair): the irrelevant component of a pair may be projected only there (M16a; Abel's rule - a type's relevant argument
    positions are not irrelevant positions) */
@@ -35,15 +35,17 @@ const char *wordop_name(int code) { return wordop_names[code - 1]; }
 static void ctx_push(Ctx *c, const char *name, Val *ty, Val *val) {
     if (c->n == c->cap) {
         int cap = c->cap ? 2 * c->cap : 16;
-        const char **nn = xalloc(cap * sizeof(char *)); Val **nt = xalloc(cap * sizeof(Val *));
-        if (c->n) { memcpy(nn, c->names, c->n * sizeof(char *)); memcpy(nt, c->tys, c->n * sizeof(Val *)); }
-        c->names = nn; c->tys = nt; c->cap = cap;
+        const char **nn = xalloc(cap * sizeof(char *)); Val **nt = xalloc(cap * sizeof(Val *)); int *ni = xalloc(cap * sizeof(int));
+        if (c->n) { memcpy(nn, c->names, c->n * sizeof(char *)); memcpy(nt, c->tys, c->n * sizeof(Val *)); memcpy(ni, c->irrs, c->n * sizeof(int)); }
+        c->names = nn; c->tys = nt; c->irrs = ni; c->cap = cap;
     }
-    c->names[c->n] = name; c->tys[c->n] = ty; c->n++;
+    c->names[c->n] = name; c->tys[c->n] = ty; c->irrs[c->n] = 0; c->n++;
     c->env = env_push(c->env, val);
 }
 static void ctx_pop(Ctx *c) { c->n--; c->env = c->env->next; }
 static void ctx_bind(Ctx *c, const char *name, Val *ty) { ctx_push(c, name, ty, ty->k == V_LEVEL ? vlvar(c->n) : vvar(c->n)); }
+/* an irrelevant variable (the binder .(x : A)): usable only in irrelevant positions */
+static void ctx_bind_irr(Ctx *c, const char *name, Val *ty, int irr) { ctx_bind(c, name, ty); if (irr & 2) c->irrs[c->n - 1] = 1; }
 static void ctx_bind_i(Ctx *c, const char *name) { ctx_push(c, name, mkval(V_INTERVAL), vivar(c->n)); }
 /* a fresh meta of a type, applied to the context: a level meta when the type is Level (solved by the level store) */
 static Term *fresh_meta(Ctx *c, Val *ty, int line) {
@@ -54,7 +56,7 @@ static Term *fresh_meta(Ctx *c, Val *ty, int line) {
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
 static Ctx ctx_restrict(Ctx *c, const Face *f) {
-    Ctx r = {0}; r.n = c->n; r.cap = c->n;
+    Ctx r = {0}; r.n = c->n; r.cap = c->n; r.irrs = c->irrs; r.irrpos = c->irrpos;   /* irrelevance is the same under a face */
     r.names = xalloc((c->n + 1) * sizeof(char *)); r.tys = xalloc((c->n + 1) * sizeof(Val *));
     Val **vs = xalloc((c->n + 1) * sizeof(Val *));
     for (int i = 0; i < c->n; i++) { r.names[i] = c->names[i]; r.tys[i] = restrict_val(c->tys[i], f); vs[c->n - 1 - i] = env_get(c->env, i); }
@@ -108,6 +110,7 @@ int is_type_like(int depth, Val *ty) {
 
 static Term *infer(Ctx *c, STerm *s, Val **ty);
 static Term *check(Ctx *c, STerm *s, Val *ty);
+static Term *check1(Ctx *c, STerm *s, Val *ty);
 
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
 /* a type whose sort is not known yet (a meta, e.g. an implicit parameter still to be inferred) is in a universe at a fresh level */
@@ -117,7 +120,7 @@ static Val *refine_to_universe(Ctx *c, Val *ty) {
     return ty;
 }
 static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) {
-    Val *ty; Term *t = infer(c, s, &ty); ty = refine_to_universe(c, ty);
+    Val *ty; c->irrpos++; Term *t = infer(c, s, &ty); c->irrpos--; ty = refine_to_universe(c, ty);   /* a type is an irrelevant position */
     if (ty->k != V_U) die("line %d: expected a type, but %s : %s", s->line, "the term", show(c, ty));
     *lvl = ty->lvl; *pre = ty->pre; return t;
 }
@@ -469,6 +472,7 @@ typedef struct { STerm *term; Val *dom; int meta; } Deferred;
 static Deferred *dnums; static int ndnums;
 static int deferrable(STerm *s) { return s->k == S_NUM || s->k == S_LAM || s->k == S_PAIR || s->k == S_SYS; }
 static Term *check(Ctx *c, STerm *s, Val *ty);
+static Term *check1(Ctx *c, STerm *s, Val *ty);
 static void resolve_deferred(Ctx *c, int all) {
     for (;;) {
         int found = -1;
@@ -525,9 +529,9 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             continue;
         }
         if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
-        if (hty->irr) c->irrpos++;
+        if (hty->irr & 2) c->irrpos++;   /* the argument of an irrelevant binder */
         Term *a = check(c, args[i], hty->dom);
-        if (hty->irr) c->irrpos--;
+        if (hty->irr & 2) c->irrpos--;
         head = mk_app(head, a, hty->irr);
         hty = inst(&hty->clo, eval(c->env, a));
     }
@@ -842,7 +846,10 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     switch (s->k) {
     case S_VAR: {
         for (int i = c->n - 1; i >= 0; i--)
-            if (!strcmp(c->names[i], s->name)) { *ty = c->tys[i]; return mk_var(c->n - 1 - i); }
+            if (!strcmp(c->names[i], s->name)) {
+                if (c->irrs[i] && !c->irrpos) die("line %d: '%s' is irrelevant (bound by .(%s : ..)); it may be used only in an irrelevant position (an irrelevant argument or component, a type, a proof of Empty)", s->line, s->name, s->name);
+                *ty = c->tys[i]; return mk_var(c->n - 1 - i);
+            }
         int id;
         if ((id = find_con(s->name)) >= 0) { LVal L; Term *lt = global_level(T_CON, id, &L); *ty = eval(NULL, con_at(id, L)->ty); return mk_ref_l(T_CON, id, lt); }
         if ((id = find_def(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DEF, id, &L); *ty = def_ty_at(id, L); return mk_ref_l(T_DEF, id, lt); }
@@ -885,7 +892,8 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         LVal la, lb; int pa, pb; Term *dom = check_type_sort(c, b->ty, &la, &pa);
         Val *dv = eval(c->env, dom);
         int irr = dom->k == T_LEVEL;   /* types are run-time codes, so every binder is relevant; levels are not */
-        ctx_bind(c, b->name, dv);
+        if (b->irrel) irr = 2;         /* .(x : A): proof-irrelevant - erased, not compared, usable only in irrelevant positions */
+        ctx_bind_irr(c, b->name, dv, irr);
         Term *cod = check_type_sort(c, s->a, &lb, &pb);
         ctx_pop(c);
         LVal l = lv_max(la, lb);
@@ -1011,6 +1019,12 @@ bad:
 }
 static Term *check(Ctx *c, STerm *s, Val *ty) {
     ty = force(ty);
+    if (ty->k == V_DATA && datas[ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
+        c->irrpos++; Term *t = check1(c, s, ty); c->irrpos--; return t;
+    }
+    return check1(c, s, ty);
+}
+static Term *check1(Ctx *c, STerm *s, Val *ty) {
     if (ty->k == V_PI && ty->imp && !(s->k == S_LAM && s->binders[0].imp)) {   /* an implicit function type: abstract over the argument */
         const char *nm = xsprintf("{%s}", ty->name ? ty->name : "_");   /* not a name the program can write: no capture */
         ctx_bind(c, nm, ty->dom);
@@ -1041,7 +1055,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
             ctx_pop(c);
             Term *t = mk_lam(b->name, body, 0); t->isi = 1; return t;
         }
-        ctx_bind(c, b->name, ty->dom);
+        ctx_bind_irr(c, b->name, ty->dom, ty->irr);
         Term *body = check(c, s->a, inst(&ty->clo, vvar(c->n - 1)));
         ctx_pop(c);
         Term *t = mk_lam(b->name, body, ty->irr); t->imp = b->imp; return t;
@@ -1505,7 +1519,10 @@ static void elab_def(SDecl *s) {
     int m0 = lstore_nmetas(); LMark mark = lstore_mark(); int mm0 = ntmetas;
     LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);
+    int typelike = is_type_like(0, vty);
+    if (typelike) c.irrpos++;   /* the body of a type-like definition is a type */
     Term *val = check(&c, s->val, vty);
+    if (typelike) c.irrpos--;
     resolve_deferred(&c, 0); metas_finish(s->name, s->line, mm0); resolve_deferred(&c, 1);
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);

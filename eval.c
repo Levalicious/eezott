@@ -353,7 +353,7 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
     case T_PI: {
         if (prec > 0) fputc('(', f);
         const char *nm = t->name && strcmp(t->name, "_") ? t->name : NULL;
-        if (nm) { fprintf(f, t->imp ? "{%s : " : "(%s : ", nm); tp(f, t->a, names, depth, 0); fputs(t->imp ? "} -> " : ") -> ", f); }
+        if (nm) { fprintf(f, t->imp ? "{%s : " : (t->irr & 2) ? ".(%s : " : "(%s : ", nm); tp(f, t->a, names, depth, 0); fputs(t->imp ? "} -> " : ") -> ", f); }
         else { tp(f, t->a, names, depth, 1); fprintf(f, " -> "); }
         names[depth] = nm ? nm : "_"; tp(f, t->b, names, depth + 1, 0);
         if (prec > 0) fputc(')', f);
@@ -1725,6 +1725,7 @@ static int conv_spine(int depth, VList *a, VList *b) {
     for (int i = 0; i < a->n; i++) {
         if (a->a[i].proj != b->a[i].proj) return 0;   /* path and plain application to an interval coincide */
         if (a->a[i].proj) continue;
+        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;   /* the argument of an irrelevant binder */
         if (!conv(depth, a->a[i].v, b->a[i].v)) return 0;
     }
     return 1;

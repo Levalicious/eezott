@@ -75,7 +75,7 @@ typedef enum { S_VAR, S_U, S_NUM, S_LEVEL, S_LZERO, S_LSUC, S_LMAX, S_PI, S_LAM,
                S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
                S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE, S_HOLE } SKind;
 typedef struct STerm STerm;
-typedef struct { const char *name; STerm *ty; int line; int imp; } SBinder;   /* ty NULL for lambda binders; imp: written {x} */
+typedef struct { const char *name; STerm *ty; int line; int imp; int irrel; } SBinder;   /* ty NULL for lambda binders; imp: written {x}; irrel: written .(x : A) */
 typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
