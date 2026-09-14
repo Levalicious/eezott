@@ -116,8 +116,37 @@ native beq : Nat -> Nat -> Nat := \m n -> and01 (ble m n) (ble n m)
 def if01 : Nat -> Nat -> Nat -> Nat := \c t e -> elim Nat (\_ -> Nat) e (\k ih -> t) c
 def count : Nat -> Nat -> Nat := \m n -> elim Nat (\_ -> Nat) zero (\k ih -> if01 (ble (mul (suc k) n) m) (suc ih) ih) m
 native div : Nat -> Nat -> Nat := \m n -> if01 (beq n 0) 0 (count m n)
-native mod : Nat -> Nat -> Nat := \m n -> sub m (mul (div m n) n)
+def next : Nat -> Nat -> Nat := \m r -> elim Nat (\_ -> Nat) 0 (\d _ -> suc r) (sub m (suc r))
+native mod : Nat -> Nat -> Nat := \x m -> if01 (beq m 0) x (elim Nat (\_ -> Nat) 0 (\k ih -> next m ih) x)
 native pow : Nat -> Nat -> Nat := \m n -> elim Nat (\_ -> Nat) 1 (\k ih -> mul m ih) n
+
+-- M16a: machine words in the theory. r < m is 'm - r is not zero'; the word type is the naturals below 2^64 with that bound
+-- irrelevant, and the operations are specified by the naturals' arithmetic (mkw reduces modulo 2^64) and erased to the
+-- run-time primitives of the same names.
+def Lt : Nat -> Nat -> U := \r m -> Id Nat (isZero (sub m r)) 0
+def substId {A : U} {a b : A} (P : A -> U) (p : Id A a b) (x : P a) : P b := elim Id (\y _ -> P y) x b p
+def nextLt : (m r c : Nat) -> Id Nat c (sub m (suc r)) -> Lt 0 m -> Lt (elim Nat (\_ -> Nat) 0 (\d _ -> suc r) c) m :=
+  \m r c -> elim Nat (\c -> Id Nat c (sub m (suc r)) -> Lt 0 m -> Lt (elim Nat (\_ -> Nat) 0 (\d _ -> suc r) c) m)
+              (\e h0 -> h0)
+              (\d _ e h0 -> substId (\y -> Id Nat (isZero y) 0) e refl)
+              c
+def modLtS : (x m : Nat) -> Lt (mod x (suc m)) (suc m) :=
+  \x m -> elim Nat (\x -> Lt (mod x (suc m)) (suc m)) refl
+            (\k ih -> nextLt (suc m) (mod k (suc m)) (sub (suc m) (suc (mod k (suc m)))) refl refl) x
+def M64 : Nat := 18446744073709551616
+def M63 : Nat := 18446744073709551615
+word Word : U := Sigma Nat .(\k -> Lt k M64)
+def mkw : Nat -> Word := \y -> (mod y M64, modLtS y M63)
+def n2b : Nat -> Bool := \n -> elim Nat (\_ -> Bool) false (\_ _ -> true) n
+word wadd : Word -> Word -> Word := \a b -> mkw (add (fst a) (fst b))
+word wsub : Word -> Word -> Word := \a b -> mkw (add (fst a) (sub M64 (fst b)))
+word wmul : Word -> Word -> Word := \a b -> mkw (mul (fst a) (fst b))
+word weq : Word -> Word -> Bool := \a b -> n2b (beq (fst a) (fst b))
+word wlt : Word -> Word -> Bool := \a b -> n2b (blt (fst a) (fst b))
+word waddc : Word -> Word -> Sigma Word (\_ -> Word) := \a b -> (mkw (add (fst a) (fst b)), mkw (div (add (fst a) (fst b)) M64))
+word wsubb : Word -> Word -> Sigma Word (\_ -> Word) := \a b -> (mkw (add (fst a) (sub M64 (fst b))), mkw (blt (fst a) (fst b)))
+word wmull : Word -> Word -> Sigma Word (\_ -> Word) := \a b -> (mkw (mul (fst a) (fst b)), mkw (div (mul (fst a) (fst b)) M64))
+word wdivmod : Word -> Word -> Sigma Word (\_ -> Word) := \a b -> (mkw (div (fst a) (fst b)), mkw (mod (fst a) (fst b)))
 def injSuc {m n : Nat} (p : Path Nat (suc m) (suc n)) : Path Nat m n := \i -> pred (p i)
 def caseNat (a0 as : U) (n : Nat) : U := elim Nat (\_ -> U) a0 (\_ _ -> as) n
 def znots {n : Nat} (p : Path Nat zero (suc n)) : Empty := transp (\i -> caseNat Unit Empty (p i)) i0 tt

@@ -1,0 +1,13 @@
+-- the word operations, decided by the kernel on literals
+def q1 : Id Word (wadd 2 3) 5 := refl
+def q2 : Id Word (wadd 18446744073709551615 1) 0 := refl
+def q3 : Id Word (wsub 0 1) 18446744073709551615 := refl
+def q4 : Id Word (wmul 4294967296 4294967296) 0 := refl
+def q5 : Id Bool (wlt 3 5) true := refl
+def q6 : Id Bool (weq 7 8) false := refl
+def q7 : Id (Sigma Word (\_ -> Word)) (wdivmod 7 2) (3, 1) := refl
+def q8 : Id (Sigma Word (\_ -> Word)) (wmull 4294967296 4294967296) (0, 1) := refl
+def q9 : Id (Sigma Word (\_ -> Word)) (waddc 18446744073709551615 1) (0, 1) := refl
+def q10 : Id (Sigma Word (\_ -> Word)) (wsubb 0 1) (18446744073709551615, 1) := refl
+def w5 : Nat := fst (wadd 2 3)
+def main : Word := wadd 2 3

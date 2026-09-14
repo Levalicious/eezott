@@ -1,0 +1,2 @@
+-- a pair-returning primitive: fst of the quotient
+def main : Nat := fst (fst (wdivmod 7 2))

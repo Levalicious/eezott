@@ -25,15 +25,16 @@ scott_nat() {   # Scott numeral literal for n, in eezoc syntax
 }
 oracle() {      # kind value -> expected bitstring
     case "$1" in
-        bool) printf '#import bool\n%s' "$2" | "$EEZOC" | "$EEZO" ;;
-        nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" | "$EEZO" ;;
+        bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
     local src; src=$(cat "$TT/prelude.tt" "$TT/$1")
     local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" $3 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
-    local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
-    echo "$bcl" | "$EEZO" $2 2>&1
+    local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" -f xbcl 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
+    echo "$bcl" | "$EEZO" -f xbcl $2 2>&1
 }
 checkN() {      # file: a program whose main is a higher inductive value; its run-time value must equal the run-time value of
                 # the checker's normal form of main (eezott -N), printed through the same normalizer
@@ -150,6 +151,20 @@ checkN  nat_native_pow.tt
 checkN  nat_native_sub.tt
 checkN  nat_native_lt.tt
 checkN  nat_native_eq.tt
+
+# M16a: an irrelevant Sigma component; machine words in the theory, erased to the run-time primitives
+check   irr_pair.tt      nat 3
+check   word_ops.tt      word 5
+check   word_fst.tt      nat 5
+check   word_mk.tt       word 5
+check   word_lt.tt       bool true
+check   word_divmod.tt   nat 3
+check   word_wrap.tt     word 18446744073709551615
+checkN  word_ops.tt
+checkN  word_mk.tt
+checkN  word_divmod.tt
+checkN  word_wrap.tt
+checkNF word_ops.tt      w5 5
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

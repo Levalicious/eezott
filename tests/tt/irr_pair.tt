@@ -1,0 +1,5 @@
+-- an irrelevant second component: pairs convert on their first components alone
+def P : U := Sigma Nat .(\k -> Lt k 10)
+def p : P := (3, refl)
+def same : (x : Lt 3 10) -> Id P p (3, x) := \x -> refl
+def main : Nat := fst p
