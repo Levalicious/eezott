@@ -1,0 +1,2 @@
+-- M15 differential: the native body at run time against the kernel primitive (checkN)
+def main : Nat := add (beq 4 4) (beq 4 5)

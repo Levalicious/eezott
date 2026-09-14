@@ -1,0 +1,4 @@
+data N2 : U where
+  | z2 : N2
+  | s2 : N2 -> N2
+native add : N2 -> N2 := \n -> n

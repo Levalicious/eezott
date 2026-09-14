@@ -95,6 +95,7 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
     case T_DEF: fprintf(out, "tt_%s", defs[t->n].name); break;
+    case T_NUM: erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
     case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
@@ -416,6 +417,7 @@ static void mark(Term *t) {
     if (!t) return;
     switch (t->k) {
     case T_DEF: if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); } break;
+    case T_NUM: mark(numeral_term(t->n, t->a, t->num)); break;
     case T_CON: mark_data(cons[t->n].data); break;
     case T_ELIM: case T_DATA: mark_data(t->n); break;
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;

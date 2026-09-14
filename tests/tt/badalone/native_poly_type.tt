@@ -1,0 +1,7 @@
+data N2 : U where
+  | z2 : N2
+  | s2 : N2 -> N2
+data B2 : U where
+  | t2 : B2
+  | f2 : B2
+native blt : N2 -> N2 -> B2 := \m n -> t2

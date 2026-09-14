@@ -1,0 +1,2 @@
+-- M15 differential: the native body at run time against the kernel primitive (checkN)
+def main : Nat := mod 100 7

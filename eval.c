@@ -66,7 +66,7 @@ static Term *map_levels(Term *t, LVal (*f)(LVal, void *), void *data) {
     }
     default:
         r = mk_term(t->k, map_levels(t->a, f, data), map_levels(t->b, f, data), map_levels(t->c, f, data), map_levels(t->d, f, data));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->pre = t->pre; r->lvl = t->lvl; r->imp = t->imp; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->pre = t->pre; r->lvl = t->lvl; r->imp = t->imp; r->num = t->num; return r;
     }
 }
 static LVal f_hidden(LVal l, void *data) { return lv_subst(l, -1, *(LVal *)data); }
@@ -211,7 +211,7 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
     default:
         r = mk_term(t->k, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1, by1, cut2, by2),
                     shift2(t->c, cut1, by1, cut2, by2), shift2(t->d, cut1, by1, cut2, by2));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
     }
 }
 Term *shift(Term *t, int cut, int by) { return shift2(t, cut, by, cut, by); }
@@ -232,7 +232,7 @@ Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
     }
     default:
         r = mk_term(t->k, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx, v), subst_term(t->d, idx, v));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
     }
 }
 
@@ -246,6 +246,7 @@ int term_eq(Term *a, Term *b) {
     case T_LZERO: case T_LMETA: case T_META: return a->n == b->n;
     case T_LSUC: return a->n == b->n && term_eq(a->a, b->a);
     case T_DEF: case T_DATA: case T_CON: case T_ELIM: return a->n == b->n && term_eq(a->a, b->a);
+    case T_NUM: return a->n == b->n && term_eq(a->a, b->a) && bn_cmp(a->num, b->num) == 0;
     case T_LVAL: return lv_eq(a->lvl, b->lvl);
     case T_INTERVAL: case T_I0: case T_I1: return 1;
     case T_SYS:
@@ -339,6 +340,7 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
     case T_DEF: fprintf(f, "%s", defs[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_DATA: fprintf(f, "%s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_CON: fprintf(f, "%s", cons[t->n].name); ref_lvl_tp(f, t, names, depth); break;
+    case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
     case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_LVAL: lv_tp(f, t->lvl, names, depth, prec); break;
     case T_INTERVAL: fputs("I", f); break;
@@ -674,6 +676,48 @@ Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data) { Val 
 static Val *neu_app(Val *f, Arg a) {
     Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a); return v;
 }
+
+/* ---- literals (M15) ---- */
+Term *mk_num(int d, Term *lt, Bn *n) { Term *t = mk_term(T_NUM, lt, NULL, NULL, NULL); t->n = d; t->num = n; return t; }
+Val *vnum(int d, LVal l, Bn *n) { Val *v = mkval(V_NUM); v->n = d; v->lvl = l; v->num = n; return v; }
+Val *num_view(Val *v) {
+    int zi, si;
+    if (!peano_shape(v->n, &zi, &si)) die("internal: a literal of a type not shaped like the naturals");
+    Val *c = mkval(V_CON); c->lvl = v->lvl;
+    if (bn_is_zero(v->num)) { c->n = zi; return c; }
+    c->n = si;
+    Arg ar = {0}; ar.v = vnum(v->n, v->lvl, bn_pred(v->num));
+    return neu_app(c, ar);
+}
+static const char *native_names[] = { "add", "sub", "mul", "div", "mod", "pow", "beq", "blt", "ble" };
+int native_code(const char *name) { for (int i = 0; i < 9; i++) if (!strcmp(name, native_names[i])) return i + 1; return 0; }
+static Bn *nat_op(int code, const Bn *a, const Bn *b) {
+    Bn *q, *r;
+    switch (code) {
+    case 1: return bn_add(a, b);
+    case 2: return bn_monus(a, b);
+    case 3: return bn_mul(a, b);
+    case 4: bn_divmod(a, b, &q, &r); return q;
+    case 5: bn_divmod(a, b, &q, &r); return r;
+    case 6: return bn_pow(a, b);
+    case 7: return bn_from_u64(bn_cmp(a, b) == 0);
+    case 8: return bn_from_u64(bn_cmp(a, b) < 0);
+    case 9: return bn_from_u64(bn_cmp(a, b) <= 0);
+    }
+    die("internal: unknown native %d", code); return NULL;
+}
+typedef struct { int code, d; Val *fallback, *arg1; } NatNative;
+static Val *natfn(void *data, Val *arg) {
+    NatNative *nn = data;
+    if (!nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *nn; m->arg1 = arg; return vlam_native("n", natfn, m); }
+    Val *a = force(nn->arg1), *b = force(arg);
+    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
+}
+Val *native_wrapper(int code, int d, Val *fallback) {
+    NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->fallback = fallback; nn->arg1 = NULL;
+    return vlam_native("m", natfn, nn);
+}
 static Val *elim_apply_list(int data, VList *args);
 
 /* ---- induction hypotheses (native closure N_IH) ----
@@ -721,6 +765,7 @@ static Val *elim_reduce(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, nb = D->nblock, K = block_ncons(data);
     Val *target = args->a[args->n - 1].v;
+    if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
     if (target->k != V_CON) return NULL;
     Con *c = con_at(target->n, target->lvl);
     if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
@@ -863,6 +908,11 @@ Val *vapp(Val *f, Val *a, int irr) {
         return neu_app(f, ar);
     case V_DATA: return neu_app(f, ar);
     case V_CON: {
+        Val *av = force(a);
+        if (av->k == V_NUM && f->args.n == 0 && cons[f->n].data == av->n) {   /* suc of a literal is the literal above */
+            int zi, si;
+            if (peano_shape(av->n, &zi, &si) && f->n == si) return vnum(av->n, av->lvl, bn_succ(av->num));
+        }
         Val *v = neu_app(f, ar);
         Con *C = con_at(f->n, f->lvl); int np = datas[C->data].nparams;
         if (C->nint > 0 && v->args.n == np + C->nargs + C->nint) {   /* a path constructor on a face of its boundary is the boundary */
@@ -930,6 +980,7 @@ Val *eval(Env *env, Term *t) {
     case T_DEF: return def_at(t->n, t->a ? eval_level(env, t->a) : lv_const(0));
     case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
+    case T_NUM: return vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num);
     case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_LVAL: return vl(t->lvl);
     case T_META: { Meta *m = &tmetas[t->n]; if (m->sol) return m->sol; Val *v = mkval(V_NEU); v->h = H_META; v->n = t->n; return v; }
@@ -986,6 +1037,11 @@ static void *caps_subst(void *data, int n, int lv, IVal s) {
 static void subst_clo(Clo *dst, const Clo *src, int lv, IVal s) {
     *dst = *src;
     if (src->fn) {
+        if (src->fn == natfn) {
+            NatNative *nn = src->data, *m = xalloc(sizeof *m); *m = *nn;
+            m->fallback = subst_val(nn->fallback, lv, s); if (nn->arg1) m->arg1 = subst_val(nn->arg1, lv, s);
+            dst->data = m; return;
+        }
         if (src->fn != nfn) { dst->data = caps_subst(src->data, ((Caps *)src->data)->n, lv, s); return; }
         Native *nt = src->data, *nn = xalloc(sizeof *nn); *nn = *nt; nn->cap = (VList){0};
         for (int i = 0; i < nt->cap.n; i++) vl_push(&nn->cap, subst_val(nt->cap.a[i].v, lv, s), nt->cap.a[i].irr);
@@ -1014,6 +1070,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
         for (int i = 0; i < v->nbr; i++) { br[i].phi = subst_val(v->br[i].phi, lv, s); br[i].v = subst_val(v->br[i].v, lv, s); }
         return vsys(br, v->nbr);
     }
+    case V_NUM: return v;   /* closed */
     case V_DATA: case V_CON: {
         Val *r = mkval(v->k); r->n = v->n; r->lvl = v->lvl; r->args = (VList){0};
         for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } a.irr = 0; if (v->k == V_CON) r = vapp(r, a.v, 0); else vl_push_arg(&r->args, a); }
@@ -1061,7 +1118,7 @@ static Val *vtfill(Val *line, Val *phi, Val *u0) { return vnative(N_TFILL, 0, 0,
 static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL, 0, 0, 0, 4, line, phi, u, u0); } /* λi. comp (λj. line (i∧j)) (φ ∨ ~i) [..] u0 */
 
 static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
-static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; if (k < 0) return vproj(v, -k); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
+static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
 static Val *native_apply(Native *nt, Val *arg) {
     switch (nt->code) {
@@ -1210,7 +1267,11 @@ static Val *native_apply(Native *nt, Val *arg) {
 /* all branches of the partial element u (at a fresh i) are constructor c? */
 static int sides_all_con(Val *u, int con) {
     Val *ui = vapp(u, fresh_ivar(), 0);
-    if (ui->k == V_SYS) { for (int i = 0; i < ui->nbr; i++) if (ui->br[i].v->k != V_CON || ui->br[i].v->n != con) return 0; return 1; }
+    if (ui->k == V_NUM) ui = num_view(ui);
+    if (ui->k == V_SYS) {
+        for (int i = 0; i < ui->nbr; i++) { Val *w = ui->br[i].v; if (w->k == V_NUM) w = num_view(w); if (w->k != V_CON || w->n != con) return 0; }
+        return 1;
+    }
     return ui->k == V_CON && ui->n == con;
 }
 
@@ -1366,6 +1427,7 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
     case V_DATA: {
         Data *D = data_at(A->n, A->lvl);
         if (D->nidx > 0 || D->hit) return neu_hcomp(A, phi, u, u0);
+        if (u0->k == V_NUM) u0 = num_view(u0);
         if (u0->k != V_CON || !sides_all_con(u, u0->n)) return neu_hcomp(A, phi, u, u0);
         Con *C = con_at(u0->n, u0->lvl); int np = D->nparams;
         Val *res = mkval(V_CON); res->n = u0->n; res->lvl = u0->lvl;
@@ -1587,6 +1649,7 @@ Term *quote(int depth, Val *v) {
         for (int i = 0; i < v->nbr; i++) { t->br[i].face = quote(depth, v->br[i].phi); t->br[i].body = quote(depth, v->br[i].v); }
         return t;
     }
+    case V_NUM: return mk_num(v->n, quote_level(depth, v->lvl), v->num);
     case V_NEU: case V_DATA: case V_CON: {
         Term *h;
         if (v->k == V_DATA) h = mk_ref_l(T_DATA, v->n, quote_level(depth, v->lvl));
@@ -1658,6 +1721,10 @@ static int conv1(int depth, Val *a, Val *b) {
         if (am) return unify_meta(depth, a, b);
         if (bm) return unify_meta(depth, b, a);
     }
+    /* literals (M15): equal numbers; against constructors, one constructor at a time */
+    if (a->k == V_NUM && b->k == V_NUM) return a->n == b->n && lvl_conv(T_DATA, a->n, a->lvl, b->lvl) && bn_cmp(a->num, b->num) == 0;
+    if (a->k == V_NUM && b->k == V_CON) a = num_view(a);
+    if (b->k == V_NUM && a->k == V_CON) b = num_view(b);
     if (a->k == V_SYS || b->k == V_SYS) return conv_sys(depth, a, b);
     if (a->k == V_LAM || b->k == V_LAM) {          /* eta */
         int isi = (a->k == V_LAM ? a->isi : b->isi);
