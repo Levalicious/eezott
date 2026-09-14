@@ -1,2 +1,3 @@
+#import word
 -- fst at the word type: the machine word read back as a Scott natural
 def main : Nat := fst (wadd 2 3)

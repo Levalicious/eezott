@@ -1,1 +1,2 @@
+#import word
 word wand : Word -> Word := \a -> a

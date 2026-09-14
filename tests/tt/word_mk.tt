@@ -1,2 +1,3 @@
+#import word
 -- a pair at the word type that is not a literal: built by tt_nattoword
 def main : Word := mkw (add 2 3)

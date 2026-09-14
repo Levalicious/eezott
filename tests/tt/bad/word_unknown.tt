@@ -1,1 +1,2 @@
+#import word
 word wfoo : Word -> Word -> Word := \a b -> a

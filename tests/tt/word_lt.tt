@@ -1,2 +1,3 @@
+#import word
 -- a comparison: the runtime primitive returns the Scott boolean
 def main : Bool := wlt 3 5

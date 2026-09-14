@@ -1,0 +1,8 @@
+#import nat
+-- the library's lemmas at closed instances (the kernel decides the arithmetic; the lemmas decide the open cases)
+def l1 : Path Nat (add (mul (div 100 7) 7) (mod 100 7)) 100 := divmod_spec 100 6
+def l2 : Path Nat (add (mul (div 100 7) 7) (mod 100 7)) 100 := prefl Nat 100
+def l3 : Lt (mod 100 7) 7 := modLtS 100 6
+def l4 : (a b : Nat) -> Path Nat (mul (add a b) (add a b)) (add (mul a (add a b)) (mul b (add a b))) := \a b -> mul_dist_r a b (add a b)
+def l5 : (n : Nat) -> Path Nat (add n 0) n := add_zero_r
+def l6 : Path Nat (mul 3 (suc 4)) (add 3 (mul 3 4)) := mul_suc_r 3 4

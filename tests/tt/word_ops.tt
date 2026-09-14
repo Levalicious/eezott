@@ -1,3 +1,4 @@
+#import word
 -- the word operations, decided by the kernel on literals
 def q1 : Id Word (wadd 2 3) 5 := refl
 def q2 : Id Word (wadd 18446744073709551615 1) 0 := refl
