@@ -11,7 +11,9 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
 LIB="${SCRIPT_DIR}/../stdlib/tt"
-tt() { EEZOTT_MAX_ALLOC=${EEZOTT_MAX_ALLOC:-6442450944} "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }   # the harness caps memory; a resource abort is not a judgement
+# No cap is imposed here: the default is the system's own limits. EEZOTT_MAX_ALLOC exists for whoever wants one
+# (export it and the checker picks it up); a resource abort is still never a judgement.
+tt() { "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }
 EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
 EEZO="${SCRIPT_DIR}/../eezo/eezo"
 TT="${SCRIPT_DIR}/tt"
@@ -185,7 +187,7 @@ done
 # self-contained programs that must be rejected (no prelude: they use the prelude's names in ways the prelude forbids)
 for f in "$TT"/badalone/*.tt; do
     name=badalone/$(basename "$f")
-    if EEZOTT_MAX_ALLOC=${EEZOTT_MAX_ALLOC:-6442450944} "$EEZOTT" -c < "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+    if "$EEZOTT" -c < "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
 done
 
 for f in "$TT"/check/*.tt; do
