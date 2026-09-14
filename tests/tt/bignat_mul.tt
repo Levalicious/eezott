@@ -1,0 +1,14 @@
+#import bignat
+-- the multiplication layer at closed instances: the kernel's bignum computes both sides, refl checks them.
+-- Two constraints keep this cheap and honest: the checker's evaluator does not share subterms, so a nested
+-- badd over computed operands (literal underneath) already blows up at depth 2, and the harness's allocation
+-- budget counts allocations, not live bytes - so only one two-limb-by-two-limb instance fits.
+def t1 : Path Nat (bval (bmul (lcons 1 (lnil {Nat})) (lcons 1 (lnil {Nat})))) 1 := prefl Nat 1
+def t2 : Path Nat (bval (bmul (lcons 2 (lcons 3 (lnil {Nat}))) (lcons 4 (lnil {Nat})))) 147573952589676412940 := prefl Nat 147573952589676412940
+def t3 : Path Nat (bval (bmul (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Nat}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Nat}))))) 115792089237316195423570985008687907852589419931798687112530834793049593217025 := prefl Nat 115792089237316195423570985008687907852589419931798687112530834793049593217025
+-- the correctness theorems at symbolic operands
+def t4 (x y : BigNat) : Path Nat (bval (bmul x y)) (mul (bval x) (bval y)) := bmul_ok x y
+def t5 (x y : BigNat) : Path Nat (bval (badd x y)) (add (bval x) (bval y)) := badd_ok x y
+-- a theorem instance at closed operands: the proof itself computes down to refl
+def t6 : Path Nat (bval (bmul (lcons 3 (lnil {Nat})) (lcons 4 (lnil {Nat})))) 12 := bmul_ok (lcons 3 (lnil {Nat})) (lcons 4 (lnil {Nat}))
+def main : Nat := bval (bmul (lcons 6 (lnil {Nat})) (lcons 7 (lnil {Nat})))
