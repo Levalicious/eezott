@@ -24,14 +24,17 @@ static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vap
 /* ---- memory / errors ---- */
 static u64 alloc_total, alloc_limit;
 void *xalloc(size_t n) {
-    if (!alloc_limit) {
+    if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
         const char *e = getenv("EEZOTT_MAX_ALLOC");
-        alloc_limit = e ? (u64)strtoull(e, NULL, 0) : ((u64)6 << 30);
+        alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
     }
     alloc_total += n ? n : 1;
-    if (alloc_total > alloc_limit)
-        die("allocated over %llu bytes (EEZOTT_MAX_ALLOC overrides): a runaway? see Finding_Eezott_ConvBlowupKanNatPaths_2026_09_14",
-            (unsigned long long)alloc_limit);
+    if (alloc_total > alloc_limit) {   /* a resource abort, never a typing judgement (Decision_AllocBudgetOptInHarnessOnly) */
+        fflush(stdout);
+        fprintf(stderr, "eezott: resource limit: allocated over %llu bytes (EEZOTT_MAX_ALLOC); resource abort, not a typing judgement\n",
+                (unsigned long long)alloc_limit);
+        exit(70);
+    }
     void *p = calloc(1, n ? n : 1);
     if (!p) die("out of memory");
     return p;

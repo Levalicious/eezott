@@ -11,7 +11,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
 LIB="${SCRIPT_DIR}/../stdlib/tt"
-tt() { "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }   # the prelude loaded as an import; the library on the import path
+tt() { EEZOTT_MAX_ALLOC=${EEZOTT_MAX_ALLOC:-6442450944} "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }   # the harness caps memory; a resource abort is not a judgement
 EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
 EEZO="${SCRIPT_DIR}/../eezo/eezo"
 TT="${SCRIPT_DIR}/tt"
@@ -33,7 +33,7 @@ oracle() {      # kind value -> expected bitstring
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
-    local erased; erased=$(tt $3 "$TT/$1" 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
+    local erased; erased=$(tt $3 "$TT/$1" 2>&1) || { case "$erased" in *"resource limit"*) echo "RESOURCE_ERROR: $erased";; *) echo "TYPECHECK_ERROR: $erased";; esac; return; }
     local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" -f xbcl 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
     echo "$bcl" | "$EEZO" -f xbcl $2 2>&1
 }
@@ -169,19 +169,25 @@ checkNF word_ops.tt      w5 5
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
-    if tt -c "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+    out=$(tt -c "$f" 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then fail "$name rejected" "rejection" "accepted"
+    elif printf '%s' "$out" | grep -q 'resource limit'; then fail "$name rejected" "rejection" "resource limit"
+    else pass "$name rejected"; fi
 done
 
 # self-contained programs that must be rejected (no prelude: they use the prelude's names in ways the prelude forbids)
 for f in "$TT"/badalone/*.tt; do
     name=badalone/$(basename "$f")
-    if "$EEZOTT" -c < "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+    if EEZOTT_MAX_ALLOC=${EEZOTT_MAX_ALLOC:-6442450944} "$EEZOTT" -c < "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
 done
 
 for f in "$TT"/check/*.tt; do
     [ -e "$f" ] || continue
     name=check/$(basename "$f")
-    if tt -c "$f" >/dev/null 2>&1; then pass "$name typechecks"; else fail "$name typechecks" "acceptance" "$(tt -c "$f" 2>&1 | head -1)"; fi
+    out=$(tt -c "$f" 2>&1); rc=$?
+    if printf '%s' "$out" | grep -q 'resource limit'; then fail "$name typechecks" "acceptance" "resource limit"
+    elif [ $rc -ne 0 ]; then fail "$name typechecks" "acceptance" "$(printf '%s' "$out" | head -1)"
+    else pass "$name typechecks"; fi
 done
 
 for f in "$TT"/unerasable/*.tt; do
