@@ -31,11 +31,41 @@ void die_resource(const char *fmt, ...) {
     exit(70);
 }
 
+/* A memo entry stays valid across metas generations iff nothing inside it was blocked on an unsolved meta: resolving one
+   can resume a reduction the entry took as neutral. A missed entry is merely slow, so this is set conservatively -
+   every place that hands back a neutral where a decision was possible marks it, meta or not. */
+static int meta_blocked;
+/* EEZOTT_MEMO_WIDE=1 turns on the two halves that need interned VALUES to pay for themselves: interning pairs of
+   (environment, value) and the (term, env) evaluation memo. Measured on the library as it stands: keys still differ
+   because equal values are distinct pointers (a one-column fold already evaluates 444k DISTINCT (term, env) pairs), so
+   today they cost more than they save and are off by default. They are the entry points for value interning. */
+static int memo_wide = -1;
+static int wide_on(void) {
+    if (memo_wide < 0) memo_wide = getenv("EEZOTT_MEMO_WIDE") != NULL;
+    return memo_wide;
+}
 static u64 alloc_total, alloc_limit;
+/* EEZOTT_MEMO_STATS=1: what the memoization pass actually hits */
+static long def_hits, def_miss, def_calls, def_miss_by[4096], inst_hit, inst_miss, nem_hit, nem_miss, env_hit, env_miss;
+static long ememo_hit, ememo_miss, ememo_live;   /* defined with the table below, declared here for the report */
+static void memo_report(void) {
+    if (!getenv("EEZOTT_MEMO_STATS")) return;
+    fprintf(stderr, "[memo] unfold: %ld hits, %ld misses, %ld calls\n", def_hits, def_miss, def_calls);
+    fprintf(stderr, "[memo] eval: %ld hits, %ld misses, %ld live\n", ememo_hit, ememo_miss, ememo_live);
+    fprintf(stderr, "[memo] inst: %ld hits, %ld misses; native: %ld hits, %ld misses; env: %ld hits, %ld misses\n", inst_hit, inst_miss, nem_hit, nem_miss, env_hit, env_miss);
+    for (int rank = 0; rank < 10; rank++) {
+        long best = 0; int bi = -1;
+        for (int i = 0; i < ndefs && i < 4096; i++) if (def_miss_by[i] > best) { best = def_miss_by[i]; bi = i; }
+        if (bi < 0) break;
+        fprintf(stderr, "[memo] miss #%d: %-12s %ld\n", rank + 1, defs[bi].name ? defs[bi].name : "?", best);
+        def_miss_by[bi] = -1;
+    }
+}
 void *xalloc(size_t n) {
     if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
         const char *e = getenv("EEZOTT_MAX_ALLOC");
         alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
+        if (getenv("EEZOTT_MEMO_STATS")) atexit(memo_report);
     }
     alloc_total += n ? n : 1;
     if (alloc_total > alloc_limit)
@@ -605,7 +635,36 @@ void vl_push_arg(VList *l, Arg a) {
 }
 void vl_push(VList *l, Val *v, int irr) { Arg a = {0}; a.v = v; a.irr = irr; vl_push_arg(l, a); }
 VList vl_copy(const VList *l) { VList r = {0}; for (int i = 0; i < l->n; i++) vl_push_arg(&r, l->a[i]); return r; }
-Env *env_push(Env *e, Val *v) { Env *n = xalloc(sizeof *n); n->v = v; n->next = e; return n; }
+/* Env interning: identical (environment, value) pushes share one node. The eval memo below keys on (term, env) POINTERS,
+   which is a content key only because of this - inst pushes a fresh node per call otherwise, and every lookup missed
+   (Cause_Eezott_EvalMemoKeying_2026_09_14: 35M misses to 3052 hits). Env nodes are immutable, so sharing is safe, and a
+   hit is cheaper than the allocation it replaces. */
+static Env **epush; static long epush_n, epush_cap;
+static size_t env_hash(Env *e, Val *v) {
+    return (((size_t)e >> 4) * 1000003u) ^ (((size_t)v >> 4) * 2654435761u);
+}
+static void env_grow(void) {
+    Env **old = epush; long oc = epush_cap;
+    epush_cap = oc * 2; epush = xalloc(epush_cap * sizeof *epush);
+    for (long i = 0; i < oc; i++) if (old[i]) {
+        size_t h = env_hash(old[i]->next, old[i]->v) & (epush_cap - 1);
+        while (epush[h]) h = (h + 1) & (epush_cap - 1);
+        epush[h] = old[i];
+    }
+}
+Env *env_push(Env *e, Val *v) {
+    if (!wide_on()) { Env *n = xalloc(sizeof *n); n->v = v; n->next = e; return n; }   /* see wide_on */
+    if (!epush_cap) { epush_cap = 1 << 12; epush = xalloc(epush_cap * sizeof *epush); }
+    else if (epush_n * 4 >= epush_cap * 3 && epush_cap < (1 << 22)) env_grow();
+    size_t i = env_hash(e, v) & (epush_cap - 1);
+    for (long probes = 0; probes < epush_cap; probes++, i = (i + 1) & (epush_cap - 1)) {
+        Env *n = epush[i];
+        if (!n) { n = xalloc(sizeof *n); n->v = v; n->next = e; epush[i] = n; epush_n++; env_miss++; return n; }
+        if (n->v == v && n->next == e) { env_hit++; return n; }
+    }
+    env_miss++;   /* the table is at its cap and full: share nothing further here (a later lookup misses; nothing breaks) */
+    Env *n = xalloc(sizeof *n); n->v = v; n->next = e; return n;
+}
 Val *env_get(Env *e, int idx) { while (idx-- > 0) { if (!e) die("internal: unbound variable"); e = e->next; } if (!e) die("internal: unbound variable"); return e->v; }
 
 Val *mkval(VKind k) { Val *v = xalloc(sizeof *v); v->k = k; return v; }
@@ -659,10 +718,12 @@ enum { N_IH = 1, N_LINE_DOM, N_LINE_COD_V, N_TRANSP_V, N_LINE_IOR, N_LINE_IAND, 
        N_CONST, N_ELIM_MOTIVE_LINE, N_ELIM_SIDES,
        N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES,
        N_ELIM_PATH_IH, N_TRANSP_MAP, N_HITTR_SIDES };
-typedef struct { int code; int i1, i2, i3; VList cap;  LVal l; } Native;
+typedef struct { int code; int i1, i2, i3; VList cap;  LVal l;
+                 Val *marg, *mres; int mmv, mon, mstable; } Native;   /* one-entry application memo: the last argument and at which metas version */
 typedef struct { int n; Val *v[8]; LVal l; } Caps;
 
 static Val *native_apply(Native *nt, Val *arg);
+static Val *native_step(Native *nt, Val *arg);
 typedef struct { Val *psi, *forall, *ungl, *Teg, *tf, *i; int F; } TrSides;
 typedef struct { Val *phi1, *psi, *alphas, *ts, *Te1, *a1, *j; } A1pData;
 typedef struct { Val *Te, *psi, *u, *u0, *i; } HfData;
@@ -681,8 +742,18 @@ static Val *builtin_at(const char *name, LVal L);
 static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
 Val *inst(Clo *c, Val *v) {
-    if (c->fn) return c->fn(c->data, v);
-    return eval(env_push(c->env, v), c->t);
+    /* One-entry application memo (the memoization pass): a closure applied to the same value again is the same value,
+       and branch bodies do apply the same closure to the same value repeatedly - baddGo's column uses its induction
+       hypothesis three times, and each application re-ran the whole recursive fold, which made the fold's cost
+       3^columns (Finding_Eezott_EvalNoSharing_2026_09_14). The metas version guards it: a meta solved in between can
+       resume a reduction that the first application took as neutral. */
+    if (c->ires && c->iarg == v && (c->imv == metas_version || c->istable)) { inst_hit++; return c->ires; }
+    inst_miss++;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r = c->fn ? c->fn(c->data, v) : eval(env_push(c->env, v), c->t);
+    c->iarg = v; c->ires = r; c->imv = metas_version; c->istable = !meta_blocked;
+    meta_blocked |= save;
+    return r;
 }
 static Val *nfn(void *data, Val *arg) { return native_apply(data, arg); }
 static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
@@ -696,7 +767,9 @@ static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
 Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data) { Val *v = mkval(V_LAM); v->clo.fn = fn; v->clo.data = data; v->name = name; return v; }
 
 static Val *neu_app(Val *f, Arg a) {
-    Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a); return v;
+    Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a);
+    v->unf = NULL; v->unf_n = 0; v->unf_mv = 0;   /* a longer spine: the copied memo, if any, does not apply */
+    return v;
 }
 
 /* ---- literals (M15) ---- */
@@ -799,9 +872,9 @@ static Val *elim_reduce(int data, VList *args) {
         elim_num_depth++;
         target = num_view(target);   /* a literal eliminates as one constructor */
     }
-    if (target->k != V_CON) return NULL;
+    if (target->k != V_CON) { meta_blocked = 1; return NULL; }
     Con *c = con_at(target->n, target->lvl);
-    if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
+    if (c->data != data || target->args.n != np + c->nargs + c->nint) { meta_blocked = 1; return NULL; }
     Val *res = args->a[np + nb + c->bord].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
     for (int j = 0; j < c->nargs; j++) {
@@ -930,8 +1003,20 @@ Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
 /* ---- application ---- */
 /* a rigid definition application to its value: the definition applied to its spine */
 Val *unfold_def(Val *v) {
+    /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
+       the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
+       hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
+       whole body (cost compounding with nesting depth; Finding_Eezott_EvalNoSharing_2026_09_14). Guarded by the spine
+       length (neu_app lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
+    def_calls++;
+    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) { def_hits++; return v->unf; }
+    def_miss++;
+    if (v->n >= 0 && v->n < 4096) def_miss_by[v->n]++;
+    int save = meta_blocked; meta_blocked = 0;
     Val *f = def_at(v->n, v->lvl);
     for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
+    v->unf = f; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
+    meta_blocked |= save;
     return f;
 }
 
@@ -987,6 +1072,7 @@ Val *vpapp(Val *p, Val *r, Val *x, Val *y) {
         return vsys(br, p->nbr);
     }
     Arg ar = {0}; ar.v = r; ar.papp = 1; ar.x = x; ar.y = y;
+    meta_blocked = 1;
     if (p->k == V_NEU || p->k == V_DATA || p->k == V_CON) return neu_app(p, ar);
     die("internal: path application to a non-path value");
     return NULL;
@@ -1004,6 +1090,7 @@ Val *vproj(Val *p, int which) {
         return vsys(br, p->nbr);
     }
     Arg ar = {0}; ar.proj = which;
+    meta_blocked = 1;
     if (p->k == V_NEU) return neu_app(p, ar);
     die("internal: projection from a non-pair value");
     return NULL;
@@ -1014,7 +1101,64 @@ Val *vapply_arg(Val *f, Arg *a) { return apply_arg(f, a); }
 /* ---- evaluation ---- */
 static Env *subst_env(Env *e, int lv, IVal s);
 static IVal face_iv(const Face *f);
+/* ---- the evaluation memo (the memoization pass, first half) ----
+   eval is a pure function of the term and the environment: values are immutable apart from memo fields that do not change
+   what they denote, and the level a reduction runs at is taken from the value, not from ambient state. Entries carry the
+   metas generation they were made in and are used only in it (a meta solved in between can unstick a reduction the entry
+   took as neutral), but a stale slot is reused rather than the table cleared: clearing per solve left the memo at a 0.01%
+   hit rate. Only applications and definition references are cached - the leaves of every expensive tree. */
+typedef struct { const Term *t; const Env *e; Val *v; int gen, stable; } EMemo;
+static EMemo *ememo; static long ememo_cap;
+static size_t ememo_hash(const Term *t, const Env *e) {
+    return (((size_t)t >> 4) * 1000003u) ^ (((size_t)e >> 4) * 2654435761u);
+}
+static void ememo_rehash(void) {
+    EMemo *old = ememo; long oc = ememo_cap, live = 0;
+    ememo_cap = oc ? oc * 2 : (1 << 14);
+    if (ememo_cap > (1 << 22)) ememo_cap = 1 << 22;
+    ememo = xalloc(ememo_cap * sizeof *ememo);
+    for (long i = 0; i < oc; i++) {
+        if (!old[i].v || old[i].gen != metas_version) continue;     /* the rehash is also the sweep of dead generations */
+        size_t h = ememo_hash(old[i].t, old[i].e) & (ememo_cap - 1);
+        while (ememo[h].v) h = (h + 1) & (ememo_cap - 1);
+        ememo[h] = old[i]; live++;
+    }
+    ememo_live = live;
+}
+static Val *ememo_get(const Term *t, const Env *e) {
+    if (!ememo_cap || (ememo_live * 4 >= ememo_cap * 3 && ememo_cap < (1 << 22))) ememo_rehash();
+    for (size_t i = ememo_hash(t, e) & (ememo_cap - 1), probes = 0; probes <= ememo_cap; i = (i + 1) & (ememo_cap - 1), probes++) {
+        EMemo *m = &ememo[i];
+        if (!m->v) break;
+        if (m->t == t && m->e == e && (m->gen == metas_version || m->stable)) { ememo_hit++; return m->v; }
+    }
+    ememo_miss++; return NULL;
+}
+static void ememo_put(const Term *t, const Env *e, Val *v, int stable) {
+    size_t i = ememo_hash(t, e) & (ememo_cap - 1), stale = (size_t)-1;
+    for (long probes = 0; probes < ememo_cap; probes++, i = (i + 1) & (ememo_cap - 1)) {
+        EMemo *m = &ememo[i];
+        if (!m->v) break;
+        if (m->t == t && m->e == e && (m->gen == metas_version || m->stable)) { m->v = v; m->stable = stable; return; }
+        if (m->gen != metas_version && !m->stable && stale == (size_t)-1) stale = i;
+    }
+    if (ememo[i].v && stale == (size_t)-1) return;   /* full of live entries: skip this one rather than evict another key */
+    EMemo *m = &ememo[ememo[i].v ? stale : i];
+    if (!m->v) ememo_live++;
+    m->t = t; m->e = e; m->v = v; m->gen = metas_version; m->stable = stable;
+}
+static Val *eval1(Env *env, Term *t);
 Val *eval(Env *env, Term *t) {
+    if ((t->k != T_APP && t->k != T_DEF) || !wide_on()) return eval1(env, t);
+    Val *c = ememo_get(t, env);
+    if (c) return c;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r = eval1(env, t);
+    ememo_put(t, env, r, !meta_blocked);
+    meta_blocked |= save;
+    return r;
+}
+static Val *eval1(Env *env, Term *t) {
     switch (t->k) {
     case T_VAR: return env_get(env, t->n);
     case T_U: { LVal l = t->a ? eval_level(env, t->a) : lv_const(t->n); return t->pre ? vupre_l(l) : vu_l(l); }
@@ -1091,6 +1235,7 @@ static void *caps_subst(void *data, int n, int lv, IVal s) {
 }
 static void subst_clo(Clo *dst, const Clo *src, int lv, IVal s) {
     *dst = *src;
+    dst->iarg = NULL; dst->ires = NULL; dst->imv = 0;   /* the substitution changes what the closure computes */
     if (src->fn) {
         if (src->fn == natfn) {
             NatNative *nn = src->data, *m = xalloc(sizeof *m); *m = *nn;
@@ -1181,7 +1326,19 @@ static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL,
 static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
 static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; v = force(v); if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
+/* Every native closure application is memoized the same way - a pure step, keyed on the argument value, tagged by the
+   metas generation. An eliminator's induction hypothesis applied to the same value again is the same value, and branch
+   bodies do apply the same closure to the same value repeatedly (baddGo's column uses its IH three times). */
 static Val *native_apply(Native *nt, Val *arg) {
+    if (nt->mon && nt->marg == arg && (nt->mmv == metas_version || nt->mstable)) { nem_hit++; return nt->mres; }
+    nem_miss++;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r = native_step(nt, arg);
+    nt->marg = arg; nt->mres = r; nt->mmv = metas_version; nt->mon = 1; nt->mstable = !meta_blocked;
+    meta_blocked |= save;
+    return r;
+}
+static Val *native_step(Native *nt, Val *arg) {
     switch (nt->code) {
     case N_IH: return ih_apply(nt, arg);
     case N_CONST: return CAP(nt, 0);

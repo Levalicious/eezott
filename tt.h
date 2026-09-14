@@ -224,7 +224,8 @@ typedef struct Env { Val *v; struct Env *next; } Env;
 typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y; proj: 1 fst, 2 snd */
 typedef struct { Arg *a; int n, cap; } VList;
 typedef struct Clo Clo;
-struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
+struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data;   /* fn != NULL => native closure */
+             Val *iarg, *ires; int imv, istable; };   /* one-entry application memo: the value the closure was last applied to, at which metas version, and whether the result is stable */
 typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META, H_DEF } HKind;
 /* H_DEF: a definition application kept rigid in conversion (the H_DEF plan): unfolded only by force/quote and where
    a canonical form is needed; conv compares the same definition's spine, skipping the arguments of .() binders */
@@ -247,6 +248,11 @@ struct Val {
     Bn *num;            /* V_NUM: a literal of the data type n at the level lvl (M15) */
     /* V_PAIR with irr: the second component is lazy - b is NULL until pair_snd forces the closure clo (a term under its
        environment, or a native thunk called with NULL); it is never compared and quotes to T_IRR (M16a) */
+    /* H_DEF memo (the memoization pass): the unfolding of this rigid definition application, computed once and kept
+       in the value itself - the value is the shared cell, updated in place in the manner of an Eezo thunk. unf_n is
+       the spine length the memo was taken at (neu_app lengthens spines) and unf_mv the metas version (a meta solved
+       after the memo can unstick a reduction, so any assignment or rollback invalidates). */
+    Val *unf; int unf_n; int unf_mv; int unf_stable;
 };
 Val *pair_snd(Val *p);
 
@@ -289,6 +295,7 @@ Val *vapply_arg(Val *f, Arg *a);             /* apply a spine entry (application
  * substituted structurally (zonk). */
 typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known */
 extern Meta *tmetas; extern int ntmetas;
+extern int metas_version;   /* bumped whenever a meta is solved or a rollback clears one: memo entries key on it */
 int meta_new(Val *ty, int ctxn, const char **names, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
 Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
