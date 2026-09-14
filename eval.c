@@ -22,7 +22,20 @@ Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
-void *xalloc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) die("out of memory"); return p; }
+static u64 alloc_total, alloc_limit;
+void *xalloc(size_t n) {
+    if (!alloc_limit) {
+        const char *e = getenv("EEZOTT_MAX_ALLOC");
+        alloc_limit = e ? (u64)strtoull(e, NULL, 0) : ((u64)6 << 30);
+    }
+    alloc_total += n ? n : 1;
+    if (alloc_total > alloc_limit)
+        die("allocated over %llu bytes (EEZOTT_MAX_ALLOC overrides): a runaway? see Finding_Eezott_ConvBlowupKanNatPaths_2026_09_14",
+            (unsigned long long)alloc_limit);
+    void *p = calloc(1, n ? n : 1);
+    if (!p) die("out of memory");
+    return p;
+}
 char *xstrdup(const char *s) { size_t n = strlen(s) + 1; char *p = xalloc(n); memcpy(p, s, n); return p; }
 char *xsprintf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int n = vsnprintf(NULL, 0, fmt, ap); va_end(ap);
