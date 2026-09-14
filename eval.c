@@ -22,6 +22,15 @@ Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
+void die_resource(const char *fmt, ...) {
+    va_list ap;
+    fflush(stdout);
+    fputs("eezott: resource limit: ", stderr);
+    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+    fputc('\n', stderr);
+    exit(70);
+}
+
 static u64 alloc_total, alloc_limit;
 void *xalloc(size_t n) {
     if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
@@ -29,14 +38,10 @@ void *xalloc(size_t n) {
         alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
     }
     alloc_total += n ? n : 1;
-    if (alloc_total > alloc_limit) {   /* a resource abort, never a typing judgement (Decision_AllocBudgetOptInHarnessOnly) */
-        fflush(stdout);
-        fprintf(stderr, "eezott: resource limit: allocated over %llu bytes (EEZOTT_MAX_ALLOC); resource abort, not a typing judgement\n",
-                (unsigned long long)alloc_limit);
-        exit(70);
-    }
+    if (alloc_total > alloc_limit)
+        die_resource("allocated over %llu bytes (EEZOTT_MAX_ALLOC)", (unsigned long long)alloc_limit);
     void *p = calloc(1, n ? n : 1);
-    if (!p) die("out of memory");
+    if (!p) die_resource("out of memory");
     return p;
 }
 char *xstrdup(const char *s) { size_t n = strlen(s) + 1; char *p = xalloc(n); memcpy(p, s, n); return p; }

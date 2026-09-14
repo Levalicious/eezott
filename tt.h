@@ -67,6 +67,7 @@ void *xalloc(size_t n);
 char *xstrdup(const char *s);
 char *xsprintf(const char *fmt, ...);
 void die(const char *fmt, ...);
+void die_resource(const char *fmt, ...);   /* resource abort: 'resource limit: ...', exit 70 */
 
 /* ---------------- surface syntax ---------------- */
 

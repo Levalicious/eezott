@@ -26,7 +26,7 @@ static Post *posts; static int nposts, pcap;
 static int *undo; static int nundo, ucap;
 
 int meta_new(Val *ty, int ctxn, const char **names, int line) {
-    if (ntmetas == mcap) { mcap = mcap ? 2 * mcap : 64; tmetas = realloc(tmetas, mcap * sizeof(Meta)); if (!tmetas) die("out of memory"); }
+    if (ntmetas == mcap) { mcap = mcap ? 2 * mcap : 64; tmetas = realloc(tmetas, mcap * sizeof(Meta)); if (!tmetas) die_resource("out of memory"); }
     Meta *m = &tmetas[ntmetas]; memset(m, 0, sizeof *m);
     m->ty = ty; m->ctxn = ctxn; m->line = line;
     m->names = xalloc((ctxn + 1) * sizeof(char *));
@@ -53,7 +53,7 @@ void meta_rollback(MMark m) {
     if (nposts > m.p) nposts = m.p;
 }
 void meta_postpone(int depth, Val *a, Val *b) {
-    if (nposts == pcap) { pcap = pcap ? 2 * pcap : 16; posts = realloc(posts, pcap * sizeof(Post)); if (!posts) die("out of memory"); }
+    if (nposts == pcap) { pcap = pcap ? 2 * pcap : 16; posts = realloc(posts, pcap * sizeof(Post)); if (!posts) die_resource("out of memory"); }
     posts[nposts].depth = depth; posts[nposts].a = a; posts[nposts].b = b; nposts++;
 }
 
@@ -105,7 +105,7 @@ static Term *ren_vars(Term *t, Ren *r, int d) {
 static void solve(int id, Term *body, int k, int *isi) {
     for (int j = k - 1; j >= 0; j--) { Term *l = mk_lam(xsprintf("x%d", j), body, 0); l->isi = isi[j]; body = l; }
     tmetas[id].solt = body; tmetas[id].sol = eval(NULL, body);
-    if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = realloc(undo, ucap * sizeof(int)); if (!undo) die("out of memory"); }
+    if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = realloc(undo, ucap * sizeof(int)); if (!undo) die_resource("out of memory"); }
     undo[nundo++] = id;
 }
 /* Miller pattern unification: the spine must be a pattern (see pattern_spine), the other side is quoted and its free variables renamed to

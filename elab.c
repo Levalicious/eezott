@@ -516,7 +516,7 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             Val *dom = force(hty->dom);
             if (dom->k == V_NEU && dom->h == H_META) {
                 int id = meta_new(dom, c->n, c->names, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
-                dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die("out of memory");
+                dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die_resource("out of memory");
                 dnums[ndnums].term = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
                 head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
                 continue;
@@ -1338,7 +1338,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         ctx_bind(&c, params[i].name, eval(c.env, ptys[i]));
     }
     int d0 = ndatas;
-    datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die("out of memory");
+    datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die_resource("out of memory");
     for (int i = 0; i < n; i++) {
         SDecl *s = ms[i];
         Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.nparams = nparams; D.ptys = ptys;
@@ -1467,17 +1467,17 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         for (int q = nparams - 1; q >= 0; q--) { closed = mk_pi(params[q].name, ptys[q], closed, !C.bparams); closed->imp = 1; }   /* the parameters are implicit */
         C.ty = closed;
         int cid = ncons;
-        cons = realloc(cons, (ncons + 1) * sizeof(Con)); if (!cons) die("out of memory");
+        cons = realloc(cons, (ncons + 1) * sizeof(Con)); if (!cons) die_resource("out of memory");
         cons[ncons++] = C;
         Data *DD = &datas[d];
-        DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die("out of memory");
+        DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die_resource("out of memory");
         DD->cons[DD->ncons++] = cid;
       }
     }
     cur_data = -1; cur_data_hi = -1;
     /* every term of the block, for solving the metas and deciding polymorphism */
     int nt = 0, cap = 64; Term **ts = xalloc(cap * sizeof(Term *)); Term ***slots = xalloc(cap * sizeof(Term **)); int *isty = xalloc(cap * sizeof(int));
-    #define SLOT(p) do { if (nt == cap) { cap *= 2; ts = realloc(ts, cap * sizeof(Term *)); slots = realloc(slots, cap * sizeof(Term **)); isty = realloc(isty, cap * sizeof(int)); if (!ts || !slots || !isty) die("out of memory"); } slots[nt] = &(p); isty[nt] = 0; ts[nt++] = (p); } while (0)
+    #define SLOT(p) do { if (nt == cap) { cap *= 2; ts = realloc(ts, cap * sizeof(Term *)); slots = realloc(slots, cap * sizeof(Term **)); isty = realloc(isty, cap * sizeof(int)); if (!ts || !slots || !isty) die_resource("out of memory"); } slots[nt] = &(p); isty[nt] = 0; ts[nt++] = (p); } while (0)
     for (int i = 0; i < nparams; i++) SLOT(ptys[i]);
     for (int i = 0; i < n; i++) {
         Data *DD = &datas[d0 + i];
@@ -1557,7 +1557,7 @@ static void elab_def(SDecl *s) {
         int d = native_type_data(D.vty, s->line, s->name);
         D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback);
     }
-    defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die("out of memory");
+    defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die_resource("out of memory");
     defs[ndefs++] = D;
 }
 
