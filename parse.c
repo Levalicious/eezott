@@ -31,7 +31,7 @@ typedef enum { TK_EOF, TK_NAME, TK_NUM, TK_LP, TK_RP, TK_LB, TK_RB, TK_COLON, TK
                TK_DEF, TK_DATA, TK_WHERE, TK_LET, TK_IN, TK_ELIM, TK_U, TK_I, TK_I0, TK_I1,
                TK_PATHP, TK_PATH, TK_PARTIAL, TK_TRANSP, TK_HCOMP, TK_COMP, TK_SUB, TK_INS, TK_OUTS,
                TK_COMMA, TK_SIGMA, TK_FST, TK_SND, TK_GLUE, TK_GLUEEL, TK_UNGLUE,
-               TK_LBRACE, TK_RBRACE, TK_LEVEL, TK_LZERO, TK_LSUC, TK_LMAX, TK_MUTUAL, TK_END } TokKind;
+               TK_LBRACE, TK_RBRACE, TK_LEVEL, TK_LZERO, TK_LSUC, TK_LMAX, TK_MUTUAL, TK_END, TK_NATIVE } TokKind;
 typedef struct { TokKind k; const char *s; int n; int line; } Tok;
 
 static Tok *toks; static int ntoks, tcap, pos; static const char *file;
@@ -71,7 +71,7 @@ static void lex(const char *src) {
             #define KW(str, kind) if (n == (int)strlen(str) && !strncmp(s, str, n)) { addtok(kind, s, n, line); continue; }
             KW("def", TK_DEF) KW("data", TK_DATA) KW("where", TK_WHERE) KW("let", TK_LET) KW("in", TK_IN) KW("elim", TK_ELIM)
             KW("U", TK_U) KW("I", TK_I) KW("i0", TK_I0) KW("i1", TK_I1)
-            KW("Level", TK_LEVEL) KW("lzero", TK_LZERO) KW("lsuc", TK_LSUC) KW("lmax", TK_LMAX) KW("mutual", TK_MUTUAL) KW("end", TK_END)
+            KW("Level", TK_LEVEL) KW("lzero", TK_LZERO) KW("lsuc", TK_LSUC) KW("lmax", TK_LMAX) KW("mutual", TK_MUTUAL) KW("end", TK_END) KW("native", TK_NATIVE)
             KW("PathP", TK_PATHP) KW("Path", TK_PATH) KW("Partial", TK_PARTIAL) KW("transp", TK_TRANSP) KW("hcomp", TK_HCOMP) KW("comp", TK_COMP) KW("Sub", TK_SUB) KW("inS", TK_INS) KW("outS", TK_OUTS) KW("Sigma", TK_SIGMA) KW("fst", TK_FST) KW("snd", TK_SND) KW("Glue", TK_GLUE) KW("glue", TK_GLUEEL) KW("unglue", TK_UNGLUE)
             #undef KW
             addtok(TK_NAME, s, n, line); continue;
@@ -89,7 +89,7 @@ static const char *tokname(TokKind k) {
                                "'~'", "'/\\'", "'\\/'",
                                "'def'", "'data'", "'where'", "'let'", "'in'", "'elim'", "'U'", "'I'", "'i0'", "'i1'",
                                "'PathP'", "'Path'", "'Partial'", "'transp'", "'hcomp'", "'comp'", "'Sub'", "'inS'", "'outS'", "','", "'Sigma'", "'fst'", "'snd'", "'Glue'", "'glue'", "'unglue'",
-                               "'{'", "'}'", "'Level'", "'lzero'", "'lsuc'", "'lmax'", "'mutual'", "'end'" };
+                               "'{'", "'}'", "'Level'", "'lzero'", "'lsuc'", "'lmax'", "'mutual'", "'end'", "'native'" };
     return n[k];
 }
 static Tok *expect(TokKind k) {
@@ -152,8 +152,9 @@ static STerm *parse_atom(void) {
     case TK_NAME: { next(); if (t->n == 1 && t->s[0] == '_') return st(S_HOLE, t->line); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
     case TK_NUM: {
         next(); STerm *r = st(S_NUM, t->line);
+        r->digits = tokstr(t);
         errno = 0; r->num = strtoull(tokstr(t), NULL, 10);
-        if (errno == ERANGE) die("%s:%d: the numeral %s is too large", file, t->line, tokstr(t));
+        if (errno == ERANGE) r->num = ULLONG_MAX;   /* only a level needs the machine word; a literal of a data type is a bignum */
         return r; }
     case TK_U: { next(); STerm *r = st(S_U, t->line); r->lvl = 0;
                  if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); }
@@ -300,7 +301,8 @@ SDecl *parse_program(const char *src, const char *fname) {
     while (peek()->k != TK_EOF) {
         Tok *t = next();
         SDecl *d = xalloc(sizeof *d); d->line = t->line;
-        if (t->k == TK_DEF) {
+        if (t->k == TK_DEF || t->k == TK_NATIVE) {
+            d->isnative = t->k == TK_NATIVE;
             d->name = tokstr(expect(TK_NAME));
             int n; SBinder *b = parse_binders(&n);
             expect(TK_COLON); STerm *ty = parse_term();
@@ -321,7 +323,7 @@ SDecl *parse_program(const char *src, const char *fname) {
             if (d->nmembers == 0) die("%s:%d: an empty mutual block", file, t->line);
             expect(TK_END);
             if (d->nmembers == 1) { SDecl *m = d->members[0]; m->params = d->params; m->nparams = d->nparams; m->next = NULL; d = m; }   /* one member: a plain data type */
-        } else die("%s:%d: expected 'def', 'data' or 'mutual', found %s", file, t->line, tokname(t->k));
+        } else die("%s:%d: expected 'def', 'native', 'data' or 'mutual', found %s", file, t->line, tokname(t->k));
         *tail = d; tail = &d->next;
     }
     return head;

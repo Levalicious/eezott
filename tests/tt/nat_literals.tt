@@ -1,0 +1,17 @@
+-- M15: literals are values in the checker; the prelude's arithmetic is native on them
+def five : Nat := add 2 3
+def p1 : Id Nat five 5 := refl
+def p2 : Id Nat (suc (suc 3)) 5 := refl
+def p3 : Id Nat (pow 2 64) 18446744073709551616 := refl
+def p4 : Id Nat (mod (mul 18446744073709551615 18446744073709551615) 18446744073709551616) 1 := refl
+def p5 : Id Nat (div 7 0) 0 := refl
+def p6 : Id Nat (mod 7 0) 7 := refl
+def p7 : Id Nat (blt 3 5) 1 := refl
+def p8 : Id Nat (sub 3 5) 0 := refl
+def p9 : (x : Nat) -> Id Nat (add zero x) x := \x -> refl
+def dbl : Nat -> Nat := \n -> elim Nat (\_ -> Nat) zero (\k ih -> suc (suc ih)) n
+def p10 : Id Nat (dbl 21) 42 := refl
+def v3 : Vec Nat 3 := cons 2 7 (cons 1 8 (cons 0 9 nil))
+def p11 : Id (Vec Nat (suc 2)) v3 v3 := refl
+def big : Nat := pow 3 100
+def main : Nat := add 2 3

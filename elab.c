@@ -178,7 +178,7 @@ static Term *inst_tele(Term *t, int n, Term **vs, int k) {
     }
     default:
         r = mk_term(t->k, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k), inst_tele(t->d, n, vs, k));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
     }
 }
 static Term *E_con_spine(Term *t, EInfo *I, int depth) {
@@ -258,7 +258,7 @@ static Term *E(Term *t, EInfo *I, int depth) {
     }
     default:
         r = mk_term(t->k, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth), E(t->d, I, depth));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
     }
 }
 /* the boundary of C at an endpoint of its single interval: the body of the branch whose face holds there (under [params, args]) */
@@ -290,7 +290,7 @@ static Term *remap(Term *t, int n, const int *map, int d) {
         return r;
     default:
         r = mk_term(t->k, remap(t->a, n, map, d), remap(t->b, n, map, d), remap(t->c, n, map, d), remap(t->d, n, map, d));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; return r;
+        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
     }
 }
 /* the motive of a member is run-time content when hcomp is a formal element of it */
@@ -916,24 +916,48 @@ int peano_shape(int d, int *zero, int *suc) {
 static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
     int zi, si;
     if (ty->k == V_LEVEL) {   /* a numeral is also a constant level */
-        if (s->num > 1000000) die("line %d: the level %llu is too large", s->line, s->num);
+        if (s->num > 1000000) die("line %d: the level %s is too large", s->line, s->digits);
         return mk_lval(lv_add(BASE_LEVEL(c), (int)s->num));
     }
     if (ty->k != V_DATA || ty->args.n != 0 || !peano_shape(ty->n, &zi, &si))
-        die("line %d: the numeral %llu needs a type shaped like the naturals (a nullary constructor and one with a single recursive argument), not %s", s->line, s->num, show(c, ty));
-    Term *zero = mk_ref_l(T_CON, zi, mk_lval(ty->lvl)), *suc = mk_ref_l(T_CON, si, mk_lval(ty->lvl)), *D = mk_ref_l(T_DATA, ty->n, mk_lval(ty->lvl));
-    unsigned long long n = s->num;
-    if (n == 0) return zero;
-    if (n == 1) return mk_app(suc, zero, 0);
-    int K = 0; for (unsigned long long m = n; m; m >>= 1) K++;
+        die("line %d: the numeral %s needs a type shaped like the naturals (a nullary constructor and one with a single recursive argument), not %s", s->line, s->digits, show(c, ty));
+    Bn *n = bn_from_dec(s->digits);
+    if (!n) die("line %d: malformed numeral %s", s->line, s->digits);
+    return mk_num(ty->n, mk_lval(ty->lvl), n);   /* a literal value in the checker (M15); erasure spells it out (numeral_term) */
+}
+
+Term *numeral_term(int d, Term *lt, const Bn *n) {
+    int zi, si;
+    if (!peano_shape(d, &zi, &si)) die("internal: a literal of a type not shaped like the naturals");
+    Term *zero = mk_ref_l(T_CON, zi, lt), *suc = mk_ref_l(T_CON, si, lt), *D = mk_ref_l(T_DATA, d, lt);
+    if (bn_is_zero(n)) return zero;
+    int K = bn_bitlen(n);
+    if (K == 1) return mk_app(suc, zero, 0);
     Term *body = zero;
-    for (int i = 0; i < K; i++) if (n >> i & 1) body = mk_app(mk_var(K - 1 - i), body, 0);
-    for (int i = K - 1; i >= 0; i--) {
-        char *name = xalloc(32); snprintf(name, 32, "s%llu", 1ULL << i);
+    for (int i = 0; i < K; i++) if (bn_bit(n, i)) body = mk_app(mk_var(K - 1 - i), body, 0);
+    for (int i = K - 1; i >= 0; i--) {   /* s_i doubles s_{i-1}: s_i = \x -> s_{i-1} (s_{i-1} x), s_0 = suc */
+        char *name = xalloc(32); snprintf(name, 32, "s%d", i);
         Term *val = i == 0 ? suc : mk_lam("x", mk_app(mk_var(1), mk_app(mk_var(1), mk_var(0), 0), 0), 0);
         body = mk_let(name, mk_pi("_", D, D, 0), val, body, 0);
     }
     return body;
+}
+
+/* the type of a native definition: D -> D -> D for a data type D shaped like the naturals; returns D */
+static int native_type_data(Val *vty, int line, const char *name) {
+    Val *t = force(vty);
+    int zi, si;
+    if (t->k != V_PI || t->imp || t->irr || t->isi) goto bad;
+    Val *dom = force(t->dom);
+    if (dom->k != V_DATA || dom->args.n != 0 || !peano_shape(dom->n, &zi, &si)) goto bad;
+    Val *cod = force(inst(&t->clo, vvar(0)));
+    if (cod->k != V_PI || cod->imp || cod->irr || cod->isi || !conv(1, cod->dom, dom)) goto bad;
+    Val *res = force(inst(&cod->clo, vvar(1)));
+    if (!conv(2, res, dom)) goto bad;
+    return dom->n;
+bad:
+    die("line %d: native %s: the type must be D -> D -> D for a data type D shaped like the naturals", line, name);
+    return -1;
 }
 static Term *check(Ctx *c, STerm *s, Val *ty) {
     ty = force(ty);
@@ -1057,6 +1081,7 @@ static int mentions_hidden_but_block(Term *t, int lo, int hi) {
     case T_LVAL: return lv_mentions_hidden(t->lvl);
     case T_DATA: case T_ELIM: return (t->n >= lo && t->n < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
     case T_CON: return (cons[t->n].data >= lo && cons[t->n].data < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
+    case T_NUM: return (t->n >= lo && t->n < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
     case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_hidden_but_block(t->br[i].face, lo, hi) || mentions_hidden_but_block(t->br[i].body, lo, hi)) return 1; return 0;
     default: return mentions_hidden_but_block(t->a, lo, hi) || mentions_hidden_but_block(t->b, lo, hi) || mentions_hidden_but_block(t->c, lo, hi) || mentions_hidden_but_block(t->d, lo, hi);
     }
@@ -1082,7 +1107,7 @@ static int mentions_range(Term *t, int lo, int hi) {
     if (!t) return 0;
     switch (t->k) {
     case T_DATA: return t->n >= lo && t->n < hi;
-    case T_VAR: case T_U: case T_DEF: case T_CON: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
+    case T_VAR: case T_U: case T_DEF: case T_CON: case T_NUM: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
     case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_range(t->br[i].face, lo, hi) || mentions_range(t->br[i].body, lo, hi)) return 1; return 0;
     default: return mentions_range(t->a, lo, hi) || mentions_range(t->b, lo, hi) || mentions_range(t->c, lo, hi) || mentions_range(t->d, lo, hi);
     }
@@ -1438,6 +1463,13 @@ static void elab_def(SDecl *s) {
     D.vty = eval(NULL, D.poly ? subst_hidden(ty, lv_const(0)) : ty);
     D.vval = eval(NULL, D.poly ? subst_hidden(val, lv_const(0)) : val);
     D.irr = is_type_like(0, D.vty);
+    if (s->isnative) {   /* computes by a kernel primitive on literals, by its body otherwise */
+        int code = native_code(s->name);
+        if (!code) die("line %d: native %s: not a kernel primitive (add sub mul div mod pow beq blt ble)", s->line, s->name);
+        if (D.poly) die("line %d: native %s: a native definition takes no level", s->line, s->name);
+        int d = native_type_data(D.vty, s->line, s->name);
+        D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback);
+    }
     defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die("out of memory");
     defs[ndefs++] = D;
 }

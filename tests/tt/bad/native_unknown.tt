@@ -1,0 +1,1 @@
+native foo : Nat -> Nat -> Nat := \m n -> m

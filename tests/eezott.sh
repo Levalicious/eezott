@@ -40,6 +40,10 @@ checkN() {      # file: a program whose main is a higher inductive value; its ru
     local a b; a=$(run_typed "$1" "" ""); b=$(run_typed "$1" "" "-N")
     if [ "$a" = "$b" ] && [ "${a#TYPECHECK_ERROR}" = "$a" ] && [ "${a#EEZOC_ERROR}" = "$a" ]; then pass "$1 = its normal form (eezott -N)"; else fail "$1 = its normal form (eezott -N)" "$b" "$a"; fi
 }
+checkNF() {     # file name value: the checker's normal form of the definition (eezott -n), printed as a decimal literal (M15)
+    local got; got=$(cat "$TT/prelude.tt" "$TT/$1" | "$EEZOTT" -c -n "$2" 2>&1 >/dev/null | grep "^$2 = ")
+    if [ "$got" = "$2 = $3" ]; then pass "$1: $2 = $3 (eezott -n)"; else fail "$1: $2 = $3 (eezott -n)" "$2 = $3" "$got"; fi
+}
 check() {       # file kind value
     local want; want=$(oracle "$2" "$3")
     for mode in "" "-n"; do
@@ -130,9 +134,32 @@ checkN nf_vec_hcomp.tt
 checkN nf_route.tt
 checkN nf_glue_comp.tt
 
+# M15: literals are kernel values, the prelude's arithmetic is native on them
+check   nat_literals.tt   nat 5
+checkNF nat_literals.tt   big 515377520732011331036461129765621272702107522001
+checkNF nat_literals.tt   five 5
+check   nat_native_div.tt nat 14
+check   nat_native_mod.tt nat 2
+check   nat_native_pow.tt nat 81
+check   nat_native_sub.tt nat 6
+check   nat_native_lt.tt  nat 3
+check   nat_native_eq.tt  nat 1
+checkN  nat_native_div.tt
+checkN  nat_native_mod.tt
+checkN  nat_native_pow.tt
+checkN  nat_native_sub.tt
+checkN  nat_native_lt.tt
+checkN  nat_native_eq.tt
+
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
     if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+done
+
+# self-contained programs that must be rejected (no prelude: they use the prelude's names in ways the prelude forbids)
+for f in "$TT"/badalone/*.tt; do
+    name=badalone/$(basename "$f")
+    if "$EEZOTT" -c < "$f" >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
 done
 
 for f in "$TT"/check/*.tt; do
