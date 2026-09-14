@@ -341,6 +341,7 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
     case T_DATA: fprintf(f, "%s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_CON: fprintf(f, "%s", cons[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
+    case T_IRR: fputc('.', f); break;
     case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
     case T_LVAL: lv_tp(f, t->lvl, names, depth, prec); break;
     case T_INTERVAL: fputs("I", f); break;
@@ -784,6 +785,9 @@ static Val *elim_reduce(int data, VList *args) {
             continue;
         }
         if (!c->args[j].isrec) continue;
+        /* a method that does not mention its induction hypothesis does not get one computed: a case analysis on a literal
+           (isZero, pred, if01 ..) would otherwise recurse down to zero (M16a) */
+        if (c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn && !term_mentions_var(res->clo.t, 0)) { res = vapp(res, target->args.a[np + j].v, 0); continue; }
         Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
         for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
         for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);
@@ -948,9 +952,13 @@ Val *vpapp(Val *p, Val *r, Val *x, Val *y) {
     die("internal: path application to a non-path value");
     return NULL;
 }
+Val *pair_snd(Val *p) {
+    if (!p->b) p->b = p->clo.fn ? p->clo.fn(p->clo.data, NULL) : eval(p->clo.env, p->clo.t);
+    return p->b;
+}
 Val *vproj(Val *p, int which) {
     p = force(p);
-    if (p->k == V_PAIR) return which == 1 ? p->a : p->b;
+    if (p->k == V_PAIR) return which == 1 ? p->a : pair_snd(p);
     if (p->k == V_SYS) {
         VBranch *br = xalloc((p->nbr + 1) * sizeof(VBranch));
         for (int i = 0; i < p->nbr; i++) { br[i].phi = p->br[i].phi; br[i].v = vproj(p->br[i].v, which); }
@@ -1010,8 +1018,14 @@ Val *eval(Env *env, Term *t) {
     case T_TRANSP: return vtransp(eval(env, t->a), eval(env, t->b), eval(env, t->c));
     case T_HCOMP: return vhcomp(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
     case T_SUB: { Val *v = mkval(V_SUB); v->a = eval(env, t->a); v->b = eval(env, t->b); v->c = eval(env, t->c); return v; }
-    case T_SIGMA: { Val *v = mkval(V_SIGMA); v->name = t->name; v->dom = eval(env, t->a); v->clo.env = env; v->clo.t = t->b; return v; }
-    case T_PAIR: { Val *v = mkval(V_PAIR); v->a = eval(env, t->a); v->b = eval(env, t->b); return v; }
+    case T_SIGMA: { Val *v = mkval(V_SIGMA); v->name = t->name; v->irr = t->irr; v->dom = eval(env, t->a); v->clo.env = env; v->clo.t = t->b; return v; }
+    case T_PAIR: {
+        Val *v = mkval(V_PAIR); v->irr = t->irr; v->n = t->n; v->a = eval(env, t->a);
+        if (t->irr) { v->b = NULL; v->clo.env = env; v->clo.t = t->b; }   /* lazy: forced by snd only */
+        else v->b = eval(env, t->b);
+        return v;
+    }
+    case T_IRR: return mkval(V_IRR);
     case T_FST: return vproj(eval(env, t->a), 1);
     case T_SND: return vproj(eval(env, t->a), 2);
     case T_GLUE: { Val *g = vglue(eval(env, t->a), eval(env, t->b), eval(env, t->c)); if (g->k == V_GLUE) g->lvl = t->d ? eval_level(env, t->d) : lv_const(t->n); return g; }
@@ -1064,7 +1078,12 @@ Val *subst_val(Val *v, int lv, IVal s) {
     case V_SUB: { Val *r = mkval(V_SUB); r->a = subst_val(v->a, lv, s); r->b = subst_val(v->b, lv, s); r->c = subst_val(v->c, lv, s); return r; }
     case V_INS: { Val *r = mkval(V_INS); r->a = subst_val(v->a, lv, s); return r; }
     case V_SIGMA: { Val *r = mkval(V_SIGMA); *r = *v; r->dom = subst_val(v->dom, lv, s); subst_clo(&r->clo, &v->clo, lv, s); return r; }
-    case V_PAIR: { Val *r = mkval(V_PAIR); r->a = subst_val(v->a, lv, s); r->b = subst_val(v->b, lv, s); return r; }
+    case V_PAIR: {
+        Val *r = mkval(V_PAIR); r->irr = v->irr; r->n = v->n; r->a = subst_val(v->a, lv, s);
+        if (v->b) r->b = subst_val(v->b, lv, s); else { r->b = NULL; subst_clo(&r->clo, &v->clo, lv, s); }
+        return r;
+    }
+    case V_IRR: return v;
     case V_SYS: {
         VBranch *br = xalloc((v->nbr + 1) * sizeof(VBranch));
         for (int i = 0; i < v->nbr; i++) { br[i].phi = subst_val(v->br[i].phi, lv, s); br[i].v = subst_val(v->br[i].v, lv, s); }
@@ -1275,6 +1294,19 @@ static int sides_all_con(Val *u, int con) {
     return ui->k == V_CON && ui->n == con;
 }
 
+/* the lazily transported / composed irrelevant component of a pair (M16a); the argument is unused */
+static Val *transp_snd_thunk(void *data, Val *unused) {
+    (void)unused; Caps *cp = data; Val *line = cp->v[0], *phi = cp->v[1], *u0 = cp->v[2], *aline = cp->v[3];
+    Val *fst = vproj(u0, 1);
+    return vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, fst)), phi, vproj(u0, 2));
+}
+static Val *hcomp_snd_thunk(void *data, Val *unused) {
+    (void)unused; Caps *cp = data; Val *A = cp->v[0], *phi = cp->v[1], *u = cp->v[2], *u0 = cp->v[3], *ufst = cp->v[4];
+    Val *fst = vproj(u0, 1);
+    Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
+    Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, fst);
+    return vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill), phi, usnd, vproj(u0, 2));
+}
 Val *vtransp(Val *line, Val *phi, Val *u0) {
     if (iv_is_one(phi->iv)) return u0;
     u0 = force(u0);
@@ -1310,10 +1342,13 @@ Val *vtransp(Val *line, Val *phi, Val *u0) {
     case V_SIGMA: {
         /* (transp A φ (fst p), transp (λi. B_i (fill i)) φ (snd p)) with fill the transport filler of the first component */
         Val *aline = vnative(N_LINE_DOM, 0, 0, 0, 1, line);
-        Val *fst = vproj(u0, 1), *snd = vproj(u0, 2);
-        Val *res = mkval(V_PAIR);
+        Val *fst = vproj(u0, 1);
+        Val *res = mkval(V_PAIR); res->irr = u0->irr; res->n = u0->n;
         res->a = vtransp(aline, phi, fst);
-        res->b = vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, fst)), phi, snd);
+        if (u0->irr) {   /* lazily: the proof is transported only if it is ever projected */
+            Caps *cp = xalloc(sizeof *cp); cp->n = 4; cp->v[0] = line; cp->v[1] = phi; cp->v[2] = u0; cp->v[3] = aline;
+            res->b = NULL; res->clo.fn = transp_snd_thunk; res->clo.data = cp;
+        } else res->b = vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, fst)), phi, vproj(u0, 2));
         return res;
     }
     case V_DATA: {
@@ -1409,12 +1444,18 @@ Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
     }
     case V_SIGMA: {
         /* (hcomp A φ (fst u) (fst u0), comp (λi. B (hfill A φ (fst u) (fst u0) i)) φ (snd u) (snd u0)) */
-        Val *ufst = vnative(N_SYS_PROJ, -1, 0, 0, 1, u), *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
-        Val *fst = vproj(u0, 1), *snd = vproj(u0, 2);
-        Val *res = mkval(V_PAIR);
+        Val *ufst = vnative(N_SYS_PROJ, -1, 0, 0, 1, u);
+        Val *fst = vproj(u0, 1);
+        Val *res = mkval(V_PAIR); res->irr = u0->irr; res->n = u0->n;
         res->a = vhcomp(A->dom, phi, ufst, fst);
-        Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, fst);
-        res->b = vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill), phi, usnd, snd);
+        if (u0->irr) {
+            Caps *cp = xalloc(sizeof *cp); cp->n = 5; cp->v[0] = A; cp->v[1] = phi; cp->v[2] = u; cp->v[3] = u0; cp->v[4] = ufst;
+            res->b = NULL; res->clo.fn = hcomp_snd_thunk; res->clo.data = cp;
+        } else {
+            Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
+            Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, fst);
+            res->b = vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill), phi, usnd, vproj(u0, 2));
+        }
         return res;
     }
     case V_GLUE: return hcomp_glue(A, phi, u, u0);
@@ -1640,8 +1681,12 @@ Term *quote(int depth, Val *v) {
     case V_PARTIAL: return mk_term(T_PARTIAL, quote(depth, v->a), quote(depth, v->b), NULL, NULL);
     case V_SUB: return mk_term(T_SUB, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
     case V_INS: return mk_term(T_INS, quote(depth, v->a), NULL, NULL, NULL);
-    case V_SIGMA: { Term *t = mk_term(T_SIGMA, quote(depth, v->dom), quote(depth + 1, inst(&v->clo, vvar(depth))), NULL, NULL); t->name = v->name ? v->name : "_"; return t; }
-    case V_PAIR: return mk_term(T_PAIR, quote(depth, v->a), quote(depth, v->b), NULL, NULL);
+    case V_SIGMA: { Term *t = mk_term(T_SIGMA, quote(depth, v->dom), quote(depth + 1, inst(&v->clo, vvar(depth))), NULL, NULL); t->name = v->name ? v->name : "_"; t->irr = v->irr; return t; }
+    case V_PAIR: {   /* an irrelevant component is elided from the normal form */
+        Term *t = mk_term(T_PAIR, quote(depth, v->a), v->irr ? mk_term(T_IRR, NULL, NULL, NULL, NULL) : quote(depth, v->b), NULL, NULL);
+        t->irr = v->irr; t->n = v->n; return t;
+    }
+    case V_IRR: return mk_term(T_IRR, NULL, NULL, NULL, NULL);
     case V_GLUE: { Term *t = mk_term(T_GLUE, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL); if (!lv_is_const(v->lvl, &t->n)) t->d = quote_level(depth, v->lvl); return t; }
     case V_GLUEEL: return mk_term(T_GLUEEL, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
     case V_SYS: {
@@ -1734,14 +1779,18 @@ static int conv1(int depth, Val *a, Val *b) {
         Val *fb = b->k == V_LAM ? inst(&b->clo, x) : vapp(b, x, 0);
         return conv(depth + 1, fa, fb);
     }
-    if (a->k == V_PAIR || b->k == V_PAIR) return conv(depth, vproj(a, 1), vproj(b, 1)) && conv(depth, vproj(a, 2), vproj(b, 2));   /* eta */
+    if (a->k == V_IRR || b->k == V_IRR) die("internal: an elided irrelevant value reached conversion");
+    if (a->k == V_PAIR || b->k == V_PAIR) {   /* eta; an irrelevant second component is not compared */
+        int irr = (a->k == V_PAIR && a->irr) || (b->k == V_PAIR && b->irr);
+        return conv(depth, vproj(a, 1), vproj(b, 1)) && (irr || conv(depth, vproj(a, 2), vproj(b, 2)));
+    }
     if (a->k != b->k) return 0;
     switch (a->k) {
     case V_U: return a->pre == b->pre && lv_enforce_eq(a->lvl, b->lvl) == 1;
     case V_L: return lv_enforce_eq(a->lvl, b->lvl) == 1;
     case V_LEVEL: return 1;
     case V_SIGMA: {
-        if (!conv(depth, a->dom, b->dom)) return 0;
+        if (a->irr != b->irr || !conv(depth, a->dom, b->dom)) return 0;
         Val *x = vvar(depth);
         return conv(depth + 1, inst(&a->clo, x), inst(&b->clo, x));
     }

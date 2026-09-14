@@ -19,7 +19,14 @@
  */
 #include "tt.h"
 
-typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; } Ctx;
+typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; int irrpos; } Ctx;
+/* irrpos > 0: the term being checked is in an irrelevant position (the argument of an irrelevant binder, the irrelevant component
+   of a pair): the irrelevant component of a pair may be projected only there (M16a; Abel's rule - a type's relevant argument
+   positions are not irrelevant positions) */
+int word_type = -1, word_nat = -1;
+static const char *wordop_names[] = { "wadd", "wsub", "wmul", "wand", "wor", "wxor", "wshl", "wshr", "weq", "wlt", "waddc", "wsubb", "wmull", "wdivmod" };
+int wordop_code(const char *name) { for (int i = 0; i < 14; i++) if (!strcmp(name, wordop_names[i])) return i + 1; return 0; }
+const char *wordop_name(int code) { return wordop_names[code - 1]; }
 /* abs: the global being elaborated declares Level binders, so its constant levels are absolute (U is U 0);
    otherwise constants are relative to the hidden level L (U n is U {L + n}) */
 #define BASE_LEVEL(c) ((c)->abs ? lv_const(0) : lv_hidden())
@@ -517,13 +524,17 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             continue;
         }
         if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
+        if (hty->irr) c->irrpos++;
         Term *a = check(c, args[i], hty->dom);
+        if (hty->irr) c->irrpos--;
         head = mk_app(head, a, hty->irr);
         hty = inst(&hty->clo, eval(c->env, a));
     }
     *ty = hty; return head;
 }
 
+static int is_word_type(Ctx *c, Val *ty);
+static void check_wordop_type(int code, Val *vty, int line, const char *name);
 static void need_args(STerm *h, int n, int want, const char *what) {
     if (n < want) die("line %d: %s needs %d argument%s", h->line, what, want, want == 1 ? "" : "s");
 }
@@ -717,7 +728,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             Term *body = check_type(c, args[1]->a, &lb);
             ctx_pop(c);
             B = body;
-            Term *t = mk_term(T_SIGMA, A, B, NULL, NULL); t->name = args[1]->binders[0].name;
+            Term *t = mk_term(T_SIGMA, A, B, NULL, NULL); t->name = args[1]->binders[0].name; t->irr = args[1]->irrel;
             return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
         }
         Val *bty; Term *bt = infer(c, args[1], &bty);
@@ -726,14 +737,17 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
         Val *cod = inst(&bty->clo, vvar(c->n));
         if (cod->k != V_U || cod->pre) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
         lb = cod->lvl;
-        Term *t = mk_term(T_SIGMA, A, mk_app(shift(bt, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x";
+        Term *t = mk_term(T_SIGMA, A, mk_app(shift(bt, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x"; t->irr = args[1]->irrel;
         return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
     }
     case S_FST: case S_SND: {
         need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
         Val *pty; Term *p = infer(c, args[0], &pty);
         if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", args[0]->line, show(c, pty));
+        if (h->k == S_SND && pty->irr && !c->irrpos)
+            die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
         Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
+        if (is_word_type(c, pty)) t->n = 1;
         Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
         return app_spine(c, args + 1, n - 1, t, rty, ty);
     }
@@ -913,8 +927,20 @@ int peano_shape(int d, int *zero, int *suc) {
 /* the numeral n at a type shaped like the naturals, as a term of size O(log n):
      let s1 := suc in let s2 := \x -> s1 (s1 x) in ... in s_{2^k} (... (s_{2^j} zero))
    one let per bit of n, applied along the bits that are set */
+/* the registered word type? (a closed irrelevant Sigma: pointer identity first, conversion otherwise) */
+static int is_word_type(Ctx *c, Val *ty) {
+    if (word_type < 0 || ty->k != V_SIGMA || !ty->irr) return 0;
+    return ty == defs[word_type].vval || conv(c->n, ty, defs[word_type].vval);
+}
+
 static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
     int zi, si;
+    if (is_word_type(c, ty)) {   /* a numeral at the word type: the pair (n, refl), its bound decided by the kernel */
+        STerm *pr = xalloc(sizeof *pr), *r = xalloc(sizeof *r);
+        r->k = S_VAR; r->name = "refl"; r->line = s->line;
+        pr->k = S_PAIR; pr->line = s->line; pr->a = s; pr->b = r;
+        return check(c, pr, ty);
+    }
     if (ty->k == V_LEVEL) {   /* a numeral is also a constant level */
         if (s->num > 1000000) die("line %d: the level %s is too large", s->line, s->digits);
         return mk_lval(lv_add(BASE_LEVEL(c), (int)s->num));
@@ -941,6 +967,29 @@ Term *numeral_term(int d, Term *lt, const Bn *n) {
         body = mk_let(name, mk_pi("_", D, D, 0), val, body, 0);
     }
     return body;
+}
+
+/* the type of a word operation: Word -> Word -> R, with R = Word (arithmetic), a data type of two nullary constructors (weq wlt:
+   the first is true, K at run time), or Sigma Word (\_ -> Word) (waddc wsubb wmull wdivmod) */
+static void check_wordop_type(int code, Val *vty, int line, const char *name) {
+    Val *W = defs[word_type].vval;
+    Val *t = force(vty);
+    if (t->k != V_PI || t->imp || t->irr || t->isi || !conv(0, force(t->dom), W)) goto bad;
+    Val *cod = force(inst(&t->clo, vvar(0)));
+    if (cod->k != V_PI || cod->imp || cod->irr || cod->isi || !conv(1, force(cod->dom), W)) goto bad;
+    Val *res = force(inst(&cod->clo, vvar(1)));
+    if (code <= 8) { if (!conv(2, res, W)) goto bad; }
+    else if (code <= 10) {
+        if (res->k != V_DATA || res->args.n != 0 || datas[res->n].ncons != 2) goto bad;
+        for (int i = 0; i < 2; i++) { Con *C = &cons[datas[res->n].cons[i]]; if (C->nargs || C->nint) goto bad; }
+    } else {
+        if (res->k != V_SIGMA || res->irr || !conv(2, force(res->dom), W)) goto bad;
+        if (!conv(3, force(inst(&res->clo, vvar(2))), W)) goto bad;
+    }
+    return;
+bad:
+    die("line %d: word %s: the type must be Word -> Word -> %s", line, name,
+        code <= 8 ? "Word" : code <= 10 ? "B for a data type B of two nullary constructors" : "Sigma Word (\\_ -> Word)");
 }
 
 /* the type of a native definition: D -> D -> D for a data type D shaped like the naturals; returns D */
@@ -1037,8 +1086,12 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
     if (s->k == S_PAIR) {
         if (ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", s->line, show(c, ty));
         Term *a = check(c, s->a, ty->dom);
+        if (ty->irr) c->irrpos++;
         Term *b = check(c, s->b, inst(&ty->clo, eval(c->env, a)));
-        return mk_term(T_PAIR, a, b, NULL, NULL);
+        if (ty->irr) c->irrpos--;
+        Term *t = mk_term(T_PAIR, a, b, NULL, NULL); t->irr = ty->irr;
+        if (is_word_type(c, ty)) t->n = 1;
+        return t;
     }
     if (s->k == S_SYS) return check_system(c, s, ty);
     Val *got; Term *t = infer(c, s, &got); got = force(got);
@@ -1463,6 +1516,22 @@ static void elab_def(SDecl *s) {
     D.vty = eval(NULL, D.poly ? subst_hidden(ty, lv_const(0)) : ty);
     D.vval = eval(NULL, D.poly ? subst_hidden(val, lv_const(0)) : val);
     D.irr = is_type_like(0, D.vty);
+    if (s->isword) {   /* M16a: the word type, or an operation on it (registered at level 0; a type is polymorphic like any other) */
+        if (D.vty->k == V_U) {
+            if (word_type >= 0) die("line %d: word %s: the word type is already declared (%s)", s->line, s->name, defs[word_type].name);
+            Val *w = force(D.vval); int zi, si;
+            Val *dom = w->k == V_SIGMA ? force(w->dom) : NULL;
+            if (!dom || !w->irr || dom->k != V_DATA || dom->args.n != 0 || !peano_shape(dom->n, &zi, &si))
+                die("line %d: word %s: the word type must be Sigma D .(P) for a data type D shaped like the naturals and an irrelevant P", s->line, s->name);
+            D.isword = 1; word_type = ndefs; word_nat = dom->n;
+        } else {
+            int code = wordop_code(s->name);
+            if (!code) die("line %d: word %s: not a run-time word primitive (wadd wsub wmul wand wor wxor wshl wshr weq wlt waddc wsubb wmull wdivmod)", s->line, s->name);
+            if (word_type < 0) die("line %d: word %s: declare the word type first (word Word : U := Sigma D .(P))", s->line, s->name);
+            check_wordop_type(code, D.vty, s->line, s->name);
+            D.wordop = code;
+        }
+    }
     if (s->isnative) {   /* computes by a kernel primitive on literals, by its body otherwise */
         int code = native_code(s->name);
         if (!code) die("line %d: native %s: not a kernel primitive (add sub mul div mod pow beq blt ble)", s->line, s->name);

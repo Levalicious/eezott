@@ -1,0 +1,1 @@
+def f : (p : Word) -> Lt (fst p) M64 := \p -> snd p

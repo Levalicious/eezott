@@ -80,6 +80,7 @@ typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
     int imp;                          /* an argument written {e}: it supplies the next implicit argument */
+    int irrel;                        /* an argument written .e: Sigma A .B declares its second component irrelevant (M16a) */
     const char *name;                 /* S_VAR name; S_ELIM data name; S_LET bound name */
     int lvl;                          /* S_U: a constant level (when a is NULL) */
     unsigned long long num;           /* S_NUM: a numeral as a machine word (levels); ULLONG_MAX if it does not fit */
@@ -93,7 +94,7 @@ struct STerm {
 };
 typedef struct { const char *name; STerm *ty; STerm *boundary; int line; } SCon;   /* boundary: a system, for path constructors */
 typedef struct SDecl {
-    int isdata, isnative; const char *name; int line;   /* isnative: a 'native' definition (M15) */
+    int isdata, isnative, isword; const char *name; int line;   /* isnative: a 'native' definition (M15); isword: a 'word' one (M16a) */
     SBinder *params; int nparams;     /* data: parameters; def: binder sugar folded into ty/val */
     STerm *ty;                        /* def: type; data: index telescope ending in U */
     STerm *val;                       /* def */
@@ -120,7 +121,8 @@ typedef enum { T_VAR, T_U, T_PI, T_LAM, T_APP, T_LET, T_DEF, T_DATA, T_CON, T_EL
                T_INTERVAL, T_I0, T_I1, T_IAND, T_IOR, T_INEG,
                T_PATHP, T_PAPP, T_PARTIAL, T_SYS, T_TRANSP, T_HCOMP, T_SUB, T_INS, T_OUTS,
                T_SIGMA, T_PAIR, T_FST, T_SND, T_GLUE, T_GLUEEL, T_UNGLUE,
-               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA, T_LVAL, T_META, T_NUM } TKind;
+               T_LEVEL, T_LZERO, T_LSUC, T_LMAX, T_LMETA, T_LVAL, T_META, T_NUM, T_IRR } TKind;
+/* T_IRR: an elided irrelevant value (the irrelevant component of a quoted pair): printed as '.', erased to tc_u, never compared */
 typedef struct Term Term;
 typedef struct { Term *face, *body; } TBranch;
 struct Term {
@@ -215,7 +217,7 @@ const char *lstore_bad_constraint(void);       /* the constraint lstore_solve fo
 /* ---------------- values ---------------- */
 
 typedef enum { V_LAM, V_PI, V_U, V_NEU, V_DATA, V_CON, V_INTERVAL, V_I, V_PATHP, V_PARTIAL, V_SYS, V_SUB, V_INS, V_SIGMA, V_PAIR, V_GLUE, V_GLUEEL,
-               V_LEVEL, V_L, V_NUM } VKind;
+               V_LEVEL, V_L, V_NUM, V_IRR } VKind;
 typedef struct Val Val;
 typedef struct Env { Val *v; struct Env *next; } Env;
 typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y; proj: 1 fst, 2 snd */
@@ -240,7 +242,10 @@ struct Val {
                            V_GLUE: a=A b=phi c=Te; V_GLUEEL: a=ts b=a c=the Glue type; V_NEU/H_UNGLUE: a=A b=phi c=Te dom=b */
     VBranch *br; int nbr; /* V_SYS */
     Bn *num;            /* V_NUM: a literal of the data type n at the level lvl (M15) */
+    /* V_PAIR with irr: the second component is lazy - b is NULL until pair_snd forces the closure clo (a term under its
+       environment, or a native thunk called with NULL); it is never compared and quotes to T_IRR (M16a) */
 };
+Val *pair_snd(Val *p);
 
 void vl_push(VList *l, Val *v, int irr);
 void vl_push_arg(VList *l, Arg a);
@@ -296,7 +301,8 @@ int term_mentions_meta(Term *t, int id);
 /* ---------------- globals ---------------- */
 
 typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly;
-                 int native; Val *vfallback; } Def;   /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
+                 int native; Val *vfallback;          /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
+                 int isword, wordop; } Def;           /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
@@ -354,6 +360,14 @@ Val *vnum(int d, LVal l, Bn *n);
 Val *num_view(Val *v);                              /* zero, or suc applied to the literal below */
 int native_code(const char *name);                  /* 1.. for add sub mul div mod pow eq lt le; 0 otherwise */
 Val *native_wrapper(int code, int d, Val *fallback);
+/* M16a: machine words in the theory. 'word Word : U := Sigma D .(P)' registers the word type (D shaped like the naturals, P
+   irrelevant); 'word wadd : Word -> Word -> Word := body' registers an operation the erasure emits as the run-time primitive of
+   that name, its body being the specification the checker computes by. Pairs and projections at the word type erase to the
+   machine representation (a literal pair to Nw, a pair to tt_nattoword, fst to tt_wtonat). On T_PAIR/T_FST/T_SND the field n
+   is 1 at the word type. */
+extern int word_type, word_nat;                     /* the registered word type's definition and its data type; -1 if none */
+int wordop_code(const char *name);                  /* 1 + the XBCL primitive's index (wadd wsub wmul wand wor wxor wshl wshr weq wlt waddc wsubb wmull wdivmod), 0 if none */
+const char *wordop_name(int code);
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */

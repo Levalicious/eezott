@@ -94,8 +94,13 @@ static void erase(Term *t, int depth) {
     case T_LET:
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
-    case T_DEF: fprintf(out, "tt_%s", defs[t->n].name); break;
+    case T_DEF:
+        if (defs[t->n].wordop) fputs(wordop_name(defs[t->n].wordop), out);   /* a word operation is its run-time primitive */
+        else if (defs[t->n].isword) fputs("tc_u", out);                     /* the word type: a machine word normalizes to itself */
+        else fprintf(out, "tt_%s", defs[t->n].name);
+        break;
     case T_NUM: erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
+    case T_IRR: fputs("tc_u", out); break;
     case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
@@ -122,9 +127,21 @@ static void erase(Term *t, int depth) {
     case T_INS: erase(t->a, depth); break;
     case T_OUTS: erase(t->d, depth); break;
     case T_SIGMA: fputs("tc_sigma(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
-    case T_PAIR: fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
-    case T_FST: fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
-    case T_SND: fputs("tt_snd(", out); erase(t->a, depth); fputc(')', out); break;
+    case T_PAIR:
+        if (t->n) {   /* at the word type: the machine word */
+            if (t->a->k == T_NUM) { char *s = bn_to_dec(t->a->num); fprintf(out, "%sw", s); free(s); }
+            else { fputs("tt_nattoword(", out); erase(t->a, depth); fputc(')', out); }
+            break;
+        }
+        fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out);
+        if (t->irr) fputs("tc_u", out); else erase(t->b, depth);   /* an irrelevant component has no run-time content */
+        fputc(')', out); break;
+    case T_FST:
+        if (t->n) { fputs("tt_wtonat(", out); erase(t->a, depth); fputc(')', out); break; }
+        fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
+    case T_SND:
+        if (t->n) { fputs("tc_u", out); break; }
+        fputs("tt_snd(", out); erase(t->a, depth); fputc(')', out); break;
     case T_GLUE: fputs("tc_glue(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_GLUEEL: fputs("tt_glue(", out); erase(t->c->b, depth); fputs(")(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
     case T_UNGLUE: fputs("tt_unglue(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputs(")(", out); erase(t->a, depth); fputc(')', out); break;
@@ -402,6 +419,7 @@ static void emit_block_recs(Data *B) {
 
 /* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and codes */
 static int *def_used, *data_used;
+static int uses_words;   /* the program has words: the conversions between Scott naturals and machine words are emitted */
 static void mark(Term *t);
 /* a data type is used with its whole block: the members' eliminators and codes refer to each other */
 static void mark_data(int d) {
@@ -416,8 +434,14 @@ static void mark_data(int d) {
 static void mark(Term *t) {
     if (!t) return;
     switch (t->k) {
-    case T_DEF: if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); } break;
+    case T_DEF:
+        if (defs[t->n].wordop) { uses_words = 1; break; }   /* the primitive stands for it: its body is not emitted */
+        if (defs[t->n].isword) break;
+        if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); }
+        break;
     case T_NUM: mark(numeral_term(t->n, t->a, t->num)); break;
+    case T_PAIR: if (t->n) uses_words = 1; mark(t->a); if (!t->irr) mark(t->b); break;
+    case T_FST: case T_SND: if (t->n) uses_words = 1; mark(t->a); break;
     case T_CON: mark_data(cons[t->n].data); break;
     case T_ELIM: case T_DATA: mark_data(t->n); break;
     case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
@@ -498,6 +522,10 @@ void erase_program(FILE *f) {
     /* the printed value: a normalizer per code (tt_nf c x); data types reduce path constructors at endpoints through their
        boundaries and keep formal compositions; functions are printed as they are */
     fputs("tt_nf := c -> x -> c(m -> h -> n -> n)(c)(x)\n", out);
+    if (uses_words) {   /* M16a: between the Scott naturals and the machine words */
+        fputs("tt_nattoword := fix(self -> n -> n(0w)(k -> wadd(self(k))(1w)))\n", out);
+        fputs("tt_wtonat := fix(self -> w -> weq(w)(0w)(h0 -> h1 -> h0)(h0 -> h1 -> h1(self(wsub(w)(1w)))))\n", out);
+    }
     fputs("tt_nf_id := c -> x -> x\n", out);
     fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)(tt_nf_id)\n", out);
     fputs("tt_dom := c -> c(m -> h -> n -> d -> b -> d)\n", out);
