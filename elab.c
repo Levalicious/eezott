@@ -79,7 +79,7 @@ static int term_binders(Term *t) {
     x = term_binders(t->c); if (x > m) m = x;
     x = term_binders(t->d); if (x > m) m = x;
     for (int i = 0; i < t->nbr; i++) { x = term_binders(t->br[i].face); if (x > m) m = x; x = term_binders(t->br[i].body); if (x > m) m = x; }
-    return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET);
+    return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET || t->k == T_SIGMA);   /* a Sigma binds its codomain's variable too */
 }
 static const char *show(Ctx *c, Val *v) {
     Term *t = quote(c->n, v);
