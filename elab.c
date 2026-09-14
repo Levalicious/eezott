@@ -1562,7 +1562,15 @@ static void elab_def(SDecl *s) {
     if (s->isnative) {   /* computes by a kernel primitive on literals, by its body otherwise */
         int code = native_code(s->name);
         if (!code) die("line %d: native %s: not a kernel primitive (add sub mul div mod pow beq blt ble)", s->line, s->name);
-        if (D.poly) die("line %d: native %s: a native definition takes no level", s->line, s->name);
+        if (D.poly) {
+            if (getenv("EEZOTT_POLY_TRACE")) {
+                const char *names[1024];
+                fprintf(stderr, "[poly] %s: ty_hidden=%d val_hidden=%d\n", s->name, term_mentions_hidden(ty), term_mentions_hidden(val));
+                fprintf(stderr, "[poly] ty  = "); term_print(stderr, ty, names, 0); fputc('\n', stderr);
+                fprintf(stderr, "[poly] val = "); term_print(stderr, val, names, 0); fputc('\n', stderr);
+            }
+            die("line %d: native %s: a native definition takes no level", s->line, s->name);
+        }
         int d = native_type_data(D.vty, s->line, s->name);
         D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback);
     }
