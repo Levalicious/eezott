@@ -34,6 +34,13 @@ def t12 : Path Nat (add (wbval (snd (waddGo (lcons 18446744073709551615 (lcons 1
                       (mul (wlimb (fst (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))
                            (wpow (wlen (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))))) 680564733841876926926749214863536422910 :=
   fst (waddGo_val (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (prefl Nat 2))
+-- the comparison at closed instances: the smaller head decides, and equal heads hand over to the tails
+def t13 : Path Nat (wltGoN (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))) 1 :=
+  wltGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2)
+def t14 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word})))) 0 :=
+  wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2)
+def t15 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word})))) 1 :=
+  wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word}))) (prefl Nat 2)
 -- the limbs of a 2-limb result, for the run-time check
 def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
 -- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
