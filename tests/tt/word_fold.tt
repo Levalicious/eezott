@@ -1,0 +1,25 @@
+#import word
+-- the Word-limb fold at closed instances: the kernel's bignum computes both sides, refl checks them.
+-- The fold is stated for lists of the SAME length, and that is its alignment: a column pairs the two heads and
+-- the carry comes back from the tail, so the digits line up right (the tails are the less significant ends) only
+-- when the limbs are. Unequal lengths are left-aligned - the shorter operand's limbs land in the most significant
+-- slots - which is what badd's padTo avoids in the Nat layer and what the value law will assume away.
+-- The type-level instances carry the big literals; the RUN-TIME check takes a word out, because the harness's nat
+-- oracle builds a Scott numeral and so only speaks for small numbers, while a word prints as itself.
+def wlen : WB -> Nat := elim List (\_ -> Nat) 0 (\_ r ih -> suc ih)
+def wpow : Nat -> Nat := elim Nat (\_ -> Nat) 1 (\_ ih -> mul ih M64)
+-- the fold's value, carry included: the result's limbs plus the carry out one position above them
+def fv (r : Sigma Word (\_ -> WB)) : Nat := add (wbval (snd r)) (mul (wlimb (fst r)) (wpow (wlen (snd r))))
+def t1 : Path Nat (fv (waddGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 4 (lnil {Word}))))) 73786976294838206470 := prefl Nat 73786976294838206470
+-- the carry out of the top column, and its ripple through a limb below
+def t2 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 0 (lnil {Word}))))) 340282366920938463481821351505477763071 := prefl Nat 340282366920938463481821351505477763071
+def t3 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 1 (lnil {Word}))))) 340282366920938463481821351505477763072 := prefl Nat 340282366920938463481821351505477763072
+def t4 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))) 680564733841876926926749214863536422910 := prefl Nat 680564733841876926926749214863536422910
+-- three limbs: the carry crosses a limb that does not move
+def t5 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word})))) (lcons 1 (lcons 0 (lcons 0 (lnil {Word})))))) 6277101735386680764176071790128604879565730051895802724351 := prefl Nat 6277101735386680764176071790128604879565730051895802724351
+-- a carry that dies at the top: the carry out is 0 and the limbs below it are not
+def t6 : Path Nat (fv (waddGo (lcons 0 (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word})))) (lcons 0 (lcons 0 (lcons 1 (lnil {Word})))))) 340282366920938463463374607431768211456 := prefl Nat 340282366920938463463374607431768211456
+-- the limbs of a 2-limb result, for the run-time check
+def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
+-- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
+def main : Word := wlast (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 0 (lnil {Word})))))
