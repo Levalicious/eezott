@@ -576,6 +576,7 @@ void erase_program(FILE *f) {
         } else {
             Def *d = &defs[fi++];
             if (!def_used[d - defs]) continue;
+            cur_decl_name = d->name;   /* erasure unfolds redexes, and an inductive lemma at a literal walks it */
             fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
             if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
             if (!strcmp(d->name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */

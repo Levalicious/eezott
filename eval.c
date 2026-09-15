@@ -811,9 +811,12 @@ static Val *elim_reduce(int data, VList *args) {
     Val *target = force(args->a[args->n - 1].v);
     if (target->k != V_NUM) return elim_reduce_go(data, args);
     int bits = bn_bitlen(target->num);
-    if (bits > 40 && elim_num_depth > 64)
-        die_resource("elimination of %s recursed %d deep on a literal of ~2^%d bits in %s: the induction hypothesis is used, so this is work proportional to the literal",
-                     datas[data].name, elim_num_depth, bits, cur_decl_name ? cur_decl_name : "the top level");
+    if (bits > 40 && elim_num_depth > 64) {
+        char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
+        if (strlen(dec) > 40) { dec[40] = 0; }
+        die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
+                     datas[data].name, elim_num_depth, dec, cur_decl_name ? cur_decl_name : "the top level");
+    }
     elim_num_depth++;
     Val *r = elim_reduce_go(data, args);
     elim_num_depth--;

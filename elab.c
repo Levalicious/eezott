@@ -1573,7 +1573,9 @@ static void elab_def(SDecl *s) {
 
 void elab_program(SDecl *decls) {
     for (SDecl *s = decls; s; s = s->next) {
+        cur_decl_name = s->name;
         if (s->isdata == 2) elab_block(s->members, s->nmembers, s->params, s->nparams, s->line);
         else if (s->isdata) elab_data(s); else elab_def(s);
     }
+    cur_decl_name = NULL;
 }
