@@ -22,6 +22,18 @@ def t7 : Path Nat (wbvalAux 5 (lcons 1 (lcons 2 (lnil {Word})))) (add (mul 5 (wp
 -- the column's value law and its carry bound at closed instances: the kernel computes both sides
 def t8 : Path Nat (add (wlimb (snd (wcol 0 18446744073709551615 18446744073709551615))) (mul (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) M64)) 36893488147419103230 := wcol_val 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
 def t9 : Le (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) 1 := wcol_carry_le 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
+-- the fold's value law at a closed instance: the theorem itself computes down to the kernel's arithmetic
+def t10 : Path Nat (add (wbval (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))
+                      (mul (wlimb (fst (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))
+                           (wpow (wlen (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))))) 73786976294838206471 :=
+  fst (waddGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2))
+def t11 : Path Nat (wlen (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word})))))) 2 :=
+  snd (snd (waddGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2)))
+-- the widest limbs, with the carry out: the law at M63 + M63, where the top column carries
+def t12 : Path Nat (add (wbval (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))
+                      (mul (wlimb (fst (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))
+                           (wpow (wlen (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))))) 680564733841876926926749214863536422910 :=
+  fst (waddGo_val (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (prefl Nat 2))
 -- the limbs of a 2-limb result, for the run-time check
 def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
 -- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
