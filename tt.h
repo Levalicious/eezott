@@ -363,6 +363,7 @@ int ref_poly(TKind k, int id);                               /* does the global 
 extern Def *defs; extern int ndefs;
 extern Data *datas; extern int ndatas;
 extern Con *cons; extern int ncons;
+extern const char *cur_decl_name;   /* the declaration being elaborated: named by the literal-elimination tripwire */
 
 int is_type_like(int depth, Val *ty);      /* U or a family into U: computationally irrelevant */
 int peano_shape(int d, int *zero, int *suc);  /* a data type shaped like the naturals, with its zero and successor */

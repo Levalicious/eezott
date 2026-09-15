@@ -800,22 +800,30 @@ static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
 static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
+/* The literal-elimination tripwire. A method that uses its induction hypothesis walks the literal a step at a
+   time, so a walk over a machine-sized literal is work proportional to the literal - 1e19 steps at the word
+   bounds. What it must count is NESTING: a walk nests (the branch forces its induction hypothesis inside this
+   call), while a program that merely uses many literals does not. Counted as a running total instead, the
+   tripwire fires on the 66th innocent use of a literal anywhere in the run, and names an innocent walker. */
+static int elim_num_depth;
+static Val *elim_reduce_go(int data, VList *args);
 static Val *elim_reduce(int data, VList *args) {
+    Val *target = force(args->a[args->n - 1].v);
+    if (target->k != V_NUM) return elim_reduce_go(data, args);
+    int bits = bn_bitlen(target->num);
+    if (bits > 40 && elim_num_depth > 64)
+        die_resource("elimination of %s recursed %d deep on a literal of ~2^%d bits in %s: the induction hypothesis is used, so this is work proportional to the literal",
+                     datas[data].name, elim_num_depth, bits, cur_decl_name ? cur_decl_name : "the top level");
+    elim_num_depth++;
+    Val *r = elim_reduce_go(data, args);
+    elim_num_depth--;
+    return r;
+}
+static Val *elim_reduce_go(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, nb = D->nblock, K = block_ncons(data);
     Val *target = force(args->a[args->n - 1].v);   /* a rigid definition application unfolds for the elimination */
-    if (target->k == V_NUM) {
-        /* an elimination on a literal whose method uses its induction hypothesis is work proportional to the
-           literal - 1e19 steps for the machine-word bounds. Name it rather than overflow the C stack. */
-        static int elim_num_depth;
-        int bits = bn_bitlen(target->num);
-        if (getenv("EEZOTT_ELIM_TRACE") && bits > 40)
-            fprintf(stderr, "[elim] %s on a literal of ~2^%d (depth %d)\n", datas[data].name, bits, elim_num_depth);
-        if (bits > 40 && elim_num_depth > 64)
-            die_resource("elimination of %s recursed %d deep on a literal of ~2^%d bits: the induction hypothesis is used, so this is work proportional to the literal", datas[data].name, elim_num_depth, bits);
-        elim_num_depth++;
-        target = num_view(target);   /* a literal eliminates as one constructor */
-    }
+    if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
     if (target->k != V_CON) { meta_blocked = 1; return NULL; }
     Con *c = con_at(target->n, target->lvl);
     if (c->data != data || target->args.n != np + c->nargs + c->nint) { meta_blocked = 1; return NULL; }

@@ -68,6 +68,7 @@ static Ctx ctx_restrict(Ctx *c, const Face *f) {
 }
 
 static int cur_data = -1, cur_data_hi = -1;   /* the block of data types being declared, [cur_data, cur_data_hi): their occurrences are at the hidden level */
+const char *cur_decl_name;   /* the declaration being elaborated, named by the literal-elimination tripwire */
 #define IN_DECL(d) ((d) >= cur_data && (d) < cur_data_hi)
 static int find_def(const char *n) { for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, n)) return i; return -1; }
 static int find_data(const char *n) { for (int i = ndatas - 1; i >= 0; i--) if (!strcmp(datas[i].name, n)) return i; return -1; }
