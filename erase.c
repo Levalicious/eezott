@@ -495,7 +495,7 @@ void erase_program(FILE *f) {
     for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "main")) mainid = i;
     if (mainid < 0) die("no 'main' definition to run");
     if (defs[mainid].irr) die("'main' is a type; a program must be a value");
-    if (nf_main) defs[mainid].val = quote(0, defs[mainid].vval);   /* the checker's normal form instead of the source (rigid: definitions are opaque values) */
+    if (nf_main) defs[mainid].val = quote(0, nf_force(defs[mainid].vval));   /* the checker's normal form instead of the source (rigid: definitions are opaque values) */
     def_used = xalloc((ndefs + 1) * sizeof(int)); data_used = xalloc((ndatas + 1) * sizeof(int));
     def_used[mainid] = 1; mark(defs[mainid].val); mark(defs[mainid].ty);
     fputs("#import prelude\n", out);

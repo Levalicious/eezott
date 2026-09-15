@@ -176,6 +176,7 @@ checkN  bignat_mul.tt
 checkNF bignat_mul.tt   main 42
 checkNF word_ops.tt      w5 5
 check   word_fold.tt    word 18446744073709551615
+checkN  word_fold.tt
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

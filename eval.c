@@ -1755,6 +1755,17 @@ static Term *quote_iv(int depth, IVal a) {
     }
     return r;
 }
+/* The value a print-out should show. A pair's first component is a word over the naturals and may still be an
+   unforced application - a value is canonical enough for conversion long before it is a printed normal form - so
+   force it through. An irrelevant second component is a proof that prints as '.', and forcing it would mean walking
+   a proof nobody reads. */
+Val *nf_force(Val *v) {
+    v = force(v);
+    if (v->k != V_PAIR) return v;
+    Val *w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; w->a = nf_force(v->a);
+    if (!v->irr) w->b = nf_force(pair_snd(v));
+    return w;
+}
 Term *quote(int depth, Val *v) {
     v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {

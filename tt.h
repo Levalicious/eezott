@@ -272,6 +272,7 @@ Val *vpapp(Val *p, Val *r, Val *x, Val *y);
 Val *vproj(Val *p, int which);
 Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data);
 Term *quote(int depth, Val *v);
+Val *nf_force(Val *v);                         /* the printed normal form: pairs forced through their first component */
 int conv(int depth, Val *a, Val *b);
 Val *inst(Clo *c, Val *v);          /* instantiate a closure */
 Val *restrict_val(Val *v, const Face *f);

@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
     if (nf) {
         int found = 0;
         for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, nf)) {
-            const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, force(defs[i].vval)), names, 0); fputc('\n', stderr); found = 1;
+            const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, nf_force(defs[i].vval)), names, 0); fputc('\n', stderr); found = 1;
         }
         if (!found) die("-n: no definition named '%s'", nf);
     }
