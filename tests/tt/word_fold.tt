@@ -19,6 +19,9 @@ def t5 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 184467440737095
 def t6 : Path Nat (fv (waddGo (lcons 0 (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word})))) (lcons 0 (lcons 0 (lcons 1 (lnil {Word})))))) 340282366920938463463374607431768211456 := prefl Nat 340282366920938463463374607431768211456
 -- the accumulator law at a closed instance: the kernel computes both sides, including the base's weight
 def t7 : Path Nat (wbvalAux 5 (lcons 1 (lcons 2 (lnil {Word})))) (add (mul 5 (wpow 2)) (wbval (lcons 1 (lcons 2 (lnil {Word}))))) := wbvalAux_val (lcons 1 (lcons 2 (lnil {Word}))) 5
+-- the column's value law and its carry bound at closed instances: the kernel computes both sides
+def t8 : Path Nat (add (wlimb (snd (wcol 0 18446744073709551615 18446744073709551615))) (mul (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) M64)) 36893488147419103230 := wcol_val 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
+def t9 : Le (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) 1 := wcol_carry_le 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
 -- the limbs of a 2-limb result, for the run-time check
 def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
 -- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
