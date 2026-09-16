@@ -41,6 +41,9 @@ def t14 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (
   wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2)
 def t15 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word})))) 1 :=
   wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word}))) (prefl Nat 2)
+-- the borrow column at a closed instance: 3 - 5 wraps, and the borrow carries the M64
+def t16 : Path Nat (add (wlimb (fst (wsubb 3 5))) 5) (add 3 (mul (wlimb (snd (wsubb 3 5))) M64)) := wsubb_val 3 5
+def t17 : Path Nat (add (wlimb (fst (wsubb 5 3))) 3) (add 5 (mul (wlimb (snd (wsubb 5 3))) M64)) := wsubb_val 5 3
 -- the limbs of a 2-limb result, for the run-time check
 def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
 -- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
