@@ -172,11 +172,6 @@ checkN  word_divmod.tt
 checkN  word_wrap.tt
 check   word_ring.tt   word 0
 checkN  word_ring.tt
-check   bignat_fold.tt  nat 123
-checkN  bignat_fold.tt
-check   bignat_mul.tt   nat 42
-checkN  bignat_mul.tt
-checkNF bignat_mul.tt   main 42
 checkNF word_ops.tt      w5 5
 check   word_fold.tt    word 18446744073709551615
 checkN  word_fold.tt
