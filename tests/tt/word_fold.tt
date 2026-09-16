@@ -57,6 +57,11 @@ def t19 : let o : Word := 1 in let a : Word := 3 in let b : Word := 5 in
   let o : Word := 1 in let a : Word := 3 in let b : Word := 5 in
   let h : Le (wlimb o) 1 := (0, prefl Nat 1) in
   wsubl_val o a b h
+-- the borrow scan's law at a closed instance: the theorem itself computes both sides
+def t20 : Path Nat (add (wbval (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) (wbval (lcons 3 (lcons 5 (lnil {Word}))))) (add (wbval (lcons 1 (lcons 2 (lnil {Word})))) (mul (wlimb (fst (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) (wpow (wlen (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))))))))) :=
+  fst (wsubGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2))
+def t21 : Path Nat (wlen (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) 2 :=
+  snd (snd (wsubGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2)))
 -- the limbs of a 2-limb result, for the run-time check
 def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
 -- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
