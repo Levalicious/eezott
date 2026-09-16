@@ -61,7 +61,7 @@
 #include <stdarg.h>
 #include <limits.h>
 #include "../libeezo/types.h"
-#include "bn.h"
+#include "../libeezo/bn.h"
 
 void *xalloc(size_t n);
 char *xstrdup(const char *s);
