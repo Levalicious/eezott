@@ -1,0 +1,7 @@
+#import prelude
+-- Lev's modular inverse minv x y = x ^ (y - 2) mod y, at closed instances the kernel's limbs decide, and at a
+-- prime y it inverts: 3 * minv 3 7 = 15 = 2 * 7 + 1. At a composite y it is only the formula's answer (2 ^ 7 mod
+-- 9 = 2, not an inverse), which is why the inverse law will carry primality as a hypothesis.
+def m37 : Nat := minv 3 7
+def m29 : Nat := minv 2 9
+def main : Nat := minv 3 7

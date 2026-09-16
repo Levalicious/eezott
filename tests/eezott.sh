@@ -59,6 +59,9 @@ check() {       # file kind value
     if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
 }
 
+check minv_test.tt     nat 5
+checkNF minv_test.tt m37 5
+checkNF minv_test.tt m29 2
 check not_true.tt      bool false
 check and_or.tt        bool true
 check id_poly.tt       bool true

@@ -728,8 +728,8 @@ Val *num_view(Val *v) {
     Arg ar = {0}; ar.v = vnum(v->n, v->lvl, bn_pred(v->num));
     return neu_app(c, ar);
 }
-static const char *native_names[] = { "add", "sub", "mul", "div", "mod", "pow", "beq", "blt", "ble" };
-int native_code(const char *name) { for (int i = 0; i < 9; i++) if (!strcmp(name, native_names[i])) return i + 1; return 0; }
+static const char *native_names[] = { "add", "sub", "mul", "div", "mod", "pow", "beq", "blt", "ble", "minv" };
+int native_code(const char *name) { for (int i = 0; i < 10; i++) if (!strcmp(name, native_names[i])) return i + 1; return 0; }
 static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     Bn *q, *r;
     switch (code) {
@@ -742,6 +742,11 @@ static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     case 7: return bn_from_u64(bn_cmp(a, b) == 0);
     case 8: return bn_from_u64(bn_cmp(a, b) < 0);
     case 9: return bn_from_u64(bn_cmp(a, b) <= 0);
+    case 10: {   /* the modular inverse x ^ (y - 2) mod y: Fermat, one exponent and one division */
+        Bn *two = bn_from_u64(2), *e = bn_monus(b, two), *q, *r2;
+        bn_divmod(bn_pow(a, e), b, &q, &r2);
+        return r2;
+    }
     }
     die("internal: unknown native %d", code); return NULL;
 }
