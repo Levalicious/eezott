@@ -1,0 +1,6 @@
+#import prelude
+-- M16b: a Nat inside a larger value. The switch's Nat code must be the identity - a limb list normalizes to
+-- itself, exactly as a machine word does - or the normalizer that a container's code runs over its components
+-- would take the list apart. Here the components are 2^64 and 3, and the result is the pair of those two
+-- limb lists
+def main : Sigma Nat (\_ -> Nat) := (18446744073709551616, 3)

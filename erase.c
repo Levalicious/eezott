@@ -176,9 +176,10 @@ static void erase(Term *t, int depth) {
         }
         fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM:
-        if (nat_of(t->n)) die("the Nat type is the run-time limb list (--limbs): elimination on it is not supported yet");
+        if (nat_of(t->n)) die("the Nat type is the run-time limb list (--limbs): an elimination on it is compiled from its whole spine, so it cannot be erased head-first");
         fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
+        if (nat_of(t->n) && nat_limbs) { fputs("tc_u", out); break; }   /* a limb list normalizes to itself, as a machine word does */
         if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
             if (datas[t->n].nblock == 1) fputs("self", out);
             else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }

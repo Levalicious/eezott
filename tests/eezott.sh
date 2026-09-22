@@ -33,6 +33,7 @@ oracle() {      # kind value -> expected bitstring
         nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         big)  printf 'n := %sb;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl -s ;;   # a Nat is the C list of limbs: the oracle is the limb literal (M16b E1), on the limb interpreter
+        pair) printf 'pair := a -> b -> k -> k(a)(b);\nn := pair(%sb)(%sb);\nn\n' "${2%%,*}" "${2#*,}" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl -s ;;   # the erasure's own pair of two limb lists, "A,B"
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
@@ -189,6 +190,7 @@ checkBig limb_mul.tt    big  340282366920938463500268095579187314689
 checkBig limb_divmod.tt big  340282366920938463463374607431768211455
 checkBig limb_pred.tt   big  18446744073709551622
 checkBig limb_zero.tt   bool false
+checkBig nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the component's code is the identity
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do
