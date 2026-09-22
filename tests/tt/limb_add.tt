@@ -1,0 +1,4 @@
+#import prelude
+-- M16b E2: the limb switch (--limbs) makes the Nat the run-time limb list, so a sum above a machine word is
+-- the C list's own arithmetic: 2^64 + 2^128
+def main : Nat := add 18446744073709551616 340282366920938463463374607431768211456

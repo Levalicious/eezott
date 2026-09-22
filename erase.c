@@ -33,9 +33,58 @@
 #include <stdlib.h>
 
 int keep_kan, nf_main;
+/* With --limbs the theory's Nat type IS the run-time limb list (M16b b6): a literal erases to a limb-list
+   literal, zero and suc to the chain's zero and its +1, and the natives to the limb primitives. The switch
+   is program-wide, and what it cannot do yet (elimination on the Nat) it refuses rather than misrunning. */
+int nat_limbs;
+static int nat_data = -1;      /* the prelude's Nat, found once at the first literal */
+static int nat_of(int d) {
+    if (!nat_limbs) return 0;
+    if (nat_data < 0) { for (int i = 0; i < ndatas; i++) if (!strcmp(datas[i].name, "Nat")) { nat_data = i; break; } }
+    return d == nat_data;
+}
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 static void emit_sel(int nb, int m);
+static void erase(Term *t, int depth);
+
+/* The limb switch's view of an elimination on the Nat (M16b C3). A method that uses its induction hypothesis
+   walks the literal one successor per step, and no chunk of a fold is the value that fold's step expects, so
+   there is no walk to make at a limb: that case is refused (the checker leaves the same elimination a neutral
+   rather than walking it - eval.c's chunk rule). A method that does not use its induction hypothesis is a
+   case analysis, and the limb layer answers that at the literal's own granularity: zero by beq n 0, the
+   predecessor by bsub n 1 - one pass over the limbs each - with the method taking a dummy where its
+   induction hypothesis would be, which is exactly the value the checker hands it. */
+static Term *strip_lams(Term *t, int k) {
+    while (t && k > 0 && t->k == T_LAM) { t = t->a; k--; }
+    return k > 0 ? NULL : t;
+}
+static int try_nat_elim(Term *t, int depth) {
+    if (!nat_limbs) return 0;
+    Term *node[8]; int n = 0; Term *h = t;
+    while (h->k == T_APP) { if (n < 8) node[n] = h; n++; h = h->a; }
+    if (h->k != T_ELIM || !nat_of(h->n)) return 0;
+    if (n > 8) die("the Nat type is the run-time limb list (--limbs): this elimination is applied to more arguments than the switch can see through");
+    /* the eliminator's own arguments are the innermost four: the motive (irrelevant, so never emitted), the
+       methods in constructor order, and the scrutinee; anything outside them applies the elimination's result */
+    if (n < 4) die("the Nat type is the run-time limb list (--limbs): an elimination on it must be applied to its motives, methods and scrutinee");
+    int extra = n - 4;
+    Term *mode = node[n - 1]->b, *mz = node[n - 2]->b, *ms = node[n - 3]->b, *scrut = node[n - 4]->b;
+    (void)mode;
+    Term *meth = ms;
+    if (meth->k == T_DEF) meth = defs[meth->n].val;   /* the checker sees through a definition application; so does the switch */
+    Term *body = strip_lams(meth, 2);
+    if (!body || term_mentions_var(body, 0))
+        die("the Nat type is the run-time limb list (--limbs): this method uses its induction hypothesis, so it walks the literal, "
+            "and a walk over a limb list is work proportional to the literal - write the fold with the natives (add, mul, div, ...) instead");
+    fprintf(out, "((v%d -> ", depth);
+    fprintf(out, "beq(v%d)(0b)(", depth); erase(mz, depth + 1);              /* zero: the limb layer's own test */
+    fputs(")(", out); erase(ms, depth + 1); fprintf(out, "(bsub(v%d)(1b))(0b))", depth);   /* suc: the predecessor, and a dummy for the induction hypothesis */
+    fputs(")(", out); erase(scrut, depth); fputs("))", out);
+    for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) { fputc('(', out); erase(node[i]->b, depth); fputc(')', out); }
+    return 1;
+}
+
 
 /* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
 static IVal face_ival(Term *t, int depth) {
@@ -87,6 +136,7 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->a, depth + 1); break; }
         fprintf(out, "(v%d -> ", depth); erase(t->a, depth + 1); fputc(')', out); break;
     case T_APP:
+        if (try_nat_elim(t, depth)) break;   /* the Nat elimination's chunked view (the limb switch) */
         erase(t->a, depth);
         if (!t->irr) { fputc('(', out); erase(t->b, depth); fputc(')', out); }
         break;
@@ -95,14 +145,39 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
     case T_DEF:
+        if (nat_limbs && defs[t->n].native) {   /* a native is the limb primitive (or a wrapper around it) */
+            switch (defs[t->n].native) {
+            case 1: fputs("badd", out); break;
+            case 2: fputs("bsub", out); break;
+            case 3: fputs("bmul", out); break;
+            case 4: fputs("(a -> b -> tt_fst(bdivmod(a)(b)))", out); break;     /* div: the pair's first */
+            case 5: fputs("(a -> b -> tt_snd(bdivmod(a)(b)))", out); break;     /* mod: its second */
+            case 6: fputs("bpow", out); break;
+            case 7: fputs("(a -> b -> beq(a)(b)(1b)(0b))", out); break;         /* the 0/1 the native returns */
+            case 8: fputs("(a -> b -> blt(a)(b)(1b)(0b))", out); break;
+            case 9: fputs("(a -> b -> blt(b)(a)(0b)(1b))", out); break;         /* le is lt with the arms swapped */
+            case 10: fputs("bminv", out); break;
+            default: die("internal: unknown native %d", defs[t->n].native);
+            }
+            break;
+        }
         if (defs[t->n].wordop) fputs(wordop_name(defs[t->n].wordop), out);   /* a word operation is its run-time primitive */
         else if (defs[t->n].isword) fputs("tc_u", out);                     /* the word type: a machine word normalizes to itself */
         else fprintf(out, "tt_%s", defs[t->n].name);
         break;
-    case T_NUM: erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
+    case T_NUM:
+        if (nat_of(t->n)) { char *d = bn_to_dec(t->num); fprintf(out, "%sb", d); free(d); break; }   /* the C list of limbs */
+        erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
     case T_IRR: fputs("tc_u", out); break;
-    case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
-    case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
+    case T_CON:
+        if (nat_of(cons[t->n].data)) {   /* the chain's zero, and one more limb-value as a function */
+            if (strcmp(cons[t->n].name, "zero") == 0) { fputs("0b", out); break; }
+            fputs("(x -> badd(x)(1b))", out); break;
+        }
+        fprintf(out, "tt_c_%s", cons[t->n].name); break;
+    case T_ELIM:
+        if (nat_of(t->n)) die("the Nat type is the run-time limb list (--limbs): elimination on it is not supported yet");
+        fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
         if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
             if (datas[t->n].nblock == 1) fputs("self", out);
@@ -435,11 +510,12 @@ static void mark(Term *t) {
     if (!t) return;
     switch (t->k) {
     case T_DEF:
+        if (nat_limbs && defs[t->n].native) break;   /* the limb primitive stands for it */
         if (defs[t->n].wordop) { uses_words = 1; break; }   /* the primitive stands for it: its body is not emitted */
         if (defs[t->n].isword) break;
         if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); }
         break;
-    case T_NUM: mark(numeral_term(t->n, t->a, t->num)); break;
+    case T_NUM: if (nat_of(t->n)) break; mark(numeral_term(t->n, t->a, t->num)); break;
     case T_PAIR: if (t->n) uses_words = 1; mark(t->a); if (!t->irr) mark(t->b); break;
     case T_FST: case T_SND: if (t->n) uses_words = 1; mark(t->a); break;
     case T_CON: mark_data(cons[t->n].data); break;
@@ -586,6 +662,9 @@ void erase_program(FILE *f) {
     fclose(out);
     /* eezoc reads `defs ; expr`: the separator must follow the last definition on its line */
     if (sz && buf[sz - 1] == '\n') buf[sz - 1] = 0;
-    fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
+    /* Under --limbs a Nat main IS its own normal form (a limb list), so the normalizing wrapper would only
+       apply the list to arguments - skip it. */
+    if (nat_limbs && nat_of(defs[mainid].vty->k == V_DATA ? defs[mainid].vty->n : -1)) fprintf(f, "%s;\ntt_%s\n", buf, defs[mainid].name);
+    else { fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name); }
     free(buf);
 }

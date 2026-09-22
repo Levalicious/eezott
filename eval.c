@@ -809,8 +809,11 @@ static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
    time, so a walk over a machine-sized literal is work proportional to the literal - 1e19 steps at the word
    bounds. What it must count is NESTING: a walk nests (the branch forces its induction hypothesis inside this
    call), while a program that merely uses many literals does not. Counted as a running total instead, the
-   tripwire fires on the 66th innocent use of a literal anywhere in the run, and names an innocent walker. */
+   tripwire fires on the 66th innocent use of a literal anywhere in the run, and names an innocent walker.
+   The chunk rule below keeps almost every walk from starting at all; the tripwire stays as the backstop for
+   the methods whose term cannot be inspected (M16b A2). */
 static int elim_num_depth;
+static int elim_num_big;   /* the elimination under way is on a machine-sized literal: one successor of it is a word of steps */
 static Val *elim_reduce_go(int data, VList *args);
 static Val *elim_reduce(int data, VList *args) {
     Val *target = force(args->a[args->n - 1].v);
@@ -823,7 +826,9 @@ static Val *elim_reduce(int data, VList *args) {
                      datas[data].name, elim_num_depth, dec, cur_decl_name ? cur_decl_name : "the top level");
     }
     elim_num_depth++;
+    int save_big = elim_num_big; elim_num_big = bits > 40;
     Val *r = elim_reduce_go(data, args);
+    elim_num_big = save_big;
     elim_num_depth--;
     return r;
 }
@@ -853,6 +858,11 @@ static Val *elim_reduce_go(int data, VList *args) {
         /* a method that does not mention its induction hypothesis does not get one computed: a case analysis on a literal
            (isZero, pred, if01 ..) would otherwise recurse down to zero (M16a) */
         if (c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn && !term_mentions_var(res->clo.t, 0)) { res = vapp(res, target->args.a[np + j].v, 0); continue; }
+        /* A method that does mention it walks the literal one successor per step, and one successor of a machine-sized
+           literal is a word of steps: no chunk of a fold is the value its step expects, so there is no walk to make
+           here. The elimination stands as a neutral - the same term, just not unfolded - which is what the method's
+           own use of it would compute anyway (M16b A2). */
+        if (elim_num_big && c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn) { meta_blocked = 1; return NULL; }
         Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
         for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
         for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);

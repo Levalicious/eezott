@@ -32,6 +32,7 @@ oracle() {      # kind value -> expected bitstring
         bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        big)  printf 'n := %sb;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl -s ;;   # a Nat is the C list of limbs: the oracle is the limb literal (M16b E1), on the limb interpreter
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
@@ -57,6 +58,11 @@ check() {       # file kind value
     # every transport kept at run time: the run-time Kan rules must agree with the checker's shortcut
     local got; got=$(run_typed "$1" "" "-K")
     if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
+}
+checkBig() {    # file kind value: the same program under the limb switch (eezott -B), on the limb interpreter
+    local want; want=$(oracle "$2" "$3")
+    local got; got=$(run_typed "$1" "-s" "-B")
+    if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B)"; else fail "$1 = $2 $3 (eezott -B)" "$want" "$got"; fi
 }
 
 check minv_test.tt     nat 5
@@ -176,6 +182,14 @@ checkNF word_ops.tt      w5 5
 check   word_fold.tt    word 18446744073709551615
 checkN  word_fold.tt
 
+# M16b: the limb switch. With --limbs the Nat IS the run-time limb list, so a program above a machine word runs
+# on the C list's own arithmetic; the oracle is the same value written as a limb literal
+checkBig limb_add.tt    big  340282366920938463481821351505477763072
+checkBig limb_mul.tt    big  340282366920938463500268095579187314689
+checkBig limb_divmod.tt big  340282366920938463463374607431768211455
+checkBig limb_pred.tt   big  18446744073709551622
+checkBig limb_zero.tt   bool false
+
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
     out=$(tt -c "$f" 2>&1); rc=$?
@@ -205,6 +219,16 @@ for f in "$TT"/unerasable/*.tt; do
     if ! tt -c "$f" >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
     elif tt "$f" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
     else pass "$name typechecks but is refused at erasure"; fi
+done
+
+# what the limb switch has no limb-level meaning for: a fold over the Nat walks the literal, so the switch
+# refuses it (M16b C3). These typecheck and erase in the unswitched theory - only --limbs refuses them
+for f in "$TT"/limbunerasable/*.tt; do
+    [ -e "$f" ] || continue
+    name=limbunerasable/$(basename "$f")
+    if ! tt -c "$f" >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
+    elif tt -B "$f" >/dev/null 2>&1; then fail "$name refused by --limbs" "refusal" "erased"
+    else pass "$name typechecks but is refused by --limbs"; fi
 done
 
 echo "$n cases"
