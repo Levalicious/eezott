@@ -1,0 +1,6 @@
+#import prelude
+-- M16b: a literal's decimal is printed in full and exactly. bn_to_dec's chunk array was sized in bytes where
+-- it holds u64s, four times too small, so every literal of a few hundred limbs overran the heap on the way
+-- out - silently below that, and as "double free or corruption" at this size. The fix is 2026-09-22 and this
+-- is its regression test: 10^12000, one digit and twelve thousand zeros
+def big : Nat := mul (pow 10 6000) (pow 10 6000)

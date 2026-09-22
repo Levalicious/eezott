@@ -189,6 +189,7 @@ checkBig limb_mul.tt    big  340282366920938463500268095579187314689
 checkBig limb_divmod.tt big  340282366920938463463374607431768211455
 checkBig limb_pred.tt   big  18446744073709551622
 checkBig limb_zero.tt   bool false
+checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
