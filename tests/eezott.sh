@@ -193,6 +193,8 @@ checkBig limb_divmod.tt big  340282366920938463463374607431768211455
 checkBig limb_pred.tt   big  18446744073709551622
 checkBig limb_zero.tt   bool false
 checkBig nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the component's code is the identity
+checkBig limb_minv.tt   big 1                           # the inverse of 3 mod 2^127-1, 3 times it is 1
+checkNF  limb_minv.tt   main 1
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do

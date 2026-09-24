@@ -742,11 +742,7 @@ static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     case 7: return bn_from_u64(bn_cmp(a, b) == 0);
     case 8: return bn_from_u64(bn_cmp(a, b) < 0);
     case 9: return bn_from_u64(bn_cmp(a, b) <= 0);
-    case 10: {   /* the modular inverse x ^ (y - 2) mod y: Fermat, one exponent and one division */
-        Bn *two = bn_from_u64(2), *e = bn_monus(b, two), *q, *r2;
-        bn_divmod(bn_pow(a, e), b, &q, &r2);
-        return r2;
-    }
+    case 10: return bn_minv(a, b);   /* the modular inverse: the power is taken modulo y, never built */
     }
     die("internal: unknown native %d", code); return NULL;
 }
