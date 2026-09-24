@@ -195,6 +195,7 @@ checkBig limb_pred.tt   big  18446744073709551622
 checkBig limb_zero.tt   bool false
 checkBig nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the component's code is the identity
 checkBig limb_minv.tt   big 1                           # the inverse of 3 mod 2^127-1, 3 times it is 1
+checkBig limb_double.tt big 36893488147419103232        # a fold with an addition step, compiled to its closed form
 checkNF  limb_minv.tt   main 1
 checkNF  big_pow.tt     main 12157665459056928801
 checkBig big_pow.tt     big 12157665459056928801

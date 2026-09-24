@@ -1,6 +1,0 @@
-#import prelude
--- a fold over the Nat uses its induction hypothesis, so it walks the literal: there is no limb-level meaning to
--- give it (the checker leaves the same elimination a neutral rather than walking). It typeschecks and erases in
--- the unswitched theory - the switch is what refuses it, and refuses it rather than misrun it
-def dbl (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> suc (suc ih)) n
-def main : Nat := dbl 5

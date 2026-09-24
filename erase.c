@@ -59,6 +59,50 @@ static Term *strip_lams(Term *t, int k) {
     while (t && k > 0 && t->k == T_LAM) { t = t->a; k--; }
     return k > 0 ? NULL : t;
 }
+/* The prelude's def with this name, or -1 (the folds below reach for add and mul by name) */
+static int def_named(const char *name) {
+    for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, name)) return i;
+    return -1;
+}
+/* a def applied to arguments, built as a term for the ordinary erasure to emit */
+static Term *mk_defapp(int d, Term **args, int nargs) {
+    Term *t = xalloc(sizeof *t);
+    t->k = T_DEF; t->n = d;
+    for (int i = 0; i < nargs; i++) {
+        Term *ap = xalloc(sizeof *ap);
+        ap->k = T_APP; ap->a = t; ap->b = args[i];
+        t = ap;
+    }
+    return t;
+}
+/* A fold whose step is an addition has a closed form, and stdlib/tt/fold.tt proves it (elim_add): a step
+   that adds w to the running value, taken n times from z, is z + n * w. The successor run suc (suc .. ih)
+   is that step with w the number of successors. Anything else is still refused - a closed form is licensed
+   by a theorem, never guessed - and a step whose w mentions the hypothesis or the predecessor has none.
+   Emits the form and returns 1, or returns 0 and emits nothing. */
+static int nat_fold_closed(Term *body, Term *z, Term *scrut, int depth) {
+    int addd = def_named("add"), muld = def_named("mul"), zi, si;
+    if (addd < 0 || muld < 0 || !peano_shape(nat_data, &zi, &si)) return 0;
+    Term *w = NULL, *jlit = NULL;
+    Term *b = body; int j = 0;
+    while (b->k == T_APP && b->a->k == T_CON && b->a->n == si) { b = b->b; j++; }   /* suc^j ih */
+    if (j > 0 && b->k == T_VAR && b->n == 0) {
+        jlit = xalloc(sizeof *jlit);
+        jlit->k = T_NUM; jlit->n = nat_data; jlit->num = bn_from_u64((u64)j);
+        w = jlit;
+    } else if (body->k == T_APP && body->a->k == T_APP && body->a->a->k == T_DEF && body->a->a->n == addd) {
+        Term *a1 = body->a->b, *a2 = body->b;      /* add a1 a2, with the hypothesis on either side */
+        int h1 = a1->k == T_VAR && a1->n == 0, h2 = a2->k == T_VAR && a2->n == 0;
+        w = h1 ? a2 : (h2 ? a1 : NULL);
+        if (w && (term_mentions_var(w, 0) || term_mentions_var(w, 1))) w = NULL;
+    }
+    if (!w) return 0;
+    Term *mulargs[2] = { scrut, w };
+    Term *mul = mk_defapp(muld, mulargs, 2);
+    Term *addargs[2] = { z, mul };
+    erase(mk_defapp(addd, addargs, 2), depth);     /* add z (mul n w), and the erasure of the natives does the rest */
+    return 1;
+}
 static int try_nat_elim(Term *t, int depth) {
     if (!nat_limbs) return 0;
     Term *node[8]; int n = 0; Term *h = t;
@@ -74,9 +118,16 @@ static int try_nat_elim(Term *t, int depth) {
     Term *meth = ms;
     if (meth->k == T_DEF) meth = defs[meth->n].val;   /* the checker sees through a definition application; so does the switch */
     Term *body = strip_lams(meth, 2);
-    if (!body || term_mentions_var(body, 0))
-        die("the Nat type is the run-time limb list (--limbs): this method uses its induction hypothesis, so it walks the literal, "
-            "and a walk over a limb list is work proportional to the literal - write the fold with the natives (add, mul, div, ...) instead");
+    if (body && term_mentions_var(body, 0)) {
+        /* a fold: the closed form when a theorem licenses one, and the refusal otherwise */
+        if (!nat_fold_closed(body, mz, scrut, depth))
+            die("the Nat type is the run-time limb list (--limbs): this method uses its induction hypothesis, so it walks the literal, "
+                "and a walk over a limb list is work proportional to the literal - write the fold with the natives (add, mul, div, ...) instead");
+        for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) { fputc('(', out); erase(node[i]->b, depth); fputc(')', out); }
+        return 1;
+    }
+    if (!body)
+        die("the Nat type is the run-time limb list (--limbs): an elimination's method must be a function of its predecessor and its induction hypothesis");
     fprintf(out, "((v%d -> ", depth);
     fprintf(out, "beq(v%d)(0b)(", depth); erase(mz, depth + 1);              /* zero: the limb layer's own test */
     fputs(")(", out); erase(ms, depth + 1); fprintf(out, "(bsub(v%d)(1b))(0b))", depth);   /* suc: the predecessor, and a dummy for the induction hypothesis */
