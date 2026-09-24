@@ -60,10 +60,12 @@ check() {       # file kind value
     local got; got=$(run_typed "$1" "" "-K")
     if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
 }
-checkBig() {    # file kind value: the same program under the limb switch (eezott -B), on the limb interpreter
+checkBig() {    # file kind value: the same program under the limb switch (eezott -B), on every evaluator
     local want; want=$(oracle "$2" "$3")
-    local got; got=$(run_typed "$1" "-s" "-B")
-    if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B)"; else fail "$1 = $2 $3 (eezott -B)" "$want" "$got"; fi
+    for mode in "-s" "" "-n"; do
+        local got; got=$(run_typed "$1" "$mode" "-B")
+        if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B ${mode:--s})"; else fail "$1 = $2 $3 (eezott -B ${mode:--s})" "$want" "$got"; fi
+    done
 }
 
 check minv_test.tt     nat 5
