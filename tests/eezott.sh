@@ -63,8 +63,9 @@ check() {       # file kind value
 checkBig() {    # file kind value: the same program under the limb switch (eezott -B), on every evaluator
     local want; want=$(oracle "$2" "$3")
     for mode in "-s" "" "-n"; do
+        local label=${mode:-stg}
         local got; got=$(run_typed "$1" "$mode" "-B")
-        if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B ${mode:--s})"; else fail "$1 = $2 $3 (eezott -B ${mode:--s})" "$want" "$got"; fi
+        if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B $label)"; else fail "$1 = $2 $3 (eezott -B $label)" "$want" "$got"; fi
     done
 }
 
@@ -195,6 +196,12 @@ checkBig limb_zero.tt   bool false
 checkBig nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the component's code is the identity
 checkBig limb_minv.tt   big 1                           # the inverse of 3 mod 2^127-1, 3 times it is 1
 checkNF  limb_minv.tt   main 1
+checkNF  big_pow.tt     main 12157665459056928801
+checkBig big_pow.tt     big 12157665459056928801
+# a number the machine can only denote: the power is refused by its size, not allocated towards
+out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
+if printf '%s' "$out" | grep -q 'resource limit'; then pass "big_pow.tt: an unholdable power is refused"
+else fail "big_pow.tt: an unholdable power is refused" "resource limit: ..." "$out"; fi
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do
