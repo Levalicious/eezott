@@ -1,0 +1,15 @@
+#import prelude
+#import nat
+-- M17 phase 1: the laws a denoted number leans on, proved in the theory. pow_add merges two powers of one
+-- base, pow_mul flattens a tower; both are facts about the definition, not about any representation. The
+-- three uses below are on open terms - where no reduction can help - and the last turns the laws against
+-- the natives themselves at 47000 digits.
+def merged : (a b : Nat) -> Path Nat (mul (pow a b) (pow a b)) (pow a (add b b)) :=
+  \a b -> sym Nat (pow a (add b b)) (mul (pow a b) (pow a b)) (pow_add a b b)
+def flattened : (b c : Nat) -> Path Nat (pow (pow 2 b) c) (pow 2 (mul b c)) := \b c -> pow_mul 2 b c
+def merged_a : (a b c : Nat) -> Path Nat (mul (mul (pow a b) (pow a c)) (pow a c)) (pow a (add (add b c) c)) :=
+  \a b c -> sym Nat (pow a (add (add b c) c)) (mul (mul (pow a b) (pow a c)) (pow a c))
+    (compPath Nat (pow a (add (add b c) c)) (mul (pow a (add b c)) (pow a c)) (mul (mul (pow a b) (pow a c)) (pow a c))
+       (pow_add a (add b c) c)
+       (cong Nat Nat (\x -> mul x (pow a c)) (pow a (add b c)) (mul (pow a b) (pow a c)) (pow_add a b c)))
+def at_scale : Path Nat (mul (pow 3 100000) (pow 3 100000)) (pow 3 200000) := prefl Nat (pow 3 200000)
