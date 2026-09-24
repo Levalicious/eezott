@@ -751,7 +751,15 @@ static Val *natfn(void *data, Val *arg) {
     NatNative *nn = data;
     if (!nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *nn; m->arg1 = arg; return vlam_native("n", natfn, m); }
     Val *a = force(nn->arg1), *b = force(arg);
-    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) {
+        /* pow is the one native whose result may be a number no limb list can hold (M17). When it is, the
+           kernel does not compute it: the definition's own fold takes over, and over a machine-sized
+           literal that fold is the neutral the chunk rule leaves. So the checker STATES such a power -
+           the runtimes denote it, as a value of their own kind - and neither invents a number. */
+        if (nn->code == 6 && !bn_fits_pow(a->num, b->num))
+            return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
+        return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    }
     return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
 }
 Val *native_wrapper(int code, int d, Val *fallback) {

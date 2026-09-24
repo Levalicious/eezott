@@ -198,10 +198,12 @@ checkBig limb_minv.tt   big 1                           # the inverse of 3 mod 2
 checkNF  limb_minv.tt   main 1
 checkNF  big_pow.tt     main 12157665459056928801
 checkBig big_pow.tt     big 12157665459056928801
-# a number the machine can only denote: the power is refused by its size, not allocated towards
+# a number no limb list can hold is not refused: the kernel states it as the definition's own fold, the
+# neutral the chunk rule leaves (M17). The runtimes denote it, each as a value of its own kind
 out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
-if printf '%s' "$out" | grep -q 'resource limit'; then pass "big_pow.tt: an unholdable power is refused"
-else fail "big_pow.tt: an unholdable power is refused" "resource limit: ..." "$out"; fi
+case "$out" in *"elim Nat"*"18446744073709551616"*)
+    pass "big_pow.tt: an unholdable power is stated, not refused";;
+  *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = elim Nat ... 18446744073709551616" "$out";; esac
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do

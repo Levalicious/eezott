@@ -1,0 +1,8 @@
+#import prelude
+#import nat
+-- M17: the pow laws apply at machine scale, over a power no limb list can hold - the checker reasons
+-- about the number without computing it, and nothing here is evaluated into limbs at all
+def big_law : Path Nat (mul (pow 3 (pow 2 64)) (pow 3 (pow 2 64))) (pow 3 (add (pow 2 64) (pow 2 64))) :=
+  sym Nat (pow 3 (add (pow 2 64) (pow 2 64))) (mul (pow 3 (pow 2 64)) (pow 3 (pow 2 64))) (pow_add 3 (pow 2 64) (pow 2 64))
+def stated : Nat := elim Nat (\_ -> Nat) 1 (\k ih -> mul 3 ih) 18446744073709551616
+def stated_typechecks : Path Nat stated (pow 3 18446744073709551616) := prefl Nat (pow 3 18446744073709551616)
