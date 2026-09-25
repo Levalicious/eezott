@@ -203,7 +203,7 @@ checkNF limb_minv.tt main 1
 checkNF big_pow.tt   main 12157665459056928801
 check big_pow.tt     chain 12157665459056928801
 # a number no limb list can hold is not refused: the kernel states it as the definition's own fold, the
-# neutral the chunk rule leaves (M17). The runtimes denote it, each as a value of its own kind
+# neutral the chunk rule leaves (M17)
 out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
 case "$out" in *"elim Nat"*"18446744073709551616"*)
     pass "big_pow.tt: an unholdable power is stated, not refused";;
