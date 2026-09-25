@@ -253,6 +253,7 @@ struct Val {
        the spine length the memo was taken at (neu_app lengthens spines) and unf_mv the metas version (a meta solved
        after the memo can unstick a reduction, so any assignment or rollback invalidates). */
     Val *unf; int unf_n; int unf_mv; int unf_stable;
+    Val *par;           /* the neutral this one extends by its last spine entry (neu_app): unfold_def reuses its unfolding */
 };
 Val *pair_snd(Val *p);
 

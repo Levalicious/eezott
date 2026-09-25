@@ -713,6 +713,7 @@ Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data) { Val 
 static Val *neu_app(Val *f, Arg a) {
     Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a);
     v->unf = NULL; v->unf_n = 0; v->unf_mv = 0;   /* a longer spine: the copied memo, if any, does not apply */
+    v->par = f;                                    /* but the parent's does, for all but the last entry */
     return v;
 }
 
@@ -746,6 +747,7 @@ static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     }
     die("internal: unknown native %d", code); return NULL;
 }
+static char last_fallback[2][64]; static int last_fallback_code;
 typedef struct { int code, d; Val *fallback, *arg1; } NatNative;
 static Val *natfn(void *data, Val *arg) {
     NatNative *nn = data;
@@ -759,6 +761,18 @@ static Val *natfn(void *data, Val *arg) {
         if (nn->code == 6 && !bn_fits_pow(a->num, b->num))
             return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
         return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    }
+    if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the last native that fell back to its body, for the tripwire's diagnostic */
+        Val *x[2] = { a, b };
+        for (int i = 0; i < 2; i++) {
+            Val *v = x[i]; int k = 0; char *d = NULL;
+            while (v->k == V_CON && v->args.n == 1 && k < 100000) { v = force(v->args.a[0].v); k++; }
+            if (v->k == V_NUM) d = bn_to_dec(v->num);
+            snprintf(last_fallback[i], 64, "%s%s+%d sucs, core kind %d%s%s", d ? "lit " : "", d ? d : "", k, v->k,
+                     v->k == V_NEU ? " head " : "", v->k == V_NEU ? (v->h == H_DEF ? defs[v->n].name : v->h == H_VAR ? "var" : v->h == H_ELIM ? "elim" : "other") : "");
+            free(d);
+        }
+        last_fallback_code = nn->code;
     }
     return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
 }
@@ -809,6 +823,22 @@ static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
 static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
+/* a term's heads only, for the tripwire's diagnostic: names of globals, binders as a backslash, variables by index */
+static void term_heads(FILE *f, Term *t, int d) {
+    if (!t) { fputs("_", f); return; }
+    if (d > 6) { fputs("..", f); return; }
+    switch (t->k) {
+    case T_VAR: fprintf(f, "v%d", t->n); break;
+    case T_DEF: fprintf(f, "%s", defs[t->n].name); break;
+    case T_CON: fprintf(f, "%s", cons[t->n].name); break;
+    case T_DATA: fprintf(f, "%s", datas[t->n].name); break;
+    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); break;
+    case T_LAM: fputs("\\ ", f); term_heads(f, t->a, d + 1); break;
+    case T_APP: fputc('(', f); term_heads(f, t->a, d + 1); fputc(' ', f); term_heads(f, t->b, d + 1); fputc(')', f); break;
+    case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
+    default: fprintf(f, "<k%d>", t->k); break;
+    }
+}
 /* The literal-elimination tripwire. A method that uses its induction hypothesis walks the literal a step at a
    time, so a walk over a machine-sized literal is work proportional to the literal - 1e19 steps at the word
    bounds. What it must count is NESTING: a walk nests (the branch forces its induction hypothesis inside this
@@ -818,17 +848,33 @@ static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
    the methods whose term cannot be inspected (M16b A2). */
 static int elim_num_depth;
 static int elim_num_big;   /* the elimination under way is on a machine-sized literal: one successor of it is a word of steps */
+static struct { int data; char lit[16]; } elim_trace[64];   /* the nesting chain's first 64 levels, for the tripwire's diagnostic */
 static Val *elim_reduce_go(int data, VList *args);
 static Val *elim_reduce(int data, VList *args) {
     Val *target = force(args->a[args->n - 1].v);
     if (target->k != V_NUM) return elim_reduce_go(data, args);
     int bits = bn_bitlen(target->num);
-    if (bits > 40 && elim_num_depth > 64) {
+    /* a machine-sized literal walked past 64 levels, or ANY literal nested past 4096: the second rule is the
+       backstop for walks on literals below the word bounds, which the first rule cannot see (closed computations
+       nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous) */
+    if ((bits > 40 && elim_num_depth > 64) || elim_num_depth > 4096) {
         char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
         if (strlen(dec) > 40) { dec[40] = 0; }
+        if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the nesting chain's outermost levels, then the eliminator's methods */
+            for (int i = 0; i < 3 && i < elim_num_depth; i++) fprintf(stderr, "  level %d: elim %s on %s\n", i, datas[elim_trace[i].data].name, elim_trace[i].lit);
+            fprintf(stderr, "  last native fallback: code %d, arg1 = %s; arg2 = %s\n", last_fallback_code, last_fallback[0], last_fallback[1]);
+            Data *D = &datas[data]; int np = D->nparams, nb = D->nblock;
+            for (int i = np + nb; i < args->n - 1; i++) {
+                Val *m = args->a[i].v;
+                fprintf(stderr, "  method %d: ", i - np - nb);
+                if (m->k == V_LAM && m->clo.t) term_heads(stderr, m->clo.t, 0); else fprintf(stderr, "(kind %d)", m->k);
+                fputc('\n', stderr);
+            }
+        }
         die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
                      datas[data].name, elim_num_depth, dec, cur_decl_name ? cur_decl_name : "the top level");
     }
+    if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
     elim_num_depth++;
     int save_big = elim_num_big; elim_num_big = bits > 40;
     Val *r = elim_reduce_go(data, args);
@@ -984,8 +1030,16 @@ Val *unfold_def(Val *v) {
        length (neu_app lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
     if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
     int save = meta_blocked; meta_blocked = 0;
-    Val *f = def_at(v->n, v->lvl);
-    for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
+    Val *f;
+    if (v->par && v->par->k == V_NEU && v->par->h == H_DEF && v->par->n == v->n && v->par->args.n + 1 == v->args.n) {
+        /* incremental along the spine: the parent's unfolding (memoised there), then the one entry this neutral adds.
+           Without this every projection or application written on a rigid definition re-evaluated its whole body. */
+        f = unfold_def(v->par);
+        f = vapply_arg(f, &v->args.a[v->args.n - 1]);
+    } else {
+        f = def_at(v->n, v->lvl);
+        for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
+    }
     v->unf = f; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
     meta_blocked |= save;
     return f;
@@ -1053,6 +1107,12 @@ Val *pair_snd(Val *p) {
     return p->b;
 }
 Val *vproj(Val *p, int which) {
+    /* A projection of a rigid definition application stays rigid (the H_DEF plan, one step further): the spine takes a
+       proj entry, exactly as fst x on a variable does, conversion compares such spines by congruence, and force()
+       unfolds through the projection where a canonical pair is needed (unfold_def replays proj entries). Forcing here
+       instead evaluated the definition's whole body for every projection written in a TYPE - two copies of a 64-level
+       loop, compared closure by closure (Bug_Eezott_ProjectionForcesDef_ExponentialConv). */
+    { Val *r = fmeta(p); if (r->k == V_NEU && r->h == H_DEF) { Arg ar = {0}; ar.proj = which; return neu_app(r, ar); } }
     p = force(p);
     if (p->k == V_PAIR) return which == 1 ? p->a : pair_snd(p);
     if (p->k == V_SYS) {
