@@ -1,4 +1,5 @@
 #import prelude
+#import word
 -- M16b/M17: pow is where a number stops being holdable. Its size is known before the work starts - the
 -- base's bits times the exponent - so the kernel does not compute a power no limb list can hold: it states
 -- it as the definition's own fold, the neutral the chunk rule leaves. main is a power that does fit.

@@ -1,4 +1,5 @@
 #import prelude
+#import word
 -- the zero test of a machine-sized literal, on both sides of it: 2^64 + 7 is not zero, and zero is
 def bz (n : Nat) : Bool := elim Nat (\_ -> Bool) true (\k ih -> false) n
 def main : Bool := bz 18446744073709551623

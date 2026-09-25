@@ -1,6 +1,0 @@
-#import prelude
--- a step with no closed form: nothing the theory proves turns this fold into arithmetic, so the switch
--- still refuses it rather than walking the literal. (nesting a power is the case where the value itself
--- may have no limb list; here it is the step that has no theorem.)
-def square (n : Nat) : Nat := elim Nat (\_ -> Nat) 1 (\k ih -> mul ih ih) n
-def main : Nat := square 5

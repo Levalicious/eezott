@@ -1,4 +1,5 @@
 #import prelude
+#import word
 -- the division and the remainder of 2^128 - 1 by 2^64, put back together: the round trip must return the dividend
 def main : Nat := add (mul (div 340282366920938463463374607431768211455 18446744073709551616) 18446744073709551616)
                       (mod 340282366920938463463374607431768211455 18446744073709551616)

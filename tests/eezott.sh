@@ -27,13 +27,20 @@ scott_nat() {   # Scott numeral literal for n, in eezoc syntax
     while [ "$n" -gt 0 ]; do s="z -> s -> s($s)"; n=$((n-1)); done
     printf '%s' "$s"
 }
+chain_lit() {   # decimal -> the chain (M17): the normalised, most-significant-first Scott list of the machine words (zero: lnil)
+    python3 -c 'import sys
+n = int(sys.argv[1]); s = "lnil"
+while n: s = "lcons(%dw)(%s)" % (n % (1 << 64), s); n >>= 64
+print(s)' "$1"
+}
+CHAIN_CONS='lnil := h0 -> h1 -> h0\nlcons := a -> b -> h0 -> h1 -> h1(a)(b)\n'
 oracle() {      # kind value -> expected bitstring
     case "$1" in
         bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
-        big)  printf 'n := %sb;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl -s ;;   # a Nat is the C list of limbs: the oracle is the limb literal (M16b E1), on the limb interpreter
-        pair) printf 'pair := a -> b -> k -> k(a)(b);\nn := pair(%sb)(%sb);\nn\n' "${2%%,*}" "${2#*,}" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl -s ;;   # the erasure's own pair of two limb lists, "A,B"
+        chain) printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M17): the oracle is the literal's own words
+        pair) printf "${CHAIN_CONS}"'pair := a -> b -> k -> k(a)(b)\nn := pair(%s)(%s);\nn\n' "$(chain_lit "${2%%,*}")" "$(chain_lit "${2#*,}")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # the erasure's own pair of two chains, "A,B"
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
@@ -59,14 +66,6 @@ check() {       # file kind value
     # every transport kept at run time: the run-time Kan rules must agree with the checker's shortcut
     local got; got=$(run_typed "$1" "" "-K")
     if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
-}
-checkBig() {    # file kind value: the same program under the limb switch (eezott -B), on every evaluator
-    local want; want=$(oracle "$2" "$3")
-    for mode in "-s" "" "-n"; do
-        local label=${mode:-stg}
-        local got; got=$(run_typed "$1" "$mode" "-B")
-        if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -B $label)"; else fail "$1 = $2 $3 (eezott -B $label)" "$want" "$got"; fi
-    done
 }
 
 check minv_test.tt     nat 5
@@ -171,10 +170,10 @@ checkN  nat_native_eq.tt
 # M16a: an irrelevant Sigma component; machine words in the theory, erased to the run-time primitives
 check   irr_pair.tt      nat 3
 check   word_ops.tt      word 5
-check   word_fst.tt      nat 5
+check   word_fst.tt      chain 5           # a program that imports word: its Nat is the chain (M17)
 check   word_mk.tt       word 5
 check   word_lt.tt       bool true
-check   word_divmod.tt   nat 3
+check   word_divmod.tt   chain 3
 check   word_wrap.tt     word 18446744073709551615
 checkN  word_ops.tt
 checkN  word_mk.tt
@@ -186,19 +185,23 @@ checkNF word_ops.tt      w5 5
 check   word_fold.tt    word 18446744073709551615
 checkN  word_fold.tt
 
-# M16b: the limb switch. With --limbs the Nat IS the run-time limb list, so a program above a machine word runs
-# on the C list's own arithmetic; the oracle is the same value written as a limb literal
-checkBig limb_add.tt    big  340282366920938463481821351505477763072
-checkBig limb_mul.tt    big  340282366920938463500268095579187314689
-checkBig limb_divmod.tt big  340282366920938463463374607431768211455
-checkBig limb_pred.tt   big  18446744073709551622
-checkBig limb_zero.tt   bool false
-checkBig nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the component's code is the identity
-checkBig limb_minv.tt   big 1                           # the inverse of 3 mod 2^127-1, 3 times it is 1
-checkBig limb_double.tt big 36893488147419103232        # a fold with an addition step, compiled to its closed form
-checkNF  limb_minv.tt   main 1
-checkNF  big_pow.tt     main 12157665459056928801
-checkBig big_pow.tt     big 12157665459056928801
+# M16b, M17: the chain. With word.tt imported the Nat is the run-time chain of machine words and its arithmetic
+# is word.tt's own folds (the pivot to A), so a program above a machine word runs on them; the oracle is the
+# same value written as the chain literal. (The combinator interpreter, eezo -s, is two orders slower than the
+# compiled evaluators and the folds are real work: the chain programs run on the compiled ones.)
+check limb_add.tt    chain 340282366920938463481821351505477763072
+check limb_mul.tt    chain 340282366920938463500268095579187314689
+check limb_divmod.tt chain 340282366920938463463374607431768211455
+check limb_pred.tt   chain 18446744073709551622
+check limb_zero.tt   bool false
+check nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the chain's code is the list's over the word's
+check limb_minv.tt   chain 1                         # the inverse of 3 mod 2^127-1, 3 times it is 1
+check limb_double.tt chain 36893488147419103232      # a fold with an addition step, compiled to its closed form
+check limb_square.tt chain 1                         # a fold with no closed form: the walk
+check chain_walk.tt  chain 15                        # the walk, with the step's arithmetic on the chain
+checkNF limb_minv.tt main 1
+checkNF big_pow.tt   main 12157665459056928801
+check big_pow.tt     chain 12157665459056928801
 # a number no limb list can hold is not refused: the kernel states it as the definition's own fold, the
 # neutral the chunk rule leaves (M17). The runtimes denote it, each as a value of its own kind
 out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
@@ -238,15 +241,6 @@ for f in "$TT"/unerasable/*.tt; do
     else pass "$name typechecks but is refused at erasure"; fi
 done
 
-# what the limb switch has no limb-level meaning for: a fold over the Nat walks the literal, so the switch
-# refuses it (M16b C3). These typecheck and erase in the unswitched theory - only --limbs refuses them
-for f in "$TT"/limbunerasable/*.tt; do
-    [ -e "$f" ] || continue
-    name=limbunerasable/$(basename "$f")
-    if ! tt -c "$f" >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
-    elif tt -B "$f" >/dev/null 2>&1; then fail "$name refused by --limbs" "refusal" "erased"
-    else pass "$name typechecks but is refused by --limbs"; fi
-done
 
 echo "$n cases"
 exit $status

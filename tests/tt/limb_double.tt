@@ -1,7 +1,8 @@
 #import prelude
+#import word
 -- M17: a fold that uses its induction hypothesis, at machine scale. The step adds two, so the closed form
--- stdlib/tt/fold.tt proves - z + n * w - is what the switch compiles it to: badd(0b)(bmul(n)(2b)), the C
--- list's own arithmetic, where before this was refused because the walk is the literal's length
+-- stdlib/tt/fold.tt proves - z + n * w - is what the erasure compiles it to: nadd 0 (nmul n 2), the library's
+-- own folds, where the walk would be work proportional to the value
 def double (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> suc (suc ih)) n
 def plus7 (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> add ih 7) n
 def main : Nat := double 18446744073709551616

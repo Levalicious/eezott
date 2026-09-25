@@ -96,6 +96,7 @@ struct STerm {
 typedef struct { const char *name; STerm *ty; STerm *boundary; int line; } SCon;   /* boundary: a system, for path constructors */
 typedef struct SDecl {
     int isdata, isnative, isword; const char *name; int line;   /* isnative: a 'native' definition (M15); isword: a 'word' one (M16a) */
+    int lib;                          /* declared by the prelude or an import, not by the program (erase.c: the unary Nat's side) */
     SBinder *params; int nparams;     /* data: parameters; def: binder sugar folded into ty/val */
     STerm *ty;                        /* def: type; data: index telescope ending in U */
     STerm *val;                       /* def */
@@ -317,7 +318,8 @@ int term_mentions_meta(Term *t, int id);
 typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly;
                  int native; Val *vfallback;          /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
                  int isword, wordop;                  /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
-                 int seq; } Def;                      /* declaration order across files (erasure emits in it) */
+                 int seq;                             /* declaration order across files (erasure emits in it) */
+                 int lib; } Def;                      /* a library declaration (the prelude, an import): erased with the unary Nat, and again in chain mode when program code reaches it */
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
@@ -354,6 +356,7 @@ struct Data {
                                               ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
     int seq;                               /* declaration order across files */
+    int lib;                               /* a library declaration: its code gets a chain copy when program code reaches it */
 };
 extern int decl_seq;                       /* the next declaration's sequence number */
 
@@ -389,7 +392,6 @@ const char *wordop_name(int code);
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
-extern int nat_limbs;                /* the Nat type is the run-time limb list (M16b b6, main.c -B) */
 extern int nf_main;                  /* erase the checker's normal form of main instead of its source */
 
 #endif

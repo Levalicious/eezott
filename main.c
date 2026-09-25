@@ -26,6 +26,7 @@ static char *slurp(FILE *f) {
 static const char *libdirs[32]; static int nlibdirs;
 static char *loaded[256]; static int nloaded;
 static SDecl *decls_head, **decls_tail = &decls_head;
+static const char *program_path;   /* the program's own file: its declarations are the program's, every other file's are the library's */
 
 static char *read_path(const char *path) {
     FILE *f = fopen(path, "r"); if (!f) return NULL;
@@ -69,6 +70,7 @@ static void load_source(char *src, const char *path) {
         if (*line == '\n') line++;
     }
     SDecl *d = parse_program(src, path);
+    for (SDecl *x = d; x; x = x->next) x->lib = strcmp(path, program_path) != 0;
     *decls_tail = d;
     while (*decls_tail) decls_tail = &(*decls_tail)->next;
 }
@@ -80,8 +82,6 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -c            Check only; emit nothing\n");
     fprintf(stderr, "  -t NAME       Print the type of the definition NAME after checking\n");
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
-    fprintf(stderr, "  -B            The Nat type is the run-time limb list: literals erase to limb-list literals,\n");
-    fprintf(stderr, "                the natives to the limb primitives, and elimination on the Nat is refused\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
@@ -96,7 +96,6 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
-        else if (!strcmp(argv[i], "-B")) nat_limbs = 1;   /* the Nat type is the run-time limb list (M16b b6) */
         else if (!strcmp(argv[i], "-N")) nf_main = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
@@ -105,6 +104,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }
         else fname = argv[i];
     }
+    program_path = fname ? fname : "<stdin>";
     for (int i = 0; i < npreludes; i++) load_file(preludes[i]);
     if (fname) load_file(fname);
     else load_source(slurp(stdin), "<stdin>");
