@@ -1,0 +1,68 @@
+#import word
+-- the Word-limb fold at closed instances: the kernel's bignum computes both sides, refl checks them.
+-- The fold is stated for lists of the SAME length, and that is its alignment: a column pairs the two heads and
+-- the carry comes back from the tail, so the digits line up right (the tails are the less significant ends) only
+-- when the limbs are. Unequal lengths are left-aligned - the shorter operand's limbs land in the most significant
+-- slots - which is what badd's padTo avoids in the Nat layer and what the value law will assume away.
+-- The type-level instances carry the big literals; the RUN-TIME check takes a word out, because the harness's nat
+-- oracle builds a Scott numeral and so only speaks for small numbers, while a word prints as itself.
+-- the fold's value, carry included: the result's limbs plus the carry out one position above them
+def fv (r : Sigma Word (\_ -> WB)) : Nat := add (wbval (snd r)) (mul (wlimb (fst r)) (wpow (wlen (snd r))))
+def t1 : Path Nat (fv (waddGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 4 (lnil {Word}))))) 73786976294838206470 := prefl Nat 73786976294838206470
+-- the carry out of the top column, and its ripple through a limb below
+def t2 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 0 (lnil {Word}))))) 340282366920938463481821351505477763071 := prefl Nat 340282366920938463481821351505477763071
+def t3 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 1 (lnil {Word}))))) 340282366920938463481821351505477763072 := prefl Nat 340282366920938463481821351505477763072
+def t4 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))) 680564733841876926926749214863536422910 := prefl Nat 680564733841876926926749214863536422910
+-- three limbs: the carry crosses a limb that does not move
+def t5 : Path Nat (fv (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word})))) (lcons 1 (lcons 0 (lcons 0 (lnil {Word})))))) 6277101735386680764176071790128604879565730051895802724351 := prefl Nat 6277101735386680764176071790128604879565730051895802724351
+-- a carry that dies at the top: the carry out is 0 and the limbs below it are not
+def t6 : Path Nat (fv (waddGo (lcons 0 (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word})))) (lcons 0 (lcons 0 (lcons 1 (lnil {Word})))))) 340282366920938463463374607431768211456 := prefl Nat 340282366920938463463374607431768211456
+-- the accumulator law at a closed instance: the kernel computes both sides, including the base's weight
+def t7 : Path Nat (wbvalAux 5 (lcons 1 (lcons 2 (lnil {Word})))) (add (mul 5 (wpow 2)) (wbval (lcons 1 (lcons 2 (lnil {Word}))))) := wbvalAux_val (lcons 1 (lcons 2 (lnil {Word}))) 5
+-- the column's value law and its carry bound at closed instances: the kernel computes both sides
+def t8 : Path Nat (add (wlimb (snd (wcol 0 18446744073709551615 18446744073709551615))) (mul (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) M64)) 36893488147419103230 := wcol_val 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
+def t9 : Le (wlimb (fst (wcol 0 18446744073709551615 18446744073709551615))) 1 := wcol_carry_le 0 18446744073709551615 18446744073709551615 (1, prefl Nat 36893488147419103232)
+-- the fold's value law at a closed instance: the theorem itself computes down to the kernel's arithmetic
+def t10 : Path Nat (add (wbval (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))
+                      (mul (wlimb (fst (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))
+                           (wpow (wlen (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))))))))) 73786976294838206471 :=
+  fst (waddGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2))
+def t11 : Path Nat (wlen (snd (waddGo (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word})))))) 2 :=
+  snd (snd (waddGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2)))
+-- the widest limbs, with the carry out: the law at M63 + M63, where the top column carries
+def t12 : Path Nat (add (wbval (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))
+                      (mul (wlimb (fst (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))
+                           (wpow (wlen (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))))))))) 680564733841876926926749214863536422910 :=
+  fst (waddGo_val (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (prefl Nat 2))
+-- the comparison at closed instances: the smaller head decides, and equal heads hand over to the tails
+def t13 : Path Nat (wltGoN (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))) 1 :=
+  wltGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2)
+def t14 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word})))) 0 :=
+  wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 1 (lcons 2 (lnil {Word}))) (prefl Nat 2)
+def t15 : Path Nat (wltGoN (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word})))) 1 :=
+  wltGo_val (lcons 3 (lcons 5 (lnil {Word}))) (lcons 3 (lcons 7 (lnil {Word}))) (prefl Nat 2)
+-- the borrow column at a closed instance: 3 - 5 wraps, and the borrow carries the M64
+def t16 : Path Nat (add (wlimb (fst (wsubb 3 5))) 5) (add 3 (mul (wlimb (snd (wsubb 3 5))) M64)) := wsubb_val 3 5
+def t17 : Path Nat (add (wlimb (fst (wsubb 5 3))) 3) (add 5 (mul (wlimb (snd (wsubb 5 3))) M64)) := wsubb_val 5 3
+-- the borrow column at closed instances: no borrow in (5 - 3), and with one (3 - 5 - 1 wraps).
+-- The words are let-bound because `fst` on a bare numeral is ambiguous - fst's type parameters are metas and a
+-- numeral has no type of its own. `fst (wsubb 3 5)` is fine; `fst 3` is not.
+def t18 : let z : Word := 0 in let a : Word := 5 in let b : Word := 3 in
+    Path Nat (add (add (wsubl_digit z a b) (fst z)) (fst b)) (add (fst a) (mul (wsubl_bo z a b) M64)) :=
+  let z : Word := 0 in let a : Word := 5 in let b : Word := 3 in
+  let h : Le (wlimb z) 1 := (1, prefl Nat 1) in
+  wsubl_val z a b h
+def t19 : let o : Word := 1 in let a : Word := 3 in let b : Word := 5 in
+    Path Nat (add (add (wsubl_digit o a b) (fst o)) (fst b)) (add (fst a) (mul (wsubl_bo o a b) M64)) :=
+  let o : Word := 1 in let a : Word := 3 in let b : Word := 5 in
+  let h : Le (wlimb o) 1 := (0, prefl Nat 1) in
+  wsubl_val o a b h
+-- the borrow scan's law at a closed instance: the theorem itself computes both sides
+def t20 : Path Nat (add (wbval (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) (wbval (lcons 3 (lcons 5 (lnil {Word}))))) (add (wbval (lcons 1 (lcons 2 (lnil {Word})))) (mul (wlimb (fst (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) (wpow (wlen (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))))))))) :=
+  fst (wsubGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2))
+def t21 : Path Nat (wlen (snd (wsubGo (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word})))))) 2 :=
+  snd (snd (wsubGo_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 3 (lcons 5 (lnil {Word}))) (prefl Nat 2)))
+-- the limbs of a 2-limb result, for the run-time check
+def wlast (x : WB) : Word := elim List (\_ -> Word) 0 (\h r ih -> elim List (\_ -> Word) h (\_ _ _ -> ih) r) x
+-- the low limb of [M63,M63] + [1,0] = 2^128 + 2^64 - 1: the carry crosses it, the limb is untouched
+def main : Word := wlast (snd (waddGo (lcons 18446744073709551615 (lcons 18446744073709551615 (lnil {Word}))) (lcons 1 (lcons 0 (lnil {Word})))))

@@ -180,6 +180,10 @@ int lv_enforce_eq(LVal a, LVal b) {
 /* ---- solving: every meta at its lower bound ---- */
 static LVal atom_val(int k, int id, int off, LVal *sol, int m0) {
     if (k == 2 && id < m0) die("internal: a level meta (?%d) from an earlier definition survived into this one", id);
+    /* A rigid variable the store pins at 0 evaluates as the constant: L <= 0 is derivable and every variable is
+       implicitly >= 0, so L >= ?m >= L forces ?m = 0 - the lower bound a symbolic L would otherwise hide
+       (e.g. comparing occurrences of a polymorphic definition at level ?m and at 0). */
+    if (k == 1 && derivable(1, id, 0, 0, 0)) return lv_const(off);
     LVal v = k == 0 ? lv_const(0) : k == 1 ? lv_var(id) : sol[id - m0];
     return lv_add(v, off);
 }

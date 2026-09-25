@@ -22,7 +22,34 @@ Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
-void *xalloc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) die("out of memory"); return p; }
+void unfold_counts_report(void); void fallback_report(void);
+void die_resource(const char *fmt, ...) {
+    unfold_counts_report(); fallback_report();
+    va_list ap;
+    fflush(stdout);
+    fputs("eezott: resource limit: ", stderr);
+    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+    fputc('\n', stderr);
+    exit(70);
+}
+
+/* A memo entry stays valid across metas generations iff nothing inside it was blocked on an unsolved meta: resolving one
+   can resume a reduction the entry took as neutral. A missed entry is merely slow, so this is set conservatively -
+   every place that hands back a neutral where a decision was possible marks it, meta or not. */
+static int meta_blocked;
+static u64 alloc_total, alloc_limit;
+void *xalloc(size_t n) {
+    if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
+        const char *e = getenv("EEZOTT_MAX_ALLOC");
+        alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
+    }
+    alloc_total += n ? n : 1;
+    if (alloc_total > alloc_limit)
+        die_resource("allocated over %llu bytes (EEZOTT_MAX_ALLOC)", (unsigned long long)alloc_limit);
+    void *p = calloc(1, n ? n : 1);
+    if (!p) die_resource("out of memory");
+    return p;
+}
 char *xstrdup(const char *s) { size_t n = strlen(s) + 1; char *p = xalloc(n); memcpy(p, s, n); return p; }
 char *xsprintf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int n = vsnprintf(NULL, 0, fmt, ap); va_end(ap);
@@ -353,7 +380,7 @@ static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
     case T_PI: {
         if (prec > 0) fputc('(', f);
         const char *nm = t->name && strcmp(t->name, "_") ? t->name : NULL;
-        if (nm) { fprintf(f, t->imp ? "{%s : " : "(%s : ", nm); tp(f, t->a, names, depth, 0); fputs(t->imp ? "} -> " : ") -> ", f); }
+        if (nm) { fprintf(f, t->imp ? "{%s : " : (t->irr & 2) ? ".(%s : " : "(%s : ", nm); tp(f, t->a, names, depth, 0); fputs(t->imp ? "} -> " : ") -> ", f); }
         else { tp(f, t->a, names, depth, 1); fprintf(f, " -> "); }
         names[depth] = nm ? nm : "_"; tp(f, t->b, names, depth + 1, 0);
         if (prec > 0) fputc(')', f);
@@ -638,10 +665,12 @@ enum { N_IH = 1, N_LINE_DOM, N_LINE_COD_V, N_TRANSP_V, N_LINE_IOR, N_LINE_IAND, 
        N_CONST, N_ELIM_MOTIVE_LINE, N_ELIM_SIDES,
        N_SUBST, N_GLUE_T, N_UNGLUE_U0, N_GLUE_TR_SIDES, N_GLUE_A1P_SIDES, N_GLUE_HF, N_GLUE_HC_SIDES, N_GCOMP_SIDES,
        N_ELIM_PATH_IH, N_TRANSP_MAP, N_HITTR_SIDES };
-typedef struct { int code; int i1, i2, i3; VList cap;  LVal l; } Native;
+typedef struct { int code; int i1, i2, i3; VList cap;  LVal l;
+                 Val *marg, *mres; int mmv, mon, mstable; } Native;   /* one-entry application memo: the last argument and at which metas version */
 typedef struct { int n; Val *v[8]; LVal l; } Caps;
 
 static Val *native_apply(Native *nt, Val *arg);
+static Val *native_step(Native *nt, Val *arg);
 typedef struct { Val *psi, *forall, *ungl, *Teg, *tf, *i; int F; } TrSides;
 typedef struct { Val *phi1, *psi, *alphas, *ts, *Te1, *a1, *j; } A1pData;
 typedef struct { Val *Te, *psi, *u, *u0, *i; } HfData;
@@ -660,8 +689,17 @@ static Val *builtin_at(const char *name, LVal L);
 static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
 Val *inst(Clo *c, Val *v) {
-    if (c->fn) return c->fn(c->data, v);
-    return eval(env_push(c->env, v), c->t);
+    /* One-entry application memo (the memoization pass): a closure applied to the same value again is the same value,
+       and branch bodies do apply the same closure to the same value repeatedly - baddGo's column uses its induction
+       hypothesis three times, and each application re-ran the whole recursive fold, which made the fold's cost
+       3^columns (Finding_Eezott_EvalNoSharing_2026_09_14). The metas version guards it: a meta solved in between can
+       resume a reduction that the first application took as neutral. */
+    if (c->ires && c->iarg == v && (c->imv == metas_version || c->istable)) return c->ires;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r = c->fn ? c->fn(c->data, v) : eval(env_push(c->env, v), c->t);
+    c->iarg = v; c->ires = r; c->imv = metas_version; c->istable = !meta_blocked;
+    meta_blocked |= save;
+    return r;
 }
 static Val *nfn(void *data, Val *arg) { return native_apply(data, arg); }
 static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
@@ -675,7 +713,10 @@ static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
 Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data) { Val *v = mkval(V_LAM); v->clo.fn = fn; v->clo.data = data; v->name = name; return v; }
 
 static Val *neu_app(Val *f, Arg a) {
-    Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a); return v;
+    Val *v = mkval(f->k); *v = *f; v->args = vl_copy(&f->args); vl_push_arg(&v->args, a);
+    v->unf = NULL; v->unf_n = 0; v->unf_mv = 0;   /* a longer spine: the copied memo, if any, does not apply */
+    v->par = f;                                    /* but the parent's does, for all but the last entry */
+    return v;
 }
 
 /* ---- literals (M15) ---- */
@@ -690,8 +731,8 @@ Val *num_view(Val *v) {
     Arg ar = {0}; ar.v = vnum(v->n, v->lvl, bn_pred(v->num));
     return neu_app(c, ar);
 }
-static const char *native_names[] = { "add", "sub", "mul", "div", "mod", "pow", "beq", "blt", "ble" };
-int native_code(const char *name) { for (int i = 0; i < 9; i++) if (!strcmp(name, native_names[i])) return i + 1; return 0; }
+static const char *native_names[] = { "add", "sub", "mul", "div", "mod", "pow", "beq", "blt", "ble", "minv" };
+int native_code(const char *name) { for (int i = 0; i < 10; i++) if (!strcmp(name, native_names[i])) return i + 1; return 0; }
 static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     Bn *q, *r;
     switch (code) {
@@ -704,19 +745,55 @@ static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     case 7: return bn_from_u64(bn_cmp(a, b) == 0);
     case 8: return bn_from_u64(bn_cmp(a, b) < 0);
     case 9: return bn_from_u64(bn_cmp(a, b) <= 0);
+    case 10: return bn_minv(a, b);   /* the modular inverse: the power is taken modulo y, never built */
     }
     die("internal: unknown native %d", code); return NULL;
 }
-typedef struct { int code, d; Val *fallback, *arg1; } NatNative;
+static char last_fallback[2][64]; static int last_fallback_code;
+static long fb_count[16]; static char fb_first[16][2][64];
+void fallback_report(void) {
+    if (!getenv("EEZOTT_TRIPWIRE_METHODS")) return;
+    fprintf(stderr, "  native fallbacks by code (1 add 2 sub 3 mul 4 div 5 mod 6 pow 7 eq 8 lt 9 le 10 minv):\n");
+    for (int c = 1; c <= 10; c++) if (fb_count[c]) fprintf(stderr, "    code %d: %ld  first: arg1 = %s; arg2 = %s\n", c, fb_count[c], fb_first[c][0], fb_first[c][1]);
+}
+typedef struct { int code, d, def; Val *fallback, *arg1; } NatNative;   /* def: the native's definition (the head of its guard neutral) */
 static Val *natfn(void *data, Val *arg) {
     NatNative *nn = data;
     if (!nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *nn; m->arg1 = arg; return vlam_native("n", natfn, m); }
     Val *a = force(nn->arg1), *b = force(arg);
-    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) {
+        /* pow is the one native whose result may be a number no limb list can hold (M17). When it is, the
+           kernel does not compute it and does not unfold it either: the native application itself stands, a
+           rigid neutral whose unfolding is itself - canonical enough for force, opaque to conversion (the same
+           power compares by its spine), and the laws (pow_add, pow_mul) prove what it cannot compute. Lean's
+           pow guard (S2). An elimination on it, or a native over it, stays a neutral: no canonical form exists. */
+        if (nn->code == 6 && !bn_fits_pow(a->num, b->num)) {
+            Val *v = mkval(V_NEU); v->h = H_DEF; v->n = nn->def; v->lvl = a->lvl;
+            Arg x = {0}; x.v = nn->arg1; v = neu_app(v, x); x.v = arg; v = neu_app(v, x);
+            v->unf = v; v->unf_n = v->args.n; v->unf_stable = 1;
+            return v;
+        }
+        return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
+    }
+    static int diag = -1; if (diag < 0) diag = getenv("EEZOTT_TRIPWIRE_METHODS") != NULL;
+    if (diag) {   /* the last native that fell back to its body, for the tripwire's diagnostic */
+        fb_count[nn->code]++;
+        Val *x[2] = { a, b };
+        for (int i = 0; i < 2; i++) {
+            Val *v = x[i]; int k = 0; char *d = NULL;
+            while (v->k == V_CON && v->args.n == 1 && k < 100000) { v = force(v->args.a[0].v); k++; }
+            if (v->k == V_NUM) d = bn_to_dec(v->num);
+            snprintf(last_fallback[i], 64, "%s%s+%d sucs, core kind %d%s%s", d ? "lit " : "", d ? d : "", k, v->k,
+                     v->k == V_NEU ? " head " : "", v->k == V_NEU ? (v->h == H_DEF ? defs[v->n].name : v->h == H_VAR ? "var" : v->h == H_ELIM ? "elim" : "other") : "");
+            free(d);
+        }
+        last_fallback_code = nn->code;
+        if (!fb_first[nn->code][0][0]) { snprintf(fb_first[nn->code][0], 64, "%s", last_fallback[0]); snprintf(fb_first[nn->code][1], 64, "%s", last_fallback[1]); }
+    }
     return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
 }
-Val *native_wrapper(int code, int d, Val *fallback) {
-    NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->fallback = fallback; nn->arg1 = NULL;
+Val *native_wrapper(int code, int d, Val *fallback, int def) {
+    NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->def = def; nn->fallback = fallback; nn->arg1 = NULL;
     return vlam_native("m", natfn, nn);
 }
 static Val *elim_apply_list(int data, VList *args);
@@ -762,14 +839,75 @@ static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
 static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
+/* a term's heads only, for the tripwire's diagnostic: names of globals, binders as a backslash, variables by index */
+static void term_heads(FILE *f, Term *t, int d) {
+    if (!t) { fputs("_", f); return; }
+    if (d > 6) { fputs("..", f); return; }
+    switch (t->k) {
+    case T_VAR: fprintf(f, "v%d", t->n); break;
+    case T_DEF: fprintf(f, "%s", defs[t->n].name); break;
+    case T_CON: fprintf(f, "%s", cons[t->n].name); break;
+    case T_DATA: fprintf(f, "%s", datas[t->n].name); break;
+    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); break;
+    case T_LAM: fputs("\\ ", f); term_heads(f, t->a, d + 1); break;
+    case T_APP: fputc('(', f); term_heads(f, t->a, d + 1); fputc(' ', f); term_heads(f, t->b, d + 1); fputc(')', f); break;
+    case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
+    default: fprintf(f, "<k%d>", t->k); break;
+    }
+}
+/* The literal-elimination tripwire. A method that uses its induction hypothesis walks the literal a step at a
+   time, so a walk over a machine-sized literal is work proportional to the literal - 1e19 steps at the word
+   bounds. What it must count is NESTING: a walk nests (the branch forces its induction hypothesis inside this
+   call), while a program that merely uses many literals does not. Counted as a running total instead, the
+   tripwire fires on the 66th innocent use of a literal anywhere in the run, and names an innocent walker.
+   Eliminations reduce on demand (elim_force), so a walk starts only where a native or an elimination forces the
+   hypothesis inside the step; a walk that conversion drives from outside is iterative and meets the resource
+   limits instead - the checker's own elimination, work proportional to the value, as Lean's and Agda's (S2). */
+static int elim_num_depth;
+static struct { int data; char lit[16]; } elim_trace[64];   /* the nesting chain's first 64 levels, for the tripwire's diagnostic */
+static Val *elim_reduce_go(int data, VList *args);
 static Val *elim_reduce(int data, VList *args) {
+    Val *target = force(args->a[args->n - 1].v);
+    if (target->k != V_NUM) return elim_reduce_go(data, args);
+    int bits = bn_bitlen(target->num);
+    /* a machine-sized literal walked past 64 levels, or ANY literal nested past 4096: the second rule is the
+       backstop for walks on literals below the word bounds, which the first rule cannot see (closed computations
+       nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous). The nesting is
+       the eliminations' or the forces': a step whose method returns a rigid native over its hypothesis (mul 3 ih)
+       walks when the native forces it, each step inside the last native's force, and elim_reduce itself returns
+       every time - so the forces are counted too (S2) */
+    int nest = elim_num_depth > force_depth ? elim_num_depth : force_depth;
+    if ((bits > 40 && nest > 64) || nest > 4096) {
+        char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
+        if (strlen(dec) > 40) { dec[40] = 0; }
+        if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the nesting chain's outermost levels, then the eliminator's methods */
+            for (int i = 0; i < 3 && i < elim_num_depth; i++) fprintf(stderr, "  level %d: elim %s on %s\n", i, datas[elim_trace[i].data].name, elim_trace[i].lit);
+            fprintf(stderr, "  last native fallback: code %d, arg1 = %s; arg2 = %s\n", last_fallback_code, last_fallback[0], last_fallback[1]);
+            Data *D = &datas[data]; int np = D->nparams, nb = D->nblock;
+            for (int i = np + nb; i < args->n - 1; i++) {
+                Val *m = args->a[i].v;
+                fprintf(stderr, "  method %d: ", i - np - nb);
+                if (m->k == V_LAM && m->clo.t) term_heads(stderr, m->clo.t, 0); else fprintf(stderr, "(kind %d)", m->k);
+                fputc('\n', stderr);
+            }
+        }
+        die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
+                     datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
+    }
+    if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
+    elim_num_depth++;
+    Val *r = elim_reduce_go(data, args);
+    elim_num_depth--;
+    return r;
+}
+static Val *elim_reduce_go(int data, VList *args) {
     Data *D = data_at(data, elim_lvl); elim_data_cur = data;
     int np = D->nparams, nb = D->nblock, K = block_ncons(data);
-    Val *target = args->a[args->n - 1].v;
+    Val *target = force(args->a[args->n - 1].v);   /* a rigid definition application unfolds for the elimination */
     if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
-    if (target->k != V_CON) return NULL;
+    if (target->k != V_CON) { meta_blocked = 1; return NULL; }
     Con *c = con_at(target->n, target->lvl);
-    if (c->data != data || target->args.n != np + c->nargs + c->nint) return NULL;
+    if (c->data != data || target->args.n != np + c->nargs + c->nint) { meta_blocked = 1; return NULL; }
     Val *res = args->a[np + nb + c->bord].v;
     for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
     for (int j = 0; j < c->nargs; j++) {
@@ -785,8 +923,9 @@ static Val *elim_reduce(int data, VList *args) {
             continue;
         }
         if (!c->args[j].isrec) continue;
-        /* a method that does not mention its induction hypothesis does not get one computed: a case analysis on a literal
-           (isZero, pred, if01 ..) would otherwise recurse down to zero (M16a) */
+        /* a method that does not mention its induction hypothesis does not get one at all: a case analysis on a literal
+           (isZero, pred, if01 ..) then never builds the recursive elimination (M16a). One that does gets it deferred:
+           elim_apply_list ends in a saturated elimination, which vapp leaves unreduced until something forces it. */
         if (c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn && !term_mentions_var(res->clo.t, 0)) { res = vapp(res, target->args.a[np + j].v, 0); continue; }
         Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
         for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
@@ -846,7 +985,7 @@ static Val *apply_to(Val *b, void *E) { return vapp((Val *)E, b, 0); }
 static Val *elim_hcomp(int data, VList *args) {
     Data *D = &datas[data];
     int np = D->nparams, nb = D->nblock, K = block_ncons(data), m = D->nidx;
-    Val *t = args->a[args->n - 1].v;
+    Val *t = force(args->a[args->n - 1].v);
     if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
     Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
     for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
@@ -862,6 +1001,33 @@ static Val *elim_apply_list(int data, VList *args) {
     Val *e = mkval(V_NEU); e->h = H_ELIM; e->n = data; e->lvl = elim_lvl;
     Val *r = e;
     for (int i = 0; i < args->n; i++) r = vapp(r, args->a[i].v, args->a[i].irr);
+    return r;
+}
+/* A saturated elimination is reduced on demand, as a rigid definition application is unfolded on demand: the value is
+   the shared cell and its reduction is kept in it (unf), guarded as unfold_def's memo is. So an induction hypothesis
+   is computed only where the method forces it, the branches of a decision only where the decision selects them, and
+   a fold over a literal walks only as far as something forces (S2: what the chunk rule approximated by refusing).
+   A stuck elimination (its target not canonical) comes back as itself with the flag dropped: the neutral it is. */
+Val *elim_force(Val *v) {
+    if (!v->defer) return v;
+    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
+    Data *D = &datas[v->n];
+    int arity = D->nparams + D->nblock + block_ncons(v->n) + D->nidx + 1;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r;
+    if (v->args.n > arity) {   /* an application of the elimination's result: the parent's reduction, then this entry */
+        Val *p = v->par;
+        r = elim_force(p);
+        if (r == p) { v->defer = 0; meta_blocked |= save; return v; }
+        r = vapply_arg(r, &v->args.a[v->args.n - 1]);
+    } else {
+        elim_lvl = v->lvl;
+        r = elim_reduce(v->n, &v->args);
+        if (!r) r = elim_hcomp(v->n, &v->args);
+        if (!r) { v->defer = 0; meta_blocked |= save; return v; }
+    }
+    v->unf = r; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
+    meta_blocked |= save;
     return r;
 }
 
@@ -896,9 +1062,42 @@ Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
 }
 
 /* ---- application ---- */
+static long *unf_count;   /* diagnostic: how many times each definition's body was evaluated (EEZOTT_UNFOLD_COUNTS) */
+void unfold_counts_report(void) {
+    if (!unf_count) return;
+    fprintf(stderr, "  unfoldings per definition (top):\n");
+    for (int k = 0; k < 12; k++) { int best = -1; for (int i = 0; i < ndefs; i++) if (unf_count[i] > 0 && (best < 0 || unf_count[i] > unf_count[best])) best = i;
+        if (best < 0) break; fprintf(stderr, "    %8ld  %s\n", unf_count[best], defs[best].name); unf_count[best] = -unf_count[best]; }
+}
+/* a rigid definition application to its value: the definition applied to its spine */
+Val *unfold_def(Val *v) {
+    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = calloc(65536, sizeof(long)); } }
+    /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
+       the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
+       hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
+       whole body (cost compounding with nesting depth; Finding_Eezott_EvalNoSharing_2026_09_14). Guarded by the spine
+       length (neu_app lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
+    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
+    int save = meta_blocked; meta_blocked = 0;
+    if (unf_count) unf_count[v->n]++;   /* diagnostic: body evaluations per definition (EEZOTT_UNFOLD_COUNTS) */
+    Val *f;
+    if (v->par && v->par->k == V_NEU && v->par->h == H_DEF && v->par->n == v->n && v->par->args.n + 1 == v->args.n) {
+        /* incremental along the spine: the parent's unfolding (memoised there), then the one entry this neutral adds.
+           Without this every projection or application written on a rigid definition re-evaluated its whole body. */
+        f = unfold_def(v->par);
+        f = vapply_arg(f, &v->args.a[v->args.n - 1]);
+    } else {
+        f = def_at(v->n, v->lvl);
+        for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
+    }
+    v->unf = f; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
+    meta_blocked |= save;
+    return f;
+}
+
 Val *vapp(Val *f, Val *a, int irr) {
     Arg ar = {0}; ar.v = a; ar.irr = irr;
-    f = force(f);
+    f = fmeta(f);   /* a definition application stays rigid here; force() unfolds it where a canonical form is needed */
     switch (f->k) {
     case V_LAM: return inst(&f->clo, a);
     case V_NEU:
@@ -906,7 +1105,7 @@ Val *vapp(Val *f, Val *a, int irr) {
             Val *v = neu_app(f, ar);
             Data *D = &datas[f->n];
             int arity = D->nparams + D->nblock + block_ncons(f->n) + D->nidx + 1;
-            if (v->args.n == arity) { elim_lvl = f->lvl; Val *r = elim_reduce(f->n, &v->args); if (r) return r; r = elim_hcomp(f->n, &v->args); if (r) return r; }
+            if (v->args.n == arity) v->defer = 1;   /* saturated: reduced on demand (elim_force), call by need */
             return v;
         }
         return neu_app(f, ar);
@@ -948,6 +1147,7 @@ Val *vpapp(Val *p, Val *r, Val *x, Val *y) {
         return vsys(br, p->nbr);
     }
     Arg ar = {0}; ar.v = r; ar.papp = 1; ar.x = x; ar.y = y;
+    meta_blocked = 1;
     if (p->k == V_NEU || p->k == V_DATA || p->k == V_CON) return neu_app(p, ar);
     die("internal: path application to a non-path value");
     return NULL;
@@ -957,6 +1157,12 @@ Val *pair_snd(Val *p) {
     return p->b;
 }
 Val *vproj(Val *p, int which) {
+    /* A projection of a rigid definition application stays rigid (the H_DEF plan, one step further): the spine takes a
+       proj entry, exactly as fst x on a variable does, conversion compares such spines by congruence, and force()
+       unfolds through the projection where a canonical pair is needed (unfold_def replays proj entries). Forcing here
+       instead evaluated the definition's whole body for every projection written in a TYPE - two copies of a 64-level
+       loop, compared closure by closure (Bug_Eezott_ProjectionForcesDef_ExponentialConv). */
+    { Val *r = fmeta(p); if (r->k == V_NEU && r->h == H_DEF) { Arg ar = {0}; ar.proj = which; return neu_app(r, ar); } }
     p = force(p);
     if (p->k == V_PAIR) return which == 1 ? p->a : pair_snd(p);
     if (p->k == V_SYS) {
@@ -965,6 +1171,7 @@ Val *vproj(Val *p, int which) {
         return vsys(br, p->nbr);
     }
     Arg ar = {0}; ar.proj = which;
+    meta_blocked = 1;
     if (p->k == V_NEU) return neu_app(p, ar);
     die("internal: projection from a non-pair value");
     return NULL;
@@ -985,7 +1192,9 @@ Val *eval(Env *env, Term *t) {
     case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->clo.env = env; v->clo.t = t->a; return v; }
     case T_APP: return vapp(eval(env, t->a), eval(env, t->b), t->irr);
     case T_LET: return eval(env_push(env, eval(env, t->b)), t->c);
-    case T_DEF: return def_at(t->n, t->a ? eval_level(env, t->a) : lv_const(0));
+    case T_DEF: {   /* rigid: a definition application (H_DEF), unfolded where a canonical form is needed */
+        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v;
+    }
     case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
     case T_NUM: return vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num);
@@ -1050,6 +1259,7 @@ static void *caps_subst(void *data, int n, int lv, IVal s) {
 }
 static void subst_clo(Clo *dst, const Clo *src, int lv, IVal s) {
     *dst = *src;
+    dst->iarg = NULL; dst->ires = NULL; dst->imv = 0;   /* the substitution changes what the closure computes */
     if (src->fn) {
         if (src->fn == natfn) {
             NatNative *nn = src->data, *m = xalloc(sizeof *m); *m = *nn;
@@ -1107,6 +1317,7 @@ Val *subst_val(Val *v, int lv, IVal s) {
         case H_OUTS: head = vouts(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
         case H_UNGLUE: head = vunglue(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
         case H_META: { Val *fv = force(v); if (fv != v) return subst_val(fv, lv, s); head = mkval(V_NEU); head->h = H_META; head->n = v->n; break; }
+        case H_DEF: head = mkval(V_NEU); head->h = H_DEF; head->n = v->n; head->lvl = v->lvl; break;
         default: die("internal: unknown neutral head");
         }
         for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } head = apply_arg(head, &a); }
@@ -1137,15 +1348,26 @@ static Val *vtfill(Val *line, Val *phi, Val *u0) { return vnative(N_TFILL, 0, 0,
 static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL, 0, 0, 0, 4, line, phi, u, u0); } /* λi. comp (λj. line (i∧j)) (φ ∨ ~i) [..] u0 */
 
 static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
-static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
+static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; v = force(v); if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
+/* Every native closure application is memoized the same way - a pure step, keyed on the argument value, tagged by the
+   metas generation. An eliminator's induction hypothesis applied to the same value again is the same value, and branch
+   bodies do apply the same closure to the same value repeatedly (baddGo's column uses its IH three times). */
 static Val *native_apply(Native *nt, Val *arg) {
+    if (nt->mon && nt->marg == arg && (nt->mmv == metas_version || nt->mstable)) return nt->mres;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r = native_step(nt, arg);
+    nt->marg = arg; nt->mres = r; nt->mmv = metas_version; nt->mon = 1; nt->mstable = !meta_blocked;
+    meta_blocked |= save;
+    return r;
+}
+static Val *native_step(Native *nt, Val *arg) {
     switch (nt->code) {
     case N_IH: return ih_apply(nt, arg);
     case N_CONST: return CAP(nt, 0);
-    case N_LINE_DOM: { Val *pi = vapp(CAP(nt, 0), arg, 0); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: domain of a non-function line"); return pi->dom; }
+    case N_LINE_DOM: { Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: domain of a non-function line"); return pi->dom; }
     case N_LINE_COD_V: {    /* λi. B_i (v i), cap: line, vfn */
-        Val *pi = vapp(CAP(nt, 0), arg, 0); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: codomain of a non-function line");
+        Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: codomain of a non-function line");
         return inst(&pi->clo, vapp(CAP(nt, 1), arg, 0));
     }
     case N_TRANSP_V: {      /* v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1, cap: Aline, phi, u1 */
@@ -1157,20 +1379,20 @@ static Val *native_apply(Native *nt, Val *arg) {
         return vapp(CAP(nt, 0), nt->i1 ? ior(r, ineg(arg)) : ior(arg, r), 0);
     }
     case N_LINE_IAND: return vapp(CAP(nt, 0), iand(CAP(nt, 1), arg), 0);   /* λj. line (i ∧ j) */
-    case N_HCOMP_PI_SIDES: return vapp(vapp(CAP(nt, 0), arg, 0), CAP(nt, 1), nt->i1);   /* λi. (u i) x */
+    case N_HCOMP_PI_SIDES: return vapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 1), nt->i1);   /* λi. (u i) x */
     case N_PATH_HCOMP_SIDES: {   /* λi. [φ ↦ (u i) @ j, j ↦ y, ~j ↦ x], cap: u, phi, j, x, y */
         VBranch br[3];
-        br[0].phi = CAP(nt, 1); br[0].v = vpapp(vapp(CAP(nt, 0), arg, 0), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4));
+        br[0].phi = CAP(nt, 1); br[0].v = vpapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4));
         br[1].phi = CAP(nt, 2); br[1].v = CAP(nt, 4);
         br[2].phi = ineg(CAP(nt, 2)); br[2].v = CAP(nt, 3);
         return vsys(br, 3);
     }
     case N_LINE_PATH_AT: {       /* λi. (line i).line @ j  (the type of paths at i, applied to j), cap: line, j */
-        Val *pt = vapp(CAP(nt, 0), arg, 0); if (pt->k != V_PATHP) die("internal: path line expected");
+        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
         return vapp(pt->a, CAP(nt, 1), 0);
     }
     case N_PATH_TRANSP_SIDES: {  /* λi. [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i], cap: line, phi, p, j */
-        Val *pt = vapp(CAP(nt, 0), arg, 0); if (pt->k != V_PATHP) die("internal: path line expected");
+        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
         Val *p0 = vapp(CAP(nt, 0), izero(), 0);
         VBranch br[3];
         br[0].phi = CAP(nt, 1); br[0].v = vpapp(CAP(nt, 2), CAP(nt, 3), p0->b, p0->c);
@@ -1201,7 +1423,7 @@ static Val *native_apply(Native *nt, Val *arg) {
     }
     case N_TFILL: return vtransp(vnative(N_LINE_IAND, 0, 0, 0, 2, CAP(nt, 0), arg), ior(CAP(nt, 1), ineg(arg)), CAP(nt, 2));
     case N_DATA_ARG_LINE: {      /* λi. A_j evaluated at (params of line i, fills k<j at i); cap: line, fill_0..fill_{j-1}; i1=con, i2=j */
-        Val *Di = vapp(CAP(nt, 0), arg, 0); if (Di->k != V_DATA) die("internal: data line expected");
+        Val *Di = force(vapp(CAP(nt, 0), arg, 0)); if (Di->k != V_DATA) die("internal: data line expected");
         Con *C = con_at(nt->i1, Di->lvl); int np = datas[C->data].nparams;
         Env *e = NULL;
         for (int i = 0; i < np; i++) e = env_push(e, Di->args.a[i].v);
@@ -1274,7 +1496,7 @@ static Val *native_apply(Native *nt, Val *arg) {
     }
     case N_TRANSP_MAP: return vsys_map(vapp(CAP(nt, 2), arg, 0), transp_branch, nt);   /* λi. transp line phi (u i) over the partial element; cap: line, phi, u */
     case N_SYS_PROJ: {           /* λi. proj_k (u i) over the partial element; cap: u; i1 = k */
-        Val *ui = vapp(CAP(nt, 0), arg, 0);
+        Val *ui = force(vapp(CAP(nt, 0), arg, 0));
         int k = nt->i1;
         return vsys_map(ui, proj_arg, &k);
     }
@@ -1285,6 +1507,7 @@ static Val *native_apply(Native *nt, Val *arg) {
 
 /* all branches of the partial element u (at a fresh i) are constructor c? */
 static int sides_all_con(Val *u, int con) {
+    u = force(u);   /* a rigid definition application unfolds to the partial element */
     Val *ui = vapp(u, fresh_ivar(), 0);
     if (ui->k == V_NUM) ui = num_view(ui);
     if (ui->k == V_SYS) {
@@ -1426,7 +1649,7 @@ Val *transp_path_apply(void *data, Val *j) {
 }
 
 Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(vapp(u, ione(), 0), NULL); if (!t) die("internal: total system without a total branch"); return t; }
+    if (iv_is_one(phi->iv)) { Val *t = vsys_at(force(vapp(u, ione(), 0)), NULL); if (!t) die("internal: total system without a total branch"); return t; }
     A = force(A); u0 = force(u0);
     if (A->k == V_NEU && A->h == H_META) die("hcomp at a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
     switch (A->k) {
@@ -1661,8 +1884,24 @@ static Term *quote_iv(int depth, IVal a) {
     }
     return r;
 }
-Term *quote(int depth, Val *v) {
+/* The value a print-out should show. A pair's first component is a word over the naturals and may still be an
+   unforced application - a value is canonical enough for conversion long before it is a printed normal form - so
+   force it through. An irrelevant second component is a proof that prints as '.', and forcing it would mean walking
+   a proof nobody reads. */
+Val *nf_force(Val *v) {
     v = force(v);
+    if (v->k == V_CON && v->args.n > 0) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
+        Val *w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl;
+        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (!a.irr) a.v = nf_force(a.v); w = vapply_arg(w, &a); }
+        return w;
+    }
+    if (v->k != V_PAIR) return v;
+    Val *w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; w->a = nf_force(v->a);
+    if (!v->irr) w->b = nf_force(pair_snd(v));
+    return w;
+}
+Term *quote(int depth, Val *v) {
+    v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
     case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); Term *t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
     case V_L: return quote_level(depth, v->lvl);
@@ -1705,6 +1944,7 @@ Term *quote(int depth, Val *v) {
         else if (v->h == H_OUTS) h = mk_term(T_OUTS, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
         else if (v->h == H_UNGLUE) h = mk_term(T_UNGLUE, quote(depth, v->dom), quote(depth, v->a), quote(depth, v->b), quote(depth, v->c));
         else if (v->h == H_META) { h = mk_term(T_META, NULL, NULL, NULL, NULL); h->n = v->n; }
+        else if (v->h == H_DEF) h = mk_ref_l(T_DEF, v->n, quote_level(depth, v->lvl));
         else h = mk_var(depth - 1 - v->n);
         for (int i = 0; i < v->args.n; i++) {
             Arg *a = &v->args.a[i];
@@ -1725,6 +1965,7 @@ static int conv_spine(int depth, VList *a, VList *b) {
     for (int i = 0; i < a->n; i++) {
         if (a->a[i].proj != b->a[i].proj) return 0;   /* path and plain application to an interval coincide */
         if (a->a[i].proj) continue;
+        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;   /* the argument of an irrelevant binder */
         if (!conv(depth, a->a[i].v, b->a[i].v)) return 0;
     }
     return 1;
@@ -1750,8 +1991,63 @@ int conv(int depth, Val *a, Val *b) {
     if (!r) { lstore_rollback(m); meta_rollback(mm); }
     return r;
 }
+static int conv1_b(int depth, Val *a, Val *b);
+static int conv_fail_logged;
+int conv_depth_now;
 static int conv1(int depth, Val *a, Val *b) {
-    a = force(a); b = force(b);
+    conv_depth_now++;
+    int r = conv1_b(depth, a, b);
+    conv_depth_now--;
+    if (!r && conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE")) {
+        conv_fail_logged++;
+        fprintf(stderr, "[conv] #%d depth %d call-depth %d: ", conv_fail_logged, depth, conv_depth_now);
+        const char *nm[2048] = {0};
+        term_print(stderr, quote(0, a), nm, 0); fputs("   !=   ", stderr);
+        term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr);
+        if ((a->k == V_I || b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
+    }
+    return r;
+}
+static int conv1_b(int depth, Val *a, Val *b) {
+    a = fmeta(a); b = fmeta(b);
+    /* definition applications stay rigid: the same definition compares by spine congruence, and the spine's arguments
+       at .() binders (irr bit 2) are skipped - proofs differing only there are equal by construction (compareIrrelevant
+       in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
+    for (;;) {
+        int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
+        int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
+        if (ad && bd) {
+            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
+               Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
+            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_DEF, a->n, a->lvl, b->lvl)
+                && conv_spine(depth, &a->args, &b->args)) return 1;
+            /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
+               height). A wrapper's body usually reaches the other definition's own head, and the congruence fast path
+               then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
+               a literal fuel, say - and the comparison walks that body's closures (Bug_Eezott_ConvUnfoldsBothSides).
+               A native's guard neutral unfolds to itself: it is rigid, and two of them differ by their spines. */
+            Val *ua, *ub;
+            if (a->n != b->n) {
+                if (a->n > b->n) { ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } }
+                else { ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } }
+                break;
+            }
+            ua = fmeta(unfold_def(a)); ub = fmeta(unfold_def(b));
+            if (ua == a && ub == b) break;
+            a = ua; b = ub; continue;
+        }
+        if (ad) { Val *u = fmeta(unfold_def(a)); if (u != a) { a = u; continue; } }
+        if (bd) { Val *u = fmeta(unfold_def(b)); if (u != b) { b = u; continue; } }
+        /* deferred eliminations: the same one by spine congruence, else reduced (a stuck one drops its flag) */
+        if (ae && be) {
+            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)
+                && conv_spine(depth, &a->args, &b->args)) return 1;
+            a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
+        }
+        if (ae) { a = fmeta(elim_force(a)); continue; }
+        if (be) { b = fmeta(elim_force(b)); continue; }
+        break;
+    }
     /* a level variable is a level value in the context and a neutral variable under a binder opened by conversion */
     if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) return lv_enforce_eq(a->lvl, lv_var(b->n)) == 1;
     if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) return lv_enforce_eq(b->lvl, lv_var(a->n)) == 1;
@@ -1812,7 +2108,7 @@ static int conv1(int depth, Val *a, Val *b) {
         if (a->h == H_TRANSP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c))) return 0; }
         else if (a->h == H_HCOMP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c) && conv(depth, a->dom, b->dom))) return 0; }
         else if (a->h == H_OUTS || a->h == H_UNGLUE) { if (!conv(depth, a->dom, b->dom)) return 0; }
-        else if (a->n != b->n || !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) return 0;
+        else if (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl))) return 0;   /* a variable's n is its level, not a global id */
         return conv_spine(depth, &a->args, &b->args);
     case V_DATA: case V_CON: return a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl) && conv_spine(depth, &a->args, &b->args);
     default: return 0;

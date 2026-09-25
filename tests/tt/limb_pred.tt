@@ -1,0 +1,6 @@
+#import prelude
+#import word
+-- C3: a case analysis on the Nat - a method that does not use its induction hypothesis - is answered at the
+-- literal's own granularity: the predecessor of 2^64 + 7 is one limb-level subtraction
+def pk (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> k) n
+def main : Nat := pk 18446744073709551623

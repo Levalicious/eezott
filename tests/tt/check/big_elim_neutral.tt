@@ -1,0 +1,13 @@
+#import prelude
+-- M16b A2: a method that does use its induction hypothesis walks the literal one successor per step, and one
+-- successor of a machine-sized literal is a word of steps. There is no chunk of that fold which is the value its
+-- step expects, so the elimination is a neutral - the check completes, and it is the walk that is refused, not
+-- the program. (A method that does not use its hypothesis is a case analysis and does compute; see
+-- tests/tt/limb_pred.tt.) The same rule is by shape, not by the name Nat: psum's type is a Peano type of its own
+def dbl (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> suc (suc ih)) n
+data Pea : U where
+  | pea0 : Pea
+  | pea1 : Pea -> Pea
+def psum (n : Pea) : Nat := elim Pea (\_ -> Nat) 0 (\k ih -> ih) n
+def a : Nat := dbl 18446744073709551616
+def b : Nat := psum 18446744073709551616

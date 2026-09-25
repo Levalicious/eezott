@@ -1,0 +1,6 @@
+#import prelude
+#import word
+-- M16b: the modular inverse at machine scale. minv x y = mod (pow x (sub y 2)) y, and the power is taken
+-- modulo y all the way, so the inverse exists for moduli whose full power has no limbs to be held in.
+-- 2^127 - 1 is prime, so three times the inverse of three is one
+def main : Nat := mod (mul 3 (minv 3 170141183460469231731687303715884105727)) 170141183460469231731687303715884105727

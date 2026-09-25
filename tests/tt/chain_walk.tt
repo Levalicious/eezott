@@ -1,0 +1,6 @@
+#import prelude
+#import word
+-- M17: a fold with no closed form walks the chain - the zero test is bisz, the predecessor nsub n 1, and the
+-- step's own arithmetic is the chain's: the triangular number of 5 is 15
+def tri (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> add ih (suc k)) n
+def main : Nat := tri 5

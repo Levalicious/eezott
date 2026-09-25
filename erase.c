@@ -33,9 +33,127 @@
 #include <stdlib.h>
 
 int keep_kan, nf_main;
+/* Two representations of the Nat (M17, the pivot to A). A library declaration - the prelude and the imports -
+   computes with the unary Nat: its numbers are fuels, lengths and the 0/1 of decisions, and its Scott numeral
+   walks. A program declaration computes with the chain: the normalised, most-significant-first list of machine
+   words of stdlib/tt/word.tt (WB), and its arithmetic is that library's own folds - nadd, nsub, nmul, bpow_wb,
+   bdivmod_wb, bminv_wb, the comparisons and the zero test bisz - the theorems of wnat.tt being the licence:
+   running the fold and reading the answer back through wbval is the number the native denotes. The chain is
+   in force when word.tt is loaded (its import is the switch); without it a program's Nat is the unary one.
+   Every declaration is erased in the mode of the reference that reaches it: a library definition reached from
+   program code is emitted a second time, in chain mode, as tt_p_NAME (a library data type's code as tc_p_NAME),
+   after every unary definition, since the chain copies call the folds. */
+static int chain_nat;          /* word.tt is loaded: program declarations compute with the chain */
+static int mode;               /* the mode of the declaration being emitted: 0 unary, 1 chain */
+static int nat_data = -1;      /* the prelude's Nat */
+static int list_data = -1;     /* the prelude's List: the chain's constructors */
+static int is_nat(int d) { return nat_data >= 0 && d == nat_data; }
+static int def_named(const char *name);
+/* the folds the chain's natives are, by native code (1 add .. 10 minv), then the elimination's and the boundary's */
+static const char *fold_name[] = { "nadd", "nsub", "nmul", "bdivmod_wb", "bdivmod_wb", "bpow_wb", "beq_wb", "blt_wb", "ble_wb", "bminv_wb", "bisz", "wsingle", "wlow" };
+enum { F_NADD = 1, F_NSUB = 2, F_NMUL = 3, F_BISZ = 11, F_WSINGLE = 12, F_WLOW = 13 };
+static int fold_def(int f) {
+    int d = def_named(fold_name[f - 1]);
+    if (d < 0 || !defs[d].lib) die("the chain arithmetic is stdlib/tt/word.tt's, and it lacks %s", fold_name[f - 1]);
+    return d;
+}
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 static void emit_sel(int nb, int m);
+static void erase(Term *t, int depth);
+
+/* The chain's view of an elimination on the Nat (M16b C3, M17). A method that does not use its induction
+   hypothesis is a case analysis, answered at the chain's own granularity: zero by bisz, the predecessor by
+   nsub n 1 - one pass over the limbs each - with the method taking a dummy where its induction hypothesis
+   would be, which is exactly the value the checker hands it. A method that uses its hypothesis is a fold:
+   the closed form when a theorem licenses one (fold.tt), and otherwise the walk, predecessor by predecessor -
+   work proportional to the value, as the checker's own elimination. The walk is the default; a closed form
+   is licensed by a theorem, never guessed. */
+static Term *strip_lams(Term *t, int k) {
+    while (t && k > 0 && t->k == T_LAM) { t = t->a; k--; }
+    return k > 0 ? NULL : t;
+}
+/* The prelude's def with this name, or -1 (the folds below reach for add and mul by name) */
+static int def_named(const char *name) {
+    for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, name)) return i;
+    return -1;
+}
+/* a def applied to arguments, built as a term for the ordinary erasure to emit */
+static Term *mk_defapp(int d, Term **args, int nargs) {
+    Term *t = xalloc(sizeof *t);
+    t->k = T_DEF; t->n = d;
+    for (int i = 0; i < nargs; i++) {
+        Term *ap = xalloc(sizeof *ap);
+        ap->k = T_APP; ap->a = t; ap->b = args[i];
+        t = ap;
+    }
+    return t;
+}
+/* A fold whose step factors through the limb algebra compiles as a whole; one whose step does not cannot be
+   carried at all. The factorisations there is a theorem for are the ones below. stdlib/tt/fold.tt proves the
+   first (elim_add): a step
+   that adds w to the running value, taken n times from z, is z + n * w. The successor run suc (suc .. ih)
+   is that step with w the number of successors. Anything else is still refused - a closed form is licensed
+   by a theorem, never guessed - and a step whose w mentions the hypothesis or the predecessor has none.
+   Emits the form and returns 1, or returns 0 and emits nothing. */
+static int nat_fold_closed(Term *body, Term *z, Term *scrut, int depth) {
+    int addd = def_named("add"), muld = def_named("mul"), zi, si;
+    if (addd < 0 || muld < 0 || !peano_shape(nat_data, &zi, &si)) return 0;
+    Term *w = NULL, *jlit = NULL;
+    Term *b = body; int j = 0;
+    while (b->k == T_APP && b->a->k == T_CON && b->a->n == si) { b = b->b; j++; }   /* suc^j ih */
+    if (j > 0 && b->k == T_VAR && b->n == 0) {
+        jlit = xalloc(sizeof *jlit);
+        jlit->k = T_NUM; jlit->n = nat_data; jlit->num = bn_from_u64((u64)j);
+        w = jlit;
+    } else if (body->k == T_APP && body->a->k == T_APP && body->a->a->k == T_DEF && body->a->a->n == addd) {
+        Term *a1 = body->a->b, *a2 = body->b;      /* add a1 a2, with the hypothesis on either side */
+        int h1 = a1->k == T_VAR && a1->n == 0, h2 = a2->k == T_VAR && a2->n == 0;
+        w = h1 ? a2 : (h2 ? a1 : NULL);
+        if (w && (term_mentions_var(w, 0) || term_mentions_var(w, 1))) w = NULL;
+        if (w) w = shift(w, 2, -2);   /* out from under the method's two binders, into the elimination's own context */
+    }
+    if (!w) return 0;
+    Term *mulargs[2] = { scrut, w };
+    Term *mul = mk_defapp(muld, mulargs, 2);
+    Term *addargs[2] = { z, mul };
+    erase(mk_defapp(addd, addargs, 2), depth);     /* add z (mul n w), and the erasure of the natives does the rest */
+    return 1;
+}
+static int try_nat_elim(Term *t, int depth) {
+    if (!mode) return 0;
+    Term *node[8]; int n = 0; Term *h = t;
+    while (h->k == T_APP) { if (n < 8) node[n] = h; n++; h = h->a; }
+    if (h->k != T_ELIM || !is_nat(h->n)) return 0;
+    if (n > 8) die("the Nat is the run-time chain: this elimination is applied to more arguments than the erasure can see through");
+    /* the eliminator's own arguments are the innermost four: the motive (irrelevant, so never emitted), the
+       methods in constructor order, and the scrutinee; anything outside them applies the elimination's result */
+    if (n < 4) die("the Nat is the run-time chain: an elimination on it must be applied to its motive, methods and scrutinee");
+    int extra = n - 4;
+    Term *motive = node[n - 1]->b, *mz = node[n - 2]->b, *ms = node[n - 3]->b, *scrut = node[n - 4]->b;
+    (void)motive;
+    Term *meth = ms;
+    if (meth->k == T_DEF) meth = defs[meth->n].val;   /* the checker sees through a definition application; so does the erasure */
+    Term *body = strip_lams(meth, 2);
+    if (!body) die("the Nat is the run-time chain: an elimination's method must be a function of its predecessor and its induction hypothesis");
+    /* The methods live in the context outside the binder v<depth> introduced here and never mention it, so they
+       are erased at that depth (a binder of their own may reuse the name inside its own scope, harmlessly).
+       bisz answers 1 (the unary suc 0) at zero: its second handler is the zero case. */
+    if (term_mentions_var(body, 0)) {
+        if (!nat_fold_closed(body, mz, scrut, depth)) {   /* the walk: fix over the predecessor */
+            fprintf(out, "(fix(self -> v%d -> tt_bisz(v%d)(", depth, depth); erase(ms, depth);
+            fprintf(out, "(tt_nsub(v%d)(tt_c_lcons(1w)(tt_c_lnil)))(self(tt_nsub(v%d)(tt_c_lcons(1w)(tt_c_lnil)))))(k -> ", depth, depth);
+            erase(mz, depth); fputs(")))(", out); erase(scrut, depth); fputc(')', out);
+        }
+    } else {   /* the case analysis: the predecessor, and a dummy for the induction hypothesis */
+        fprintf(out, "((v%d -> tt_bisz(v%d)(", depth, depth); erase(ms, depth);
+        fprintf(out, "(tt_nsub(v%d)(tt_c_lcons(1w)(tt_c_lnil)))(tc_u))(k -> ", depth);
+        erase(mz, depth); fputs("))(", out); erase(scrut, depth); fputs("))", out);
+    }
+    for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) { fputc('(', out); erase(node[i]->b, depth); fputc(')', out); }
+    return 1;
+}
+
 
 /* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
 static IVal face_ival(Term *t, int depth) {
@@ -87,6 +205,7 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->a, depth + 1); break; }
         fprintf(out, "(v%d -> ", depth); erase(t->a, depth + 1); fputc(')', out); break;
     case T_APP:
+        if (try_nat_elim(t, depth)) break;   /* the Nat elimination's chain view */
         erase(t->a, depth);
         if (!t->irr) { fputc('(', out); erase(t->b, depth); fputc(')', out); }
         break;
@@ -95,19 +214,47 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
     case T_DEF:
+        /* In chain mode a native is word.tt's fold of the same value (stdlib/tt/wnat.tt: wbval carries each fold
+           onto the natural operation, so running the fold and reading the answer back through wbval is the
+           number the native denotes). A comparison's 0/1 is the library's unary Nat, carried to the chain. */
+        if (mode && defs[t->n].native) {
+            int f = defs[t->n].native;
+            switch (f) {
+            case 1: case 2: case 3: case 6: case 10: fprintf(out, "tt_%s", fold_name[f - 1]); break;
+            case 4: fputs("(a -> b -> tt_fst(tt_bdivmod_wb(a)(b)))", out); break;     /* div: the pair's first */
+            case 5: fputs("(a -> b -> tt_snd(tt_bdivmod_wb(a)(b)))", out); break;     /* mod: its second */
+            case 7: case 8: case 9: fprintf(out, "(a -> b -> tt_%s(a)(b)(tt_c_lnil)(k -> tt_c_lcons(1w)(tt_c_lnil)))", fold_name[f - 1]); break;
+            default: die("internal: unknown native %d", f);
+            }
+            break;
+        }
         if (defs[t->n].wordop) fputs(wordop_name(defs[t->n].wordop), out);   /* a word operation is its run-time primitive */
         else if (defs[t->n].isword) fputs("tc_u", out);                     /* the word type: a machine word normalizes to itself */
-        else fprintf(out, "tt_%s", defs[t->n].name);
+        else fprintf(out, mode && defs[t->n].lib ? "tt_p_%s" : "tt_%s", defs[t->n].name);   /* a library definition: its chain copy */
         break;
-    case T_NUM: erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
+    case T_NUM:
+        if (mode && is_nat(t->n)) {   /* the chain: the literal's machine words, most significant first, none for zero */
+            for (int i = t->num->n - 1; i >= 0; i--) fprintf(out, "tt_c_lcons(%lluw)(", (unsigned long long)t->num->limb[i]);
+            fputs("tt_c_lnil", out); for (int i = 0; i < t->num->n; i++) fputc(')', out);
+            break;
+        }
+        erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
     case T_IRR: fputs("tc_u", out); break;
-    case T_CON: fprintf(out, "tt_c_%s", cons[t->n].name); break;
-    case T_ELIM: fprintf(out, "tt_rec_%s", datas[t->n].name); break;
+    case T_CON:
+        if (mode && is_nat(cons[t->n].data)) {   /* the chain's zero, and its successor as a function */
+            if (cons[t->n].nargs == 0) { fputs("tt_c_lnil", out); break; }
+            fputs("(x -> tt_nadd(x)(tt_c_lcons(1w)(tt_c_lnil)))", out); break;
+        }
+        fprintf(out, "tt_c_%s", cons[t->n].name); break;
+    case T_ELIM:
+        if (mode && is_nat(t->n)) die("the Nat is the run-time chain: an elimination on it is compiled from its whole spine, so it cannot be erased head-first");
+        fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
+        if (mode && is_nat(t->n)) { fputs("tc_p_List(tc_u)", out); break; }   /* the chain's code: a list of machine words */
         if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
             if (datas[t->n].nblock == 1) fputs("self", out);
             else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }
-        } else fprintf(out, "tc_%s", datas[t->n].name);
+        } else fprintf(out, mode && datas[t->n].lib ? "tc_p_%s" : "tc_%s", datas[t->n].name);   /* a library type: its chain code */
         break;
     case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
@@ -130,14 +277,18 @@ static void erase(Term *t, int depth) {
     case T_PAIR:
         if (t->n) {   /* at the word type: the machine word */
             if (t->a->k == T_NUM) { char *s = bn_to_dec(t->a->num); fprintf(out, "%sw", s); free(s); }
-            else { fputs("tt_nattoword(", out); erase(t->a, depth); fputc(')', out); }
+            else { fputs(mode ? "tt_wlow(" : "tt_nattoword(", out); erase(t->a, depth); fputc(')', out); }   /* the chain's low limb; the unary count */
             break;
         }
         fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out);
         if (t->irr) fputs("tc_u", out); else erase(t->b, depth);   /* an irrelevant component has no run-time content */
         fputc(')', out); break;
     case T_FST:
-        if (t->n) { fputs("tt_wtonat(", out); erase(t->a, depth); fputc(')', out); break; }
+        if (t->n) {   /* a word's value: the one-limb chain; the unary count only where no chain runs - a library run path
+                         reading a limb as a unary Nat would be a walk of up to 2^64, so with word.tt loaded it is refused */
+            if (!mode && chain_nat) die("%s reads a word's value as a unary Nat (fst at the word type) on a run path: decide with wlt or weq", cur_decl_name);
+            fputs(mode ? "tt_wsingle(" : "tt_wtonat(", out); erase(t->a, depth); fputc(')', out); break;
+        }
         fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
     case T_SND:
         if (t->n) { fputs("tc_u", out); break; }
@@ -395,19 +546,19 @@ static void emit_code_body(Data *D) {   /* p.. i.. -> k -> k(TRANSP)(HCOMP)(NF)(
     for (int p = 0; p < np; p++) fprintf(out, "(p%d)", p);
     for (int j = 0; j < m; j++) fprintf(out, "(i%d)", j);
 }
-static void emit_codes(Data *D) {
-    fprintf(out, "tc_%s := fix(self -> ", D->name);
+static void emit_codes(Data *D, const char *pre) {   /* pre: "" or "p_" (a library type's chain code) */
+    fprintf(out, "tc_%s%s := fix(self -> ", pre, D->name);
     emit_code_body(D);
     fputs(")\n", out);
 }
 /* a block of several: the codes as one fixpoint over a tuple (the members' codes refer to each other), then each member's
    code as a selection; likewise the eliminators */
-static void emit_block_codes(Data *B) {
+static void emit_block_codes(Data *B, const char *pre) {
     int nb = B->nblock;
-    fprintf(out, "tcb_%s := fix(selfs -> k -> k", B->name);
+    fprintf(out, "tcb_%s%s := fix(selfs -> k -> k", pre, B->name);
     for (int i = 0; i < nb; i++) { fputc('(', out); emit_code_body(&B[i]); fputc(')', out); }
     fputs(")\n", out);
-    for (int i = 0; i < nb; i++) { fprintf(out, "tc_%s := tcb_%s(", B[i].name, B->name); emit_sel(nb, i); fputs(")\n", out); }
+    for (int i = 0; i < nb; i++) { fprintf(out, "tc_%s%s := tcb_%s%s(", pre, B[i].name, pre, B->name); emit_sel(nb, i); fputs(")\n", out); }
 }
 static void emit_block_recs(Data *B) {
     int nb = B->nblock;
@@ -417,43 +568,56 @@ static void emit_block_recs(Data *B) {
     for (int i = 0; i < nb; i++) { fprintf(out, "tt_rec_%s := ttrecs_%s(", B[i].name, B->name); emit_sel(nb, i); fputs(")\n", out); }
 }
 
-/* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and codes */
-static int *def_used, *data_used;
+/* only what main reaches is emitted: definitions through their bodies, data types through constructors, eliminators and
+   codes - per mode: a library declaration reached in chain mode (m = 1) is emitted again as its chain copy */
+static int *def_used, *data_used, *def_used_p, *data_used_p;
 static int uses_words;   /* the program has words: the conversions between Scott naturals and machine words are emitted */
-static void mark(Term *t);
+static void mark(Term *t, int m);
+static void mark_def(int d, int m) {
+    int *used = m ? def_used_p : def_used;
+    if (!used[d]) { used[d] = 1; mark(defs[d].val, m); }
+}
 /* a data type is used with its whole block: the members' eliminators and codes refer to each other */
-static void mark_data(int d) {
+static void mark_data(int d, int m) {
     Data *B = &datas[datas[d].block];
+    int *used = m ? data_used_p : data_used;
     for (int i = 0; i < datas[d].nblock; i++) {
         Data *M = &B[i]; int id = M - datas;
-        if (data_used[id]) continue;
-        data_used[id] = 1; mark(M->ty);
-        for (int ci = 0; ci < M->ncons; ci++) mark(cons[M->cons[ci]].ty);
+        if (used[id]) continue;
+        used[id] = 1; mark(M->ty, m);
+        for (int ci = 0; ci < M->ncons; ci++) mark(cons[M->cons[ci]].ty, m);
     }
+    if (m && datas[d].lib) mark_data(d, 0);   /* the constructors and eliminators are the unary emission's; the chain adds a code */
 }
-static void mark(Term *t) {
+/* a fold of the chain (unary: it is the library's) and the chain's constructors */
+static void mark_chain(int f) { mark_def(fold_def(f), 0); mark_data(list_data, 1); }
+static void mark(Term *t, int m) {
     if (!t) return;
     switch (t->k) {
     case T_DEF:
+        if (m && defs[t->n].native) { mark_chain(defs[t->n].native); break; }   /* the fold stands for it */
         if (defs[t->n].wordop) { uses_words = 1; break; }   /* the primitive stands for it: its body is not emitted */
         if (defs[t->n].isword) break;
-        if (!def_used[t->n]) { def_used[t->n] = 1; mark(defs[t->n].val); }
+        mark_def(t->n, m);
         break;
-    case T_NUM: mark(numeral_term(t->n, t->a, t->num)); break;
-    case T_PAIR: if (t->n) uses_words = 1; mark(t->a); if (!t->irr) mark(t->b); break;
-    case T_FST: case T_SND: if (t->n) uses_words = 1; mark(t->a); break;
-    case T_CON: mark_data(cons[t->n].data); break;
-    case T_ELIM: case T_DATA: mark_data(t->n); break;
-    case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face); mark(t->br[i].body); } break;
-    case T_APP: mark(t->a); if (!t->irr) mark(t->b); break;
-    case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a); mark(t->b); } mark(t->c); break;
-    case T_HCOMP: mark(t->a); mark(t->b); mark(t->c); mark(t->d);
-        if (t->n) for (int i = 0; i < ndefs; i++) if ((!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
+    case T_NUM: if (m && is_nat(t->n)) { mark_data(list_data, 1); break; } mark(numeral_term(t->n, t->a, t->num), m); break;
+    case T_PAIR: if (t->n) { uses_words = 1; if (m) mark_chain(F_WLOW); } mark(t->a, m); if (!t->irr) mark(t->b, m); break;
+    case T_FST: case T_SND: if (t->n) { uses_words = 1; if (m) mark_chain(F_WSINGLE); } mark(t->a, m); break;
+    case T_CON: if (m && is_nat(cons[t->n].data)) { mark_chain(F_NADD); break; } mark_data(cons[t->n].data, m); break;
+    case T_ELIM:   /* the case analysis, the walk, and the closed forms' add and mul */
+        if (m && is_nat(t->n)) { mark_chain(F_BISZ); mark_chain(F_NSUB); mark_chain(F_NADD); mark_chain(F_NMUL); break; }
+        mark_data(t->n, m); break;
+    case T_DATA: if (m && is_nat(t->n)) { mark_data(list_data, 1); break; } mark_data(t->n, m); break;
+    case T_SYS: for (int i = 0; i < t->nbr; i++) { mark(t->br[i].face, m); mark(t->br[i].body, m); } break;
+    case T_APP: mark(t->a, m); if (!t->irr) mark(t->b, m); break;
+    case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { mark(t->a, m); mark(t->b, m); } mark(t->c, m); break;
+    case T_HCOMP: mark(t->a, m); mark(t->b, m); mark(t->c, m); mark(t->d, m);   /* tt_hcompU is the unary emission's, over tt_transpEquiv */
+        if (t->n) for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) { mark_def(i, 0); mark_def(i, m); }
         break;
-    case T_GLUE: mark(t->a); mark(t->b); mark(t->c);
-        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof") && !def_used[i]) { def_used[i] = 1; mark(defs[i].val); }
+    case T_GLUE: mark(t->a, m); mark(t->b, m); mark(t->c, m);
+        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof")) { mark_def(i, 0); mark_def(i, m); }
         break;
-    default: mark(t->a); mark(t->b); mark(t->c); mark(t->d); break;
+    default: mark(t->a, m); mark(t->b, m); mark(t->c, m); mark(t->d, m); break;
     }
 }
 
@@ -488,6 +652,48 @@ static void emit_glue_runtime(void) {
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }
 
+/* Declaration order: data types and definitions interleaved by line number. Pass 0 (unary) emits every library
+   declaration reached - constructors, eliminators, codes, bodies; pass 1 (chain) the chain codes of the library
+   types reached from program code (tc_p_), the chain copies of the library definitions reached (tt_p_), and the
+   program's own declarations, whole. Without word.tt there is one pass, and every declaration is in it. */
+static void emit_decls(int m) {
+    mode = m;
+    int di = 0, fi = 0;
+    while (di < ndatas || fi < ndefs) {
+        int take_data = fi >= ndefs || (di < ndatas && datas[di].seq < defs[fi].seq);
+        if (take_data) {
+            Data *D = &datas[di];
+            int prog = chain_nat && !D->lib;          /* a program type lives in chain mode only */
+            int whole = m ? prog : !prog;             /* constructors and eliminators once; a library type's chain pass adds its code */
+            int *used = m ? data_used_p : data_used;
+            const char *pre = m && !prog ? "p_" : "";
+            if (D->nblock > 1) {   /* a mutual block, emitted as a whole at its first member */
+                Data *B = &datas[D->block]; int nb = B->nblock; di = D->block + nb;
+                if (!used[B - datas] || (!m && prog)) continue;
+                if (whole) for (int i = 0; i < nb; i++) { for (int ci = 0; ci < B[i].ncons; ci++) emit_con(&B[i], ci); if (formal_hcomp(&B[i])) emit_hcomp_con(&B[i]); }
+                emit_block_codes(B, pre);
+                if (whole) emit_block_recs(B);
+                continue;
+            }
+            di++;
+            if (!used[D - datas] || (!m && prog)) continue;
+            if (whole) { for (int ci = 0; ci < D->ncons; ci++) emit_con(D, ci); if (formal_hcomp(D)) emit_hcomp_con(D); }
+            emit_codes(D, pre);
+            if (whole) emit_rec(D);
+        } else {
+            Def *d = &defs[fi++];
+            int prog = chain_nat && !d->lib;
+            if (!(m ? def_used_p : def_used)[d - defs] || (!m && prog)) continue;
+            cur_decl_name = d->name;   /* erasure unfolds redexes, and an inductive lemma at a literal walks it */
+            fprintf(out, m && !prog ? "tt_p_%s := " : "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
+            if (m) continue;
+            if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
+            if (!strcmp(d->name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
+                fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(tt_sel(phi)(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
+        }
+    }
+}
+
 void erase_program(FILE *f) {
     char *buf = NULL; size_t sz = 0;
     out = open_memstream(&buf, &sz);
@@ -495,9 +701,16 @@ void erase_program(FILE *f) {
     for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "main")) mainid = i;
     if (mainid < 0) die("no 'main' definition to run");
     if (defs[mainid].irr) die("'main' is a type; a program must be a value");
-    if (nf_main) defs[mainid].val = quote(0, defs[mainid].vval);   /* the checker's normal form instead of the source */
+    if (nf_main) defs[mainid].val = quote(0, nf_force(defs[mainid].vval));   /* the checker's normal form instead of the source (rigid: definitions are opaque values) */
     def_used = xalloc((ndefs + 1) * sizeof(int)); data_used = xalloc((ndatas + 1) * sizeof(int));
-    def_used[mainid] = 1; mark(defs[mainid].val); mark(defs[mainid].ty);
+    def_used_p = xalloc((ndefs + 1) * sizeof(int)); data_used_p = xalloc((ndatas + 1) * sizeof(int));
+    for (int i = 0; i < ndatas; i++) if (datas[i].lib) {
+        if (nat_data < 0 && !strcmp(datas[i].name, "Nat")) nat_data = i;
+        if (list_data < 0 && !strcmp(datas[i].name, "List")) list_data = i;
+    }
+    for (int i = 0; i < ndefs; i++) if (defs[i].lib && !strcmp(defs[i].name, "nadd")) chain_nat = nat_data >= 0 && list_data >= 0;   /* word.tt is loaded */
+    mode = chain_nat;
+    (mode ? def_used_p : def_used)[mainid] = 1; mark(defs[mainid].val, mode); mark(defs[mainid].ty, mode);
     fputs("#import prelude\n", out);
     /* the interval as three-valued Scott data (i0, half, i1) with Kleene's tables; a closed face is i0 or i1 and
        selects (tt_sel: 1 -> x, 0 -> y); half is the symbol of tt_forall. Then the run-time meaning of systems,
@@ -553,38 +766,11 @@ void erase_program(FILE *f) {
           "(tt_comp(i -> b(tt_hfill(d)(phi)(j -> tt_fst(u(j)))(tt_fst(u0))(i)))(phi)(i -> tt_snd(u(i)))(tt_snd(u0)))\n", out);
     fputs("tt_nf_sigma := d -> b -> c -> x -> tt_pair(tt_nf(d)(tt_fst(x)))(tt_nf(b(tt_fst(x)))(tt_snd(x)))\n", out);
     fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(tt_hc_sigma)(tt_nf_sigma)(d)(b)\n", out);
-    /* declaration order: data types and definitions interleaved by line number */
-    int di = 0, fi = 0;
-    while (di < ndatas || fi < ndefs) {
-        int take_data = fi >= ndefs || (di < ndatas && datas[di].line < defs[fi].line);
-        if (take_data) {
-            Data *D = &datas[di];
-            if (D->nblock > 1) {   /* a mutual block, emitted as a whole at its first member */
-                Data *B = &datas[D->block]; int nb = B->nblock; di = D->block + nb;
-                if (!data_used[B - datas]) continue;
-                for (int i = 0; i < nb; i++) { for (int ci = 0; ci < B[i].ncons; ci++) emit_con(&B[i], ci); if (formal_hcomp(&B[i])) emit_hcomp_con(&B[i]); }
-                emit_block_codes(B);
-                emit_block_recs(B);
-                continue;
-            }
-            di++;
-            if (!data_used[D - datas]) continue;
-            for (int ci = 0; ci < D->ncons; ci++) emit_con(D, ci);
-            if (formal_hcomp(D)) emit_hcomp_con(D);
-            emit_codes(D);
-            emit_rec(D);
-        } else {
-            Def *d = &defs[fi++];
-            if (!def_used[d - defs]) continue;
-            fprintf(out, "tt_%s := ", d->name); erase(d->val, 0); fputc('\n', out);
-            if (!strcmp(d->name, "equivProof")) emit_glue_runtime();
-            if (!strcmp(d->name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
-                fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(tt_sel(phi)(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
-        }
-    }
+    emit_decls(0);
+    if (chain_nat) emit_decls(1);
     fclose(out);
     /* eezoc reads `defs ; expr`: the separator must follow the last definition on its line */
     if (sz && buf[sz - 1] == '\n') buf[sz - 1] = 0;
-    fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
+    fprintf(f, "%s;\ntt_nf(", buf); out = f; mode = chain_nat; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
     free(buf);
 }

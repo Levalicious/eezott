@@ -1,0 +1,14 @@
+#import wordring
+-- the Word ring at closed instances and as a structure
+def t_assoc : Path Word (wadd (wadd 2 3) 4) (wadd 2 (wadd 3 4)) := wadd_assoc 2 3 4
+def t_comm : Path Word (wadd 2 3) (wadd 3 2) := wadd_comm 2 3
+def t_neg : Path Word (wadd 5 (wneg 5)) 0 := wadd_neg 5
+def t_neg_l : Path Word (wadd (wneg 5) 5) 0 := wadd_neg_l 5
+def t_dist : Path Word (wmul 2 (wadd 3 4)) (wadd (wmul 2 3) (wmul 2 4)) := wmul_dist_l 2 3 4
+def t_dist_r : Path Word (wmul (wadd 3 4) 2) (wadd (wmul 3 2) (wmul 4 2)) := wmul_dist_r 3 4 2
+def t_mul_assoc : Path Word (wmul (wmul 2 3) 4) (wmul 2 (wmul 3 4)) := wmul_assoc 2 3 4
+def t_one : Path Word (wmul 7 1) 7 := wmul_one_r 7
+def ring : CommRing Word := wordCommRing
+def t_ginv : (x : Word) -> Path Word (mop (gmon wordAddGroup) (ginv wordAddGroup x) x) (munit (gmon wordAddGroup)) :=
+  \x -> ginv_l wordAddGroup x
+def main : Word := wadd (wmul 3 4) (wneg 12)

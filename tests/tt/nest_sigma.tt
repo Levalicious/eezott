@@ -1,0 +1,6 @@
+#import prelude
+#import word
+-- M16b, M17: a Nat inside a larger value. The chain's code is the list's over the word's (the identity on a
+-- machine word), so the normalizer a container's code runs over its components reads the chain as it is.
+-- Here the components are 2^64 and 3, and the result is the pair of those two chains
+def main : Sigma Nat (\_ -> Nat) := (18446744073709551616, 3)

@@ -1,0 +1,4 @@
+#import prelude
+#import word
+-- (2^64 + 1)^2: a product whose limbs all carry into their neighbours
+def main : Nat := mul 18446744073709551617 18446744073709551617

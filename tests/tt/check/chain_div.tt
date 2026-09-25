@@ -1,0 +1,28 @@
+#import word
+-- M17 (the pivot to A), S6.4: the bit-serial division at closed instances, against the naturals' own div and
+-- mod (the kernel computes both sides).
+def X1 : WB := lcons 100 (lnil {Word})
+def Y1 : WB := lcons 7 (lnil {Word})
+def t1 : Path Nat (wbval (bdiv_wb X1 Y1)) (div (wbval X1) (wbval Y1)) := prefl Nat (div (wbval X1) (wbval Y1))
+def t2 : Path Nat (wbval (bmod_wb X1 Y1)) (mod (wbval X1) (wbval Y1)) := prefl Nat (mod (wbval X1) (wbval Y1))
+-- two limbs over one: 2^64 + 5 by 3
+def X2 : WB := lcons 1 (lcons 5 (lnil {Word}))
+def Y2 : WB := lcons 3 (lnil {Word})
+def t3 : Path Nat (wbval (bdiv_wb X2 Y2)) (div (wbval X2) (wbval Y2)) := prefl Nat (div (wbval X2) (wbval Y2))
+def t4 : Path Nat (wbval (bmod_wb X2 Y2)) (mod (wbval X2) (wbval Y2)) := prefl Nat (mod (wbval X2) (wbval Y2))
+-- two limbs over two: (2^64 + 5) by (2^64 + 1), and by itself
+def Y3 : WB := lcons 1 (lcons 1 (lnil {Word}))
+def t5 : Path Nat (wbval (bdiv_wb X2 Y3)) 1 := prefl Nat 1
+def t6 : Path Nat (wbval (bmod_wb X2 Y3)) 4 := prefl Nat 4
+def t7 : Path Nat (wbval (bdiv_wb X2 X2)) 1 := prefl Nat 1
+def t8 : Path Nat (wbval (bmod_wb X2 X2)) 0 := prefl Nat 0
+-- smaller by larger, and by zero
+def t9 : Path Nat (wbval (bdiv_wb Y1 X1)) 0 := prefl Nat 0
+def t10 : Path Nat (wbval (bmod_wb Y1 X1)) 7 := prefl Nat 7
+def t11 : Path Nat (wbval (bdiv_wb X1 (lnil {Word}))) 0 := prefl Nat 0
+def t12 : Path Nat (wbval (bmod_wb X1 (lnil {Word}))) 100 := prefl Nat 100
+-- the quotient stays normal: 2^64 + 5 by 3 has 63 bits, one limb
+def t13 : Path Nat (wlen (bdiv_wb X2 Y2)) 1 := prefl Nat 1
+-- the law at closed instances: both sides compute
+def t14 : Path Nat (wbval (bdiv_wb X2 Y2)) (div (wbval X2) (wbval Y2)) := fst (bdivmod_wb_val X2 Y2)
+def t15 : Path Nat (wbval (bmod_wb X1 (lnil {Word}))) (mod (wbval X1) 0) := snd (bdivmod_wb_val X1 (lnil {Word}))

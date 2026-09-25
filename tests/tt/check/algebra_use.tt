@@ -1,0 +1,8 @@
+#import algebra
+-- the structures in use: the naturals' semiring components, and the group lemmas at a specific group (the trivial one)
+def two_plus : Path Nat (mop (cmon (fst natSemiring)) 2 3) 5 := prefl Nat 5
+def unit_add : Path Nat (munit natAddMonoid) 0 := prefl Nat 0
+def dist_inst : Path Nat (mul 2 (add 3 4)) (add (mul 2 3) (mul 2 4)) := fst (snd (snd natSemiring)) 2 3 4
+def unitMonoid : Monoid Unit := ((\_ _ -> tt), (tt, ((\_ _ _ -> prefl Unit tt), ((\x -> isPropUnit tt x), (\x -> isPropUnit tt x)))))
+def unitGroup : Group Unit := (unitMonoid, ((\_ -> tt), (\x -> prefl Unit tt)))
+def unit_ginv_r : (x : Unit) -> Path Unit (mop unitMonoid x tt) tt := ginv_r unitGroup

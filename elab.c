@@ -19,11 +19,15 @@
  */
 #include "tt.h"
 
-typedef struct { const char **names; Val **tys; int n, cap; Env *env; int abs; int irrpos; } Ctx;
+typedef struct { const char **names; Val **tys; int *irrs; int n, cap; Env *env; int abs; int irrpos, irrlen; } Ctx;
+/* irrs[i]: variable i is irrelevant; irrpos > 0: irrelevant things may be used here (a type, an irrelevant argument or
+   component); irrlen > 0: a conversion failure is not an error (the component is never inspected - Agda's convError
+   suppression) - only the genuinely irrelevant term positions, never a type being checked */
 /* irrpos > 0: the term being checked is in an irrelevant position (the argument of an irrelevant binder, the irrelevant component
    of a pair): the irrelevant component of a pair may be projected only there (M16a; Abel's rule - a type's relevant argument
    positions are not irrelevant positions) */
 int word_type = -1, word_nat = -1;
+int decl_seq;
 static const char *wordop_names[] = { "wadd", "wsub", "wmul", "wand", "wor", "wxor", "wshl", "wshr", "weq", "wlt", "waddc", "wsubb", "wmull", "wdivmod" };
 int wordop_code(const char *name) { for (int i = 0; i < 14; i++) if (!strcmp(name, wordop_names[i])) return i + 1; return 0; }
 const char *wordop_name(int code) { return wordop_names[code - 1]; }
@@ -34,15 +38,17 @@ const char *wordop_name(int code) { return wordop_names[code - 1]; }
 static void ctx_push(Ctx *c, const char *name, Val *ty, Val *val) {
     if (c->n == c->cap) {
         int cap = c->cap ? 2 * c->cap : 16;
-        const char **nn = xalloc(cap * sizeof(char *)); Val **nt = xalloc(cap * sizeof(Val *));
-        if (c->n) { memcpy(nn, c->names, c->n * sizeof(char *)); memcpy(nt, c->tys, c->n * sizeof(Val *)); }
-        c->names = nn; c->tys = nt; c->cap = cap;
+        const char **nn = xalloc(cap * sizeof(char *)); Val **nt = xalloc(cap * sizeof(Val *)); int *ni = xalloc(cap * sizeof(int));
+        if (c->n) { memcpy(nn, c->names, c->n * sizeof(char *)); memcpy(nt, c->tys, c->n * sizeof(Val *)); memcpy(ni, c->irrs, c->n * sizeof(int)); }
+        c->names = nn; c->tys = nt; c->irrs = ni; c->cap = cap;
     }
-    c->names[c->n] = name; c->tys[c->n] = ty; c->n++;
+    c->names[c->n] = name; c->tys[c->n] = ty; c->irrs[c->n] = 0; c->n++;
     c->env = env_push(c->env, val);
 }
 static void ctx_pop(Ctx *c) { c->n--; c->env = c->env->next; }
 static void ctx_bind(Ctx *c, const char *name, Val *ty) { ctx_push(c, name, ty, ty->k == V_LEVEL ? vlvar(c->n) : vvar(c->n)); }
+/* an irrelevant variable (the binder .(x : A)): usable only in irrelevant positions */
+static void ctx_bind_irr(Ctx *c, const char *name, Val *ty, int irr) { ctx_bind(c, name, ty); if (irr & 2) c->irrs[c->n - 1] = 1; }
 static void ctx_bind_i(Ctx *c, const char *name) { ctx_push(c, name, mkval(V_INTERVAL), vivar(c->n)); }
 /* a fresh meta of a type, applied to the context: a level meta when the type is Level (solved by the level store) */
 static Term *fresh_meta(Ctx *c, Val *ty, int line) {
@@ -53,7 +59,7 @@ static Term *fresh_meta(Ctx *c, Val *ty, int line) {
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
 static Ctx ctx_restrict(Ctx *c, const Face *f) {
-    Ctx r = {0}; r.n = c->n; r.cap = c->n;
+    Ctx r = {0}; r.n = c->n; r.cap = c->n; r.irrs = c->irrs; r.irrpos = c->irrpos; r.irrlen = c->irrlen;   /* irrelevance is the same under a face */
     r.names = xalloc((c->n + 1) * sizeof(char *)); r.tys = xalloc((c->n + 1) * sizeof(Val *));
     Val **vs = xalloc((c->n + 1) * sizeof(Val *));
     for (int i = 0; i < c->n; i++) { r.names[i] = c->names[i]; r.tys[i] = restrict_val(c->tys[i], f); vs[c->n - 1 - i] = env_get(c->env, i); }
@@ -62,6 +68,7 @@ static Ctx ctx_restrict(Ctx *c, const Face *f) {
 }
 
 static int cur_data = -1, cur_data_hi = -1;   /* the block of data types being declared, [cur_data, cur_data_hi): their occurrences are at the hidden level */
+const char *cur_decl_name;   /* the declaration being elaborated, named by the literal-elimination tripwire */
 #define IN_DECL(d) ((d) >= cur_data && (d) < cur_data_hi)
 static int find_def(const char *n) { for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, n)) return i; return -1; }
 static int find_data(const char *n) { for (int i = ndatas - 1; i >= 0; i--) if (!strcmp(datas[i].name, n)) return i; return -1; }
@@ -78,10 +85,10 @@ static int term_binders(Term *t) {
     x = term_binders(t->c); if (x > m) m = x;
     x = term_binders(t->d); if (x > m) m = x;
     for (int i = 0; i < t->nbr; i++) { x = term_binders(t->br[i].face); if (x > m) m = x; x = term_binders(t->br[i].body); if (x > m) m = x; }
-    return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET);
+    return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET || t->k == T_SIGMA);   /* a Sigma binds its codomain's variable too */
 }
 static const char *show(Ctx *c, Val *v) {
-    Term *t = quote(c->n, v);
+    Term *t = quote(c->n, force(v));   /* messages show the canonical value: force unfolds rigid definition applications */
     const char **names = xalloc((c->n + term_binders(t) + 1) * sizeof(char *));
     if (c->n) memcpy(names, c->names, c->n * sizeof(char *));
     char *buf = NULL; size_t sz = 0; FILE *f = open_memstream(&buf, &sz);
@@ -89,10 +96,13 @@ static const char *show(Ctx *c, Val *v) {
     char *s = xstrdup(buf); free(buf); return s;
 }
 static void expect_conv(Ctx *c, int line, Val *got, Val *want, const char *what) {
-    if (!conv(c->n, got, want)) die("line %d: %s has type %s, expected %s", line, what, show(c, got), show(c, want));
+    /* in an irrelevant position a conversion failure is not an error: the component is never used (Agda's
+       convError suppression; the discipline the Word design's .() proofs rely on) */
+    if (!conv(c->n, got, want) && !c->irrlen) die("line %d: %s has type %s, expected %s", line, what, show(c, got), show(c, want));
 }
 
 int is_type_like(int depth, Val *ty) {
+    ty = force(ty);
     switch (ty->k) {
     case V_U: case V_LEVEL: return 1;
     case V_PI: return is_type_like(depth + 1, inst(&ty->clo, ty->isi ? vivar(depth) : vvar(depth)));
@@ -107,16 +117,18 @@ int is_type_like(int depth, Val *ty) {
 
 static Term *infer(Ctx *c, STerm *s, Val **ty);
 static Term *check(Ctx *c, STerm *s, Val *ty);
+static Term *check1(Ctx *c, STerm *s, Val *ty);
 
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
 /* a type whose sort is not known yet (a meta, e.g. an implicit parameter still to be inferred) is in a universe at a fresh level */
 static Val *refine_to_universe(Ctx *c, Val *ty) {
     ty = force(ty);
+    ty = force(ty);
     if (ty->k == V_NEU && ty->h == H_META) { int l = lv_meta_new(); if (conv(c->n, ty, vu_l(lv_meta(l)))) ty = force(ty); }
     return ty;
 }
 static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) {
-    Val *ty; Term *t = infer(c, s, &ty); ty = refine_to_universe(c, ty);
+    Val *ty; c->irrpos++; Term *t = infer(c, s, &ty); c->irrpos--; ty = refine_to_universe(c, ty);   /* a type is an irrelevant position */
     if (ty->k != V_U) die("line %d: expected a type, but %s : %s", s->line, "the term", show(c, ty));
     *lvl = ty->lvl; *pre = ty->pre; return t;
 }
@@ -468,6 +480,7 @@ typedef struct { STerm *term; Val *dom; int meta; } Deferred;
 static Deferred *dnums; static int ndnums;
 static int deferrable(STerm *s) { return s->k == S_NUM || s->k == S_LAM || s->k == S_PAIR || s->k == S_SYS; }
 static Term *check(Ctx *c, STerm *s, Val *ty);
+static Term *check1(Ctx *c, STerm *s, Val *ty);
 static void resolve_deferred(Ctx *c, int all) {
     for (;;) {
         int found = -1;
@@ -485,6 +498,7 @@ static void resolve_deferred(Ctx *c, int all) {
    domain and the codomain, at fresh levels; the application determines the shape, later constraints the rest */
 static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
     ty = force(ty);
+    ty = force(ty);
     if (!(ty->k == V_NEU && ty->h == H_META)) return ty;
     /* in the meta's own context (a prefix of the current one): its solution may only use the meta's variables */
     int k = tmetas[ty->n].ctxn;
@@ -500,6 +514,7 @@ static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
     return force(ty);
 }
 static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
+    hty = force(hty);
     for (int i = 0; i < nargs; i++) {
         hty = force(hty);
         while (hty->k == V_PI && hty->imp && !args[i]->imp) {   /* an implicit argument not written: a meta */
@@ -511,7 +526,7 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             Val *dom = force(hty->dom);
             if (dom->k == V_NEU && dom->h == H_META) {
                 int id = meta_new(dom, c->n, c->names, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
-                dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die("out of memory");
+                dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die_resource("out of memory");
                 dnums[ndnums].term = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
                 head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
                 continue;
@@ -524,9 +539,9 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
             continue;
         }
         if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
-        if (hty->irr) c->irrpos++;
+        if (hty->irr & 2) { c->irrpos++; c->irrlen++; }   /* the argument of an irrelevant binder */
         Term *a = check(c, args[i], hty->dom);
-        if (hty->irr) c->irrpos--;
+        if (hty->irr & 2) { c->irrpos--; c->irrlen--; }
         head = mk_app(head, a, hty->irr);
         hty = inst(&hty->clo, eval(c->env, a));
     }
@@ -662,7 +677,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_HCOMP: {
         need_args(h, n, 4, "hcomp");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         /* u : (i : I) -> Partial phi A */
         Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
@@ -675,7 +690,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             Val *side = vsys_at(vapp(uv, vi(iv_zero()), 0), &fs[i]);
             if (!side) die("line %d: hcomp: the sides do not cover their face", args[2]->line);
             if (!conv(c->n, side, restrict_val(u0v, &fs[i])))
-                die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s", args[3]->line, show(c, pv));
+                die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s\n  side = %s\n  base = %s", args[3]->line, show(c, pv), show(c, side), show(c, restrict_val(u0v, &fs[i])));
         }
         Term *t = mk_term(T_HCOMP, A, phi, u, u0); t->n = (Av->k == V_U);
         return app_spine(c, args + 4, n - 4, t, Av, ty);
@@ -713,7 +728,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_SUB: {   /* Sub A phi u : U,  u : Partial phi A */
         need_args(h, n, 3, "Sub");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = Av;
         Term *u = check(c, args[2], pty);
@@ -721,7 +736,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_SIGMA: {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
         need_args(h, n, 2, "Sigma");
-        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = eval(c->env, A);
+        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = force(eval(c->env, A));
         Term *B;
         if (args[1]->k == S_LAM) {
             ctx_bind(c, args[1]->binders[0].name, Av);
@@ -742,7 +757,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_FST: case S_SND: {
         need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
-        Val *pty; Term *p = infer(c, args[0], &pty);
+        Val *pty; Term *p = infer(c, args[0], &pty); pty = force(pty);
         if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", args[0]->line, show(c, pty));
         if (h->k == S_SND && pty->irr && !c->irrpos)
             die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
@@ -753,7 +768,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     }
     case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
         need_args(h, n, 3, "Glue");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = eval(c->env, A);
+        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
         Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
         int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
         Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu_l(lvl);
@@ -767,7 +782,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
     case S_UNGLUE: {
         need_args(h, n, 1, "unglue");
-        Val *bty; Term *b = infer(c, args[0], &bty);
+        Val *bty; Term *b = infer(c, args[0], &bty); bty = force(bty);
         if (bty->k != V_GLUE) die("line %d: unglue applied to a term of type %s, expected a Glue type", args[0]->line, show(c, bty));
         Term *t = mk_term(T_UNGLUE, b, quote(c->n, bty->a), quote(c->n, bty->b), quote(c->n, bty->c));
         return app_spine(c, args + 1, n - 1, t, bty->a, ty);
@@ -775,7 +790,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
     case S_INS: die("line %d: inS must be checked against a Sub type", h->line);
     case S_OUTS: {  /* outS s : A  for s : Sub A phi u */
         need_args(h, n, 1, "outS");
-        Val *sty; Term *s = infer(c, args[0], &sty);
+        Val *sty; Term *s = infer(c, args[0], &sty); sty = force(sty);
         if (sty->k != V_SUB) die("line %d: outS applied to a term of type %s, expected a Sub type", args[0]->line, show(c, sty));
         Term *t = mk_term(T_OUTS, quote(c->n, sty->a), quote(c->n, sty->b), quote(c->n, sty->c), s);
         return app_spine(c, args + 1, n - 1, t, sty->a, ty);
@@ -841,7 +856,10 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
     switch (s->k) {
     case S_VAR: {
         for (int i = c->n - 1; i >= 0; i--)
-            if (!strcmp(c->names[i], s->name)) { *ty = c->tys[i]; return mk_var(c->n - 1 - i); }
+            if (!strcmp(c->names[i], s->name)) {
+                if (c->irrs[i] && !c->irrpos) die("line %d: '%s' is irrelevant (bound by .(%s : ..)); it may be used only in an irrelevant position (an irrelevant argument or component, a type, a proof of Empty)", s->line, s->name, s->name);
+                *ty = c->tys[i]; return mk_var(c->n - 1 - i);
+            }
         int id;
         if ((id = find_con(s->name)) >= 0) { LVal L; Term *lt = global_level(T_CON, id, &L); *ty = eval(NULL, con_at(id, L)->ty); return mk_ref_l(T_CON, id, lt); }
         if ((id = find_def(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DEF, id, &L); *ty = def_ty_at(id, L); return mk_ref_l(T_DEF, id, lt); }
@@ -884,7 +902,8 @@ static Term *infer(Ctx *c, STerm *s, Val **ty) {
         LVal la, lb; int pa, pb; Term *dom = check_type_sort(c, b->ty, &la, &pa);
         Val *dv = eval(c->env, dom);
         int irr = dom->k == T_LEVEL;   /* types are run-time codes, so every binder is relevant; levels are not */
-        ctx_bind(c, b->name, dv);
+        if (b->irrel) irr = 2;         /* .(x : A): proof-irrelevant - erased, not compared, usable only in irrelevant positions */
+        ctx_bind_irr(c, b->name, dv, irr);
         Term *cod = check_type_sort(c, s->a, &lb, &pb);
         ctx_pop(c);
         LVal l = lv_max(la, lb);
@@ -1010,6 +1029,12 @@ bad:
 }
 static Term *check(Ctx *c, STerm *s, Val *ty) {
     ty = force(ty);
+    if (ty->k == V_DATA && datas[ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
+        c->irrpos++; c->irrlen++; Term *t = check1(c, s, ty); c->irrpos--; c->irrlen--; return t;
+    }
+    return check1(c, s, ty);
+}
+static Term *check1(Ctx *c, STerm *s, Val *ty) {
     if (ty->k == V_PI && ty->imp && !(s->k == S_LAM && s->binders[0].imp)) {   /* an implicit function type: abstract over the argument */
         const char *nm = xsprintf("{%s}", ty->name ? ty->name : "_");   /* not a name the program can write: no capture */
         ctx_bind(c, nm, ty->dom);
@@ -1040,7 +1065,7 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
             ctx_pop(c);
             Term *t = mk_lam(b->name, body, 0); t->isi = 1; return t;
         }
-        ctx_bind(c, b->name, ty->dom);
+        ctx_bind_irr(c, b->name, ty->dom, ty->irr);
         Term *body = check(c, s->a, inst(&ty->clo, vvar(c->n - 1)));
         ctx_pop(c);
         Term *t = mk_lam(b->name, body, ty->irr); t->imp = b->imp; return t;
@@ -1086,9 +1111,9 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
     if (s->k == S_PAIR) {
         if (ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", s->line, show(c, ty));
         Term *a = check(c, s->a, ty->dom);
-        if (ty->irr) c->irrpos++;
+        if (ty->irr) { c->irrpos++; c->irrlen++; }
         Term *b = check(c, s->b, inst(&ty->clo, eval(c->env, a)));
-        if (ty->irr) c->irrpos--;
+        if (ty->irr) { c->irrpos--; c->irrlen--; }
         Term *t = mk_term(T_PAIR, a, b, NULL, NULL); t->irr = ty->irr;
         if (is_word_type(c, ty)) t->n = 1;
         return t;
@@ -1103,18 +1128,18 @@ static Term *check(Ctx *c, STerm *s, Val *ty) {
         /* a universe against a type not known yet: subtyping holds between sorts only, so the type is a universe of the same
            sort at a level to be determined; the level is a fresh level meta, bounded below by got's (the level store decides it) */
         Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
-        if (!conv(c->n, ty, U)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
-        if (lv_enforce_leq(got->lvl, U->lvl) != 1) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
+        if (!conv(c->n, ty, U) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+        if (lv_enforce_leq(got->lvl, U->lvl) != 1 && !c->irrlen) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
         resolve_deferred(c, 0); return t;
     }
     if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
         int r = lv_enforce_leq(got->lvl, ty->lvl);
-        if (r == 1) { resolve_deferred(c, 0); return t; }
+        if (r == 1 || c->irrlen) { resolve_deferred(c, 0); return t; }
         if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
         die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
     }
     if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
-    if (!conv(c->n, got, ty)) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+    if (!conv(c->n, got, ty) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
     resolve_deferred(c, 0);
     return t;
 }
@@ -1323,10 +1348,10 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         ctx_bind(&c, params[i].name, eval(c.env, ptys[i]));
     }
     int d0 = ndatas;
-    datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die("out of memory");
+    datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die_resource("out of memory");
     for (int i = 0; i < n; i++) {
         SDecl *s = ms[i];
-        Data D = {0}; D.name = s->name; D.line = s->line; D.nparams = nparams; D.ptys = ptys;
+        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib; D.nparams = nparams; D.ptys = ptys;
         LVal l; Term *ity = check_type(&c, s->ty, &l);
         Term *w = ity; int m = 0;
         for (Term *x = ity; x->k == T_PI; x = x->b) m++;
@@ -1452,17 +1477,17 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
         for (int q = nparams - 1; q >= 0; q--) { closed = mk_pi(params[q].name, ptys[q], closed, !C.bparams); closed->imp = 1; }   /* the parameters are implicit */
         C.ty = closed;
         int cid = ncons;
-        cons = realloc(cons, (ncons + 1) * sizeof(Con)); if (!cons) die("out of memory");
+        cons = realloc(cons, (ncons + 1) * sizeof(Con)); if (!cons) die_resource("out of memory");
         cons[ncons++] = C;
         Data *DD = &datas[d];
-        DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die("out of memory");
+        DD->cons = realloc(DD->cons, (DD->ncons + 1) * sizeof(int)); if (!DD->cons) die_resource("out of memory");
         DD->cons[DD->ncons++] = cid;
       }
     }
     cur_data = -1; cur_data_hi = -1;
     /* every term of the block, for solving the metas and deciding polymorphism */
     int nt = 0, cap = 64; Term **ts = xalloc(cap * sizeof(Term *)); Term ***slots = xalloc(cap * sizeof(Term **)); int *isty = xalloc(cap * sizeof(int));
-    #define SLOT(p) do { if (nt == cap) { cap *= 2; ts = realloc(ts, cap * sizeof(Term *)); slots = realloc(slots, cap * sizeof(Term **)); isty = realloc(isty, cap * sizeof(int)); if (!ts || !slots || !isty) die("out of memory"); } slots[nt] = &(p); isty[nt] = 0; ts[nt++] = (p); } while (0)
+    #define SLOT(p) do { if (nt == cap) { cap *= 2; ts = realloc(ts, cap * sizeof(Term *)); slots = realloc(slots, cap * sizeof(Term **)); isty = realloc(isty, cap * sizeof(int)); if (!ts || !slots || !isty) die_resource("out of memory"); } slots[nt] = &(p); isty[nt] = 0; ts[nt++] = (p); } while (0)
     for (int i = 0; i < nparams; i++) SLOT(ptys[i]);
     for (int i = 0; i < n; i++) {
         Data *DD = &datas[d0 + i];
@@ -1504,12 +1529,15 @@ static void elab_def(SDecl *s) {
     int m0 = lstore_nmetas(); LMark mark = lstore_mark(); int mm0 = ntmetas;
     LVal l; int p; Term *ty = check_type_sort(&c, s->ty, &l, &p);   /* a definition may be a line, a partial element, a filler */
     Val *vty = eval(NULL, ty);
+    int typelike = is_type_like(0, vty);
+    if (typelike) c.irrpos++;   /* the body of a type-like definition is a type */
     Term *val = check(&c, s->val, vty);
+    if (typelike) c.irrpos--;
     resolve_deferred(&c, 0); metas_finish(s->name, s->line, mm0); resolve_deferred(&c, 1);
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
-    Def D = {0}; D.name = s->name; D.line = s->line;
+    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib;
     D.poly = term_mentions_hidden(ty) || term_mentions_hidden(val);
     if (!D.poly) { ty = subst_hidden(ty, lv_const(0)); val = subst_hidden(val, lv_const(0)); }
     D.ty = ty; D.val = val;
@@ -1537,15 +1565,17 @@ static void elab_def(SDecl *s) {
         if (!code) die("line %d: native %s: not a kernel primitive (add sub mul div mod pow beq blt ble)", s->line, s->name);
         if (D.poly) die("line %d: native %s: a native definition takes no level", s->line, s->name);
         int d = native_type_data(D.vty, s->line, s->name);
-        D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback);
+        D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback, ndefs);
     }
-    defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die("out of memory");
+    defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die_resource("out of memory");
     defs[ndefs++] = D;
 }
 
 void elab_program(SDecl *decls) {
     for (SDecl *s = decls; s; s = s->next) {
+        cur_decl_name = s->name;
         if (s->isdata == 2) elab_block(s->members, s->nmembers, s->params, s->nparams, s->line);
         else if (s->isdata) elab_data(s); else elab_def(s);
     }
+    cur_decl_name = NULL;
 }

@@ -10,6 +10,10 @@
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
+LIB="${SCRIPT_DIR}/../stdlib/tt"
+# No cap is imposed here: the default is the system's own limits. EEZOTT_MAX_ALLOC exists for whoever wants one
+# (export it and the checker picks it up); a resource abort is still never a judgement.
+tt() { "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }
 EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
 EEZO="${SCRIPT_DIR}/../eezo/eezo"
 TT="${SCRIPT_DIR}/tt"
@@ -23,16 +27,24 @@ scott_nat() {   # Scott numeral literal for n, in eezoc syntax
     while [ "$n" -gt 0 ]; do s="z -> s -> s($s)"; n=$((n-1)); done
     printf '%s' "$s"
 }
+chain_lit() {   # decimal -> the chain (M17): the normalised, most-significant-first Scott list of the machine words (zero: lnil)
+    python3 -c 'import sys
+n = int(sys.argv[1]); s = "lnil"
+while n: s = "lcons(%dw)(%s)" % (n % (1 << 64), s); n >>= 64
+print(s)' "$1"
+}
+CHAIN_CONS='lnil := h0 -> h1 -> h0\nlcons := a -> b -> h0 -> h1 -> h1(a)(b)\n'
 oracle() {      # kind value -> expected bitstring
     case "$1" in
         bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        chain) printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M17): the oracle is the literal's own words
+        pair) printf "${CHAIN_CONS}"'pair := a -> b -> k -> k(a)(b)\nn := pair(%s)(%s);\nn\n' "$(chain_lit "${2%%,*}")" "$(chain_lit "${2#*,}")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # the erasure's own pair of two chains, "A,B"
     esac
 }
 run_typed() {   # file mode ttflags -> bitstring (or ERROR)
-    local src; src=$(cat "$TT/prelude.tt" "$TT/$1")
-    local erased; erased=$(printf '%s\n' "$src" | "$EEZOTT" $3 2>&1) || { echo "TYPECHECK_ERROR: $erased"; return; }
+    local erased; erased=$(tt $3 "$TT/$1" 2>&1) || { case "$erased" in *"resource limit"*) echo "RESOURCE_ERROR: $erased";; *) echo "TYPECHECK_ERROR: $erased";; esac; return; }
     local bcl; bcl=$(printf '%s\n' "$erased" | "$EEZOC" -f xbcl 2>&1) || { echo "EEZOC_ERROR: $bcl"; return; }
     echo "$bcl" | "$EEZO" -f xbcl $2 2>&1
 }
@@ -42,7 +54,7 @@ checkN() {      # file: a program whose main is a higher inductive value; its ru
     if [ "$a" = "$b" ] && [ "${a#TYPECHECK_ERROR}" = "$a" ] && [ "${a#EEZOC_ERROR}" = "$a" ]; then pass "$1 = its normal form (eezott -N)"; else fail "$1 = its normal form (eezott -N)" "$b" "$a"; fi
 }
 checkNF() {     # file name value: the checker's normal form of the definition (eezott -n), printed as a decimal literal (M15)
-    local got; got=$(cat "$TT/prelude.tt" "$TT/$1" | "$EEZOTT" -c -n "$2" 2>&1 >/dev/null | grep "^$2 = ")
+    local got; got=$(tt -c -n "$2" "$TT/$1" 2>&1 >/dev/null | grep "^$2 = ")
     if [ "$got" = "$2 = $3" ]; then pass "$1: $2 = $3 (eezott -n)"; else fail "$1: $2 = $3 (eezott -n)" "$2 = $3" "$got"; fi
 }
 check() {       # file kind value
@@ -56,6 +68,9 @@ check() {       # file kind value
     if [ "$got" = "$want" ]; then pass "$1 = $2 $3 (eezott -K)"; else fail "$1 = $2 $3 (eezott -K)" "$want" "$got"; fi
 }
 
+check minv_test.tt     nat 5
+checkNF minv_test.tt m37 5
+checkNF minv_test.tt m29 2
 check not_true.tt      bool false
 check and_or.tt        bool true
 check id_poly.tt       bool true
@@ -155,20 +170,52 @@ checkN  nat_native_eq.tt
 # M16a: an irrelevant Sigma component; machine words in the theory, erased to the run-time primitives
 check   irr_pair.tt      nat 3
 check   word_ops.tt      word 5
-check   word_fst.tt      nat 5
+check   word_fst.tt      chain 5           # a program that imports word: its Nat is the chain (M17)
 check   word_mk.tt       word 5
 check   word_lt.tt       bool true
-check   word_divmod.tt   nat 3
+check   word_divmod.tt   chain 3
 check   word_wrap.tt     word 18446744073709551615
 checkN  word_ops.tt
 checkN  word_mk.tt
 checkN  word_divmod.tt
 checkN  word_wrap.tt
+check   word_ring.tt   word 0
+checkN  word_ring.tt
 checkNF word_ops.tt      w5 5
+check   word_fold.tt    word 18446744073709551615
+checkN  word_fold.tt
+
+# M16b, M17: the chain. With word.tt imported the Nat is the run-time chain of machine words and its arithmetic
+# is word.tt's own folds (the pivot to A), so a program above a machine word runs on them; the oracle is the
+# same value written as the chain literal. (The combinator interpreter, eezo -s, is two orders slower than the
+# compiled evaluators and the folds are real work: the chain programs run on the compiled ones.)
+check limb_add.tt    chain 340282366920938463481821351505477763072
+check limb_mul.tt    chain 340282366920938463500268095579187314689
+check limb_divmod.tt chain 340282366920938463463374607431768211455
+check limb_pred.tt   chain 18446744073709551622
+check limb_zero.tt   bool false
+check nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the chain's code is the list's over the word's
+check limb_minv.tt   chain 1                         # the inverse of 3 mod 2^127-1, 3 times it is 1
+check limb_double.tt chain 36893488147419103232      # a fold with an addition step, compiled to its closed form
+check limb_square.tt chain 1                         # a fold with no closed form: the walk
+check chain_walk.tt  chain 15                        # the walk, with the step's arithmetic on the chain
+checkNF limb_minv.tt main 1
+checkNF big_pow.tt   main 12157665459056928801
+check big_pow.tt     chain 12157665459056928801
+# a number no limb list can hold is not refused: the kernel states it as the native application itself, a
+# rigid neutral (the pow guard, M17 S2); its laws (pow_add, pow_mul) prove what conversion cannot compute
+out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
+case "$out" in "huge = pow 3 18446744073709551616")
+    pass "big_pow.tt: an unholdable power is stated, not refused";;
+  *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = pow 3 18446744073709551616" "$out";; esac
+checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
-    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name rejected" "rejection" "accepted"; else pass "$name rejected"; fi
+    out=$(tt -c "$f" 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then fail "$name rejected" "rejection" "accepted"
+    elif printf '%s' "$out" | grep -q 'resource limit'; then fail "$name rejected" "rejection" "resource limit"
+    else pass "$name rejected"; fi
 done
 
 # self-contained programs that must be rejected (no prelude: they use the prelude's names in ways the prelude forbids)
@@ -180,16 +227,20 @@ done
 for f in "$TT"/check/*.tt; do
     [ -e "$f" ] || continue
     name=check/$(basename "$f")
-    if cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then pass "$name typechecks"; else fail "$name typechecks" "acceptance" "$(cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c 2>&1 | head -1)"; fi
+    out=$(tt -c "$f" 2>&1); rc=$?
+    if printf '%s' "$out" | grep -q 'resource limit'; then fail "$name typechecks" "acceptance" "resource limit"
+    elif [ $rc -ne 0 ]; then fail "$name typechecks" "acceptance" "$(printf '%s' "$out" | head -1)"
+    else pass "$name typechecks"; fi
 done
 
 for f in "$TT"/unerasable/*.tt; do
     [ -e "$f" ] || continue
     name=unerasable/$(basename "$f")
-    if ! cat "$TT/prelude.tt" "$f" | "$EEZOTT" -c >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
-    elif cat "$TT/prelude.tt" "$f" | "$EEZOTT" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
+    if ! tt -c "$f" >/dev/null 2>&1; then fail "$name typechecks" "acceptance" "rejection"
+    elif tt "$f" >/dev/null 2>&1; then fail "$name refused at erasure" "refusal" "erased"
     else pass "$name typechecks but is refused at erasure"; fi
 done
+
 
 echo "$n cases"
 exit $status

@@ -1,2 +1,3 @@
+#import word
 -- wrap-around at run time and in the kernel
 def main : Word := wsub (wadd 0 0) 1

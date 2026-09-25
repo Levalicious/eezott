@@ -1,0 +1,5 @@
+#import prelude
+#import word
+-- M16b E2, M17: with word.tt imported the Nat is the run-time chain, so a sum above a machine word is
+-- the library's own fold nadd over the machine words: 2^64 + 2^128
+def main : Nat := add 18446744073709551616 340282366920938463463374607431768211456

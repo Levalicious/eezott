@@ -38,12 +38,13 @@ static Tok *toks; static int ntoks, tcap, pos; static const char *file;
 static int in_con_type;   /* while parsing a constructor's type: a following system is its boundary, not an argument */
 
 static void addtok(TokKind k, const char *s, int n, int line) {
-    if (ntoks == tcap) { tcap = tcap ? 2 * tcap : 256; toks = realloc(toks, tcap * sizeof(Tok)); if (!toks) die("out of memory"); }
+    if (ntoks == tcap) { tcap = tcap ? 2 * tcap : 256; toks = realloc(toks, tcap * sizeof(Tok)); if (!toks) die_resource("out of memory"); }
     Tok *t = &toks[ntoks++]; t->k = k; t->s = s; t->n = n; t->line = line;
 }
 static int isident(int c) { return isalnum(c) || c == '_' || c == '\''; }
 
 static void lex(const char *src) {
+    ntoks = 0;   /* each file is lexed on its own (imports, M16b) */
     int line = 1; const char *p = src;
     while (*p) {
         if (*p == '\n') { line++; p++; continue; }
@@ -106,19 +107,24 @@ static STerm *parse_term(void);
 static STerm *parse_ior(void);
 
 static int binder_ahead(void) {
-    if (peek()->k != TK_LP && peek()->k != TK_LBRACE) return 0;
-    int i = 1;
+    int i = 0;
+    if (peek()->k == TK_DOT) i = 1;   /* .(x : A): an irrelevant binder */
+    if (peekat(i)->k != TK_LP && peekat(i)->k != TK_LBRACE) return 0;
+    i++;
     if (peekat(i)->k != TK_NAME) return 0;
     while (peekat(i)->k == TK_NAME) i++;
     return peekat(i)->k == TK_COLON;
 }
 static void parse_binder_group(SBinder **out, int *n, int *cap) {
+    int irrel = 0;
+    if (peek()->k == TK_DOT) { next(); irrel = 1; }   /* .(x : A): irrelevant (M16b) */
     Tok *o = next(); int imp = o->k == TK_LBRACE;   /* {x : A}: implicit */
+    if (irrel && imp) die("%s:%d: a binder cannot be both irrelevant and implicit", file, o->line);
     int start = *n;
     while (peek()->k == TK_NAME) {
         Tok *t = next();
-        if (*n == *cap) { *cap = *cap ? 2 * *cap : 4; *out = realloc(*out, *cap * sizeof(SBinder)); if (!*out) die("out of memory"); }
-        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*n)++;
+        if (*n == *cap) { *cap = *cap ? 2 * *cap : 4; *out = realloc(*out, *cap * sizeof(SBinder)); if (!*out) die_resource("out of memory"); }
+        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*out)[*n].irrel = irrel; (*n)++;
     }
     expect(TK_COLON);
     STerm *ty = parse_term();
@@ -140,7 +146,7 @@ static STerm *parse_system(void) {
         STerm *face = parse_ior();
         expect(TK_ARROW);
         STerm *body = parse_term();
-        if (r->nbr == cap) { cap = cap ? 2 * cap : 4; r->br = realloc(r->br, cap * sizeof(SBranch)); if (!r->br) die("out of memory"); }
+        if (r->nbr == cap) { cap = cap ? 2 * cap : 4; r->br = realloc(r->br, cap * sizeof(SBranch)); if (!r->br) die_resource("out of memory"); }
         r->br[r->nbr].face = face; r->br[r->nbr].body = body; r->nbr++;
     }
     expect(TK_RB);
@@ -255,7 +261,7 @@ static STerm *parse_term(void) {
             int imp = peek()->k == TK_LBRACE; if (imp) next();   /* \{x}: an implicit lambda */
             Tok *x = next();
             if (imp) expect(TK_RBRACE);
-            if (n == cap) { cap = cap ? 2 * cap : 4; b = realloc(b, cap * sizeof(SBinder)); if (!b) die("out of memory"); }
+            if (n == cap) { cap = cap ? 2 * cap : 4; b = realloc(b, cap * sizeof(SBinder)); if (!b) die_resource("out of memory"); }
             b[n].name = tokstr(x); b[n].ty = NULL; b[n].line = x->line; b[n].imp = imp; n++;
         }
         if (n == 0) die("%s:%d: lambda needs at least one binder", file, t->line);
@@ -292,7 +298,7 @@ static void parse_data_decl(SDecl *d) {
     int cap = 0;
     while (peek()->k == TK_BAR) {
         next(); Tok *c = expect(TK_NAME); expect(TK_COLON);
-        if (d->ncons == cap) { cap = cap ? 2 * cap : 4; d->cons = realloc(d->cons, cap * sizeof(SCon)); if (!d->cons) die("out of memory"); }
+        if (d->ncons == cap) { cap = cap ? 2 * cap : 4; d->cons = realloc(d->cons, cap * sizeof(SCon)); if (!d->cons) die_resource("out of memory"); }
         d->cons[d->ncons].name = tokstr(c); d->cons[d->ncons].line = c->line;
         in_con_type = 1; d->cons[d->ncons].ty = parse_term(); in_con_type = 0;
         d->cons[d->ncons].boundary = peek()->k == TK_LB ? parse_system() : NULL;   /* path constructor: its boundary */
@@ -322,7 +328,7 @@ SDecl *parse_program(const char *src, const char *fname) {
                 Tok *dt = next(); SDecl *m = xalloc(sizeof *m); m->line = dt->line;
                 parse_data_decl(m);
                 if (m->nparams) die("%s:%d: data %s in a mutual block: the parameters are declared on the block", file, m->line, m->name);
-                if (d->nmembers == cap) { cap = cap ? 2 * cap : 4; d->members = realloc(d->members, cap * sizeof(SDecl *)); if (!d->members) die("out of memory"); }
+                if (d->nmembers == cap) { cap = cap ? 2 * cap : 4; d->members = realloc(d->members, cap * sizeof(SDecl *)); if (!d->members) die_resource("out of memory"); }
                 d->members[d->nmembers++] = m;
             }
             if (d->nmembers == 0) die("%s:%d: an empty mutual block", file, t->line);

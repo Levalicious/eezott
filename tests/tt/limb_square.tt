@@ -1,0 +1,6 @@
+#import prelude
+#import word
+-- a step with no closed form: nothing the theory proves turns this fold into arithmetic, so the erasure
+-- walks the chain, predecessor by predecessor (M17): five steps here, each squaring 1
+def square (n : Nat) : Nat := elim Nat (\_ -> Nat) 1 (\k ih -> mul ih ih) n
+def main : Nat := square 5

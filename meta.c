@@ -26,7 +26,7 @@ static Post *posts; static int nposts, pcap;
 static int *undo; static int nundo, ucap;
 
 int meta_new(Val *ty, int ctxn, const char **names, int line) {
-    if (ntmetas == mcap) { mcap = mcap ? 2 * mcap : 64; tmetas = realloc(tmetas, mcap * sizeof(Meta)); if (!tmetas) die("out of memory"); }
+    if (ntmetas == mcap) { mcap = mcap ? 2 * mcap : 64; tmetas = realloc(tmetas, mcap * sizeof(Meta)); if (!tmetas) die_resource("out of memory"); }
     Meta *m = &tmetas[ntmetas]; memset(m, 0, sizeof *m);
     m->ty = ty; m->ctxn = ctxn; m->line = line;
     m->names = xalloc((ctxn + 1) * sizeof(char *));
@@ -39,7 +39,8 @@ Term *meta_term(int id, int ctxn) {
     for (int i = ctxn - 1; i >= 0; i--) t = mk_app(t, mk_var(i), 0);
     return t;
 }
-Val *force(Val *v) {
+int metas_version;   /* see tt.h: the memo on a rigid definition application is valid only at the version it was taken at */
+Val *fmeta(Val *v) {
     while (v->k == V_NEU && v->h == H_META && tmetas[v->n].sol) {
         Val *r = tmetas[v->n].sol;
         for (int i = 0; i < v->args.n; i++) r = vapply_arg(r, &v->args.a[i]);
@@ -47,13 +48,29 @@ Val *force(Val *v) {
     }
     return v;
 }
+
+int force_depth;
+static Val *force_go(Val *v);
+Val *force(Val *v) { force_depth++; Val *r = force_go(v); force_depth--; return r; }
+static Val *force_go(Val *v) {
+    v = fmeta(v);
+    for (;;) {
+        /* a rigid definition application unfolds; one that unfolds to itself (a native's guard neutral: a power no limb
+           list holds) is as canonical as it gets */
+        if (v->k == V_NEU && v->h == H_DEF) { Val *u = fmeta(unfold_def(v)); if (u == v) return v; v = u; continue; }
+        /* a deferred elimination reduces; a stuck one comes back as itself, its flag dropped */
+        if (v->k == V_NEU && v->h == H_ELIM && v->defer) { Val *u = fmeta(elim_force(v)); if (u == v) return v; v = u; continue; }
+        return v;
+    }
+}
 MMark meta_mark(void) { MMark m = { nundo, nposts }; return m; }
 void meta_rollback(MMark m) {
     while (nundo > m.u) { int id = undo[--nundo]; tmetas[id].sol = NULL; tmetas[id].solt = NULL; }
+    metas_version++;
     if (nposts > m.p) nposts = m.p;
 }
 void meta_postpone(int depth, Val *a, Val *b) {
-    if (nposts == pcap) { pcap = pcap ? 2 * pcap : 16; posts = realloc(posts, pcap * sizeof(Post)); if (!posts) die("out of memory"); }
+    if (nposts == pcap) { pcap = pcap ? 2 * pcap : 16; posts = realloc(posts, pcap * sizeof(Post)); if (!posts) die_resource("out of memory"); }
     posts[nposts].depth = depth; posts[nposts].a = a; posts[nposts].b = b; nposts++;
 }
 
@@ -105,7 +122,8 @@ static Term *ren_vars(Term *t, Ren *r, int d) {
 static void solve(int id, Term *body, int k, int *isi) {
     for (int j = k - 1; j >= 0; j--) { Term *l = mk_lam(xsprintf("x%d", j), body, 0); l->isi = isi[j]; body = l; }
     tmetas[id].solt = body; tmetas[id].sol = eval(NULL, body);
-    if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = realloc(undo, ucap * sizeof(int)); if (!undo) die("out of memory"); }
+    metas_version++;
+    if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = realloc(undo, ucap * sizeof(int)); if (!undo) die_resource("out of memory"); }
     undo[nundo++] = id;
 }
 /* Miller pattern unification: the spine must be a pattern (see pattern_spine), the other side is quoted and its free variables renamed to

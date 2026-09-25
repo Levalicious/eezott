@@ -10,13 +10,17 @@ OFILES=\
 	erase.$O\
 	level.$O\
 	meta.$O\
-	bn.$O\
 
 HFILES=\
 	tt.h\
-	bn.h\
 	../libeezo/types.h\
+	../libeezo/bn.h\
 
 CFLAGS=-g -O2 -Wall -I.
 
+LIBS=../libeezo
+
 <$MKROOT/proto/mkone
+
+# relink when the library changes (mkone LIBS= links it but does not depend on it)
+$PROG: ../libeezo/libeezo.a

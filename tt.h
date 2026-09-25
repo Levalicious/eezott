@@ -61,12 +61,13 @@
 #include <stdarg.h>
 #include <limits.h>
 #include "../libeezo/types.h"
-#include "bn.h"
+#include "../libeezo/bn.h"
 
 void *xalloc(size_t n);
 char *xstrdup(const char *s);
 char *xsprintf(const char *fmt, ...);
 void die(const char *fmt, ...);
+void die_resource(const char *fmt, ...);   /* resource abort: 'resource limit: ...', exit 70 */
 
 /* ---------------- surface syntax ---------------- */
 
@@ -75,7 +76,7 @@ typedef enum { S_VAR, S_U, S_NUM, S_LEVEL, S_LZERO, S_LSUC, S_LMAX, S_PI, S_LAM,
                S_PATHP, S_PARTIAL, S_SYS, S_TRANSP, S_HCOMP, S_COMP, S_SUB, S_INS, S_OUTS,
                S_SIGMA, S_PAIR, S_FST, S_SND, S_GLUE, S_GLUEEL, S_UNGLUE, S_HOLE } SKind;
 typedef struct STerm STerm;
-typedef struct { const char *name; STerm *ty; int line; int imp; } SBinder;   /* ty NULL for lambda binders; imp: written {x} */
+typedef struct { const char *name; STerm *ty; int line; int imp; int irrel; } SBinder;   /* ty NULL for lambda binders; imp: written {x}; irrel: written .(x : A) */
 typedef struct { STerm *face, *body; } SBranch;
 struct STerm {
     SKind k; int line;
@@ -95,6 +96,7 @@ struct STerm {
 typedef struct { const char *name; STerm *ty; STerm *boundary; int line; } SCon;   /* boundary: a system, for path constructors */
 typedef struct SDecl {
     int isdata, isnative, isword; const char *name; int line;   /* isnative: a 'native' definition (M15); isword: a 'word' one (M16a) */
+    int lib;                          /* declared by the prelude or an import, not by the program (erase.c: the unary Nat's side) */
     SBinder *params; int nparams;     /* data: parameters; def: binder sugar folded into ty/val */
     STerm *ty;                        /* def: type; data: index telescope ending in U */
     STerm *val;                       /* def */
@@ -223,8 +225,11 @@ typedef struct Env { Val *v; struct Env *next; } Env;
 typedef struct { Val *v; int irr; int papp; int proj; Val *x, *y; } Arg;   /* spine entry; papp: path application with endpoints x y; proj: 1 fst, 2 snd */
 typedef struct { Arg *a; int n, cap; } VList;
 typedef struct Clo Clo;
-struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data; };   /* fn != NULL => native closure */
-typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META } HKind;
+struct Clo { Env *env; Term *t; Val *(*fn)(void *data, Val *arg); void *data;   /* fn != NULL => native closure */
+             Val *iarg, *ires; int imv, istable; };   /* one-entry application memo: the value the closure was last applied to, at which metas version, and whether the result is stable */
+typedef enum { H_VAR, H_ELIM, H_TRANSP, H_HCOMP, H_OUTS, H_UNGLUE, H_META, H_DEF } HKind;
+/* H_DEF: a definition application kept rigid in conversion (the H_DEF plan): unfolded only by force/quote and where
+   a canonical form is needed; conv compares the same definition's spine, skipping the arguments of .() binders */
 typedef struct { Val *phi; Val *v; } VBranch;
 struct Val {
     VKind k; int irr; const char *name; int isi;
@@ -244,6 +249,13 @@ struct Val {
     Bn *num;            /* V_NUM: a literal of the data type n at the level lvl (M15) */
     /* V_PAIR with irr: the second component is lazy - b is NULL until pair_snd forces the closure clo (a term under its
        environment, or a native thunk called with NULL); it is never compared and quotes to T_IRR (M16a) */
+    /* H_DEF memo (the memoization pass): the unfolding of this rigid definition application, computed once and kept
+       in the value itself - the value is the shared cell, updated in place in the manner of an Eezo thunk. unf_n is
+       the spine length the memo was taken at (neu_app lengthens spines) and unf_mv the metas version (a meta solved
+       after the memo can unstick a reduction, so any assignment or rollback invalidates). */
+    Val *unf; int unf_n; int unf_mv; int unf_stable;
+    Val *par;           /* the neutral this one extends by its last spine entry (neu_app): unfold_def reuses its unfolding */
+    int defer;          /* V_NEU/H_ELIM: a saturated elimination not yet reduced (call-by-need): elim_force reduces it on demand, keeping the result in unf */
 };
 Val *pair_snd(Val *p);
 
@@ -263,6 +275,7 @@ Val *vpapp(Val *p, Val *r, Val *x, Val *y);
 Val *vproj(Val *p, int which);
 Val *vlam_native(const char *name, Val *(*fn)(void *, Val *), void *data);
 Term *quote(int depth, Val *v);
+Val *nf_force(Val *v);                         /* the printed normal form: pairs forced through their first component */
 int conv(int depth, Val *a, Val *b);
 Val *inst(Clo *c, Val *v);          /* instantiate a closure */
 Val *restrict_val(Val *v, const Face *f);
@@ -286,9 +299,14 @@ Val *vapply_arg(Val *f, Arg *a);             /* apply a spine entry (application
  * substituted structurally (zonk). */
 typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known */
 extern Meta *tmetas; extern int ntmetas;
+extern int metas_version;   /* bumped whenever a meta is solved or a rollback clears one: memo entries key on it */
 int meta_new(Val *ty, int ctxn, const char **names, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
-Val *force(Val *v);                          /* a solved meta applied to its spine is its solution applied; else v */
+Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
+extern int force_depth;                      /* forces active on the C stack: a walk driven from outside nests here, not in elim_reduce */
+Val *fmeta(Val *v);                          /* metas only: definition applications stay rigid (what conversion compares) */
+Val *elim_force(Val *v);                     /* a deferred elimination to its value, or itself when it is stuck */
+Val *unfold_def(Val *v);                     /* a rigid definition application to its value: the definition applied to the spine */
 typedef struct { int u, p; } MMark;
 MMark meta_mark(void); void meta_rollback(MMark m);
 int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */
@@ -302,7 +320,9 @@ int term_mentions_meta(Term *t, int id);
 
 typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly;
                  int native; Val *vfallback;          /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
-                 int isword, wordop; } Def;           /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
+                 int isword, wordop;                  /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
+                 int seq;                             /* declaration order across files (erasure emits in it) */
+                 int lib; } Def;                      /* a library declaration (the prelude, an import): erased with the unary Nat, and again in chain mode when program code reaches it */
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
@@ -338,7 +358,10 @@ struct Data {
     int block, nblock, bpos, bcons0;       /* the block (mutual declaration): its first member, member count, this member's position,
                                               ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
+    int seq;                               /* declaration order across files */
+    int lib;                               /* a library declaration: its code gets a chain copy when program code reaches it */
 };
+extern int decl_seq;                       /* the next declaration's sequence number */
 
 Val *def_at(int id, LVal L); Val *def_ty_at(int id, LVal L);   /* a definition taken at a level (memoised for constants) */
 Data *data_at(int d, LVal L); Con *con_at(int ci, LVal L);   /* a data type / constructor taken at a level: its terms instantiated */
@@ -348,6 +371,7 @@ int ref_poly(TKind k, int id);                               /* does the global 
 extern Def *defs; extern int ndefs;
 extern Data *datas; extern int ndatas;
 extern Con *cons; extern int ncons;
+extern const char *cur_decl_name;   /* the declaration being elaborated: named by the literal-elimination tripwire */
 
 int is_type_like(int depth, Val *ty);      /* U or a family into U: computationally irrelevant */
 int peano_shape(int d, int *zero, int *suc);  /* a data type shaped like the naturals, with its zero and successor */
@@ -359,7 +383,7 @@ Term *numeral_term(int d, Term *lt, const Bn *n);   /* the literal as constructo
 Val *vnum(int d, LVal l, Bn *n);
 Val *num_view(Val *v);                              /* zero, or suc applied to the literal below */
 int native_code(const char *name);                  /* 1.. for add sub mul div mod pow eq lt le; 0 otherwise */
-Val *native_wrapper(int code, int d, Val *fallback);
+Val *native_wrapper(int code, int d, Val *fallback, int def);   /* def: the native's own definition, the head of its guard neutral */
 /* M16a: machine words in the theory. 'word Word : U := Sigma D .(P)' registers the word type (D shaped like the naturals, P
    irrelevant); 'word wadd : Word -> Word -> Word := body' registers an operation the erasure emits as the run-time primitive of
    that name, its body being the specification the checker computes by. Pairs and projections at the word type erase to the
