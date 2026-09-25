@@ -1,0 +1,15 @@
+#import word
+-- M17 (the pivot to A), S6.5: the modular power and the modular inverse. Their laws at closed instances, and the
+-- light evaluations. A modular power evaluated IN THE CHECKER costs gigabytes: each of its 64 bit steps per limb
+-- runs a bit-serial division of 64 steps per limb, each step a handful of chain operations, each of those a
+-- handful of word operations, each a mkw - and the checker's allocator never frees. The runtime collects its
+-- garbage; the closed instances at real moduli are the runtime harness's (S1'), not this file's.
+-- the laws, applied at closed instances (their types force nothing)
+def t10 : Path Nat (wbval (bpowmod_wb (lcons 3 (lnil {Word})) (lcons 100 (lnil {Word})) (lcons 7 (lnil {Word})))) (mod (pow 3 100) (suc 6)) :=
+  bpowmod_wb_val (lcons 3 (lnil {Word})) (lcons 100 (lnil {Word})) (lcons 7 (lnil {Word})) 6 (prefl Nat 7)
+def t11 : Path Nat (wbval (bminv_wb (lcons 3 (lnil {Word})) (lcons 7 (lnil {Word})))) (minv 3 7) := bminv_wb_val (lcons 3 (lnil {Word})) (lcons 7 (lnil {Word}))
+-- the degenerate moduli of the inverse: 1 mod 0 = 1, 1 mod 1 = 0
+def t7 : Path Nat (wbval (bminv_wb (lcons 3 (lnil {Word})) (lnil {Word}))) 1 := prefl Nat 1
+def t8 : Path Nat (wbval (bminv_wb (lcons 3 (lnil {Word})) (lcons 1 (lnil {Word})))) 0 := prefl Nat 0
+-- modulus zero: the reduction is the identity and this is the plain power
+def t5 : Path Nat (wbval (bpowmod_wb (lcons 3 (lnil {Word})) (lcons 5 (lnil {Word})) (lnil {Word}))) 243 := prefl Nat 243

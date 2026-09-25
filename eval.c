@@ -22,7 +22,9 @@ Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
+void unfold_counts_report(void); void fallback_report(void);
 void die_resource(const char *fmt, ...) {
+    unfold_counts_report(); fallback_report();
     va_list ap;
     fflush(stdout);
     fputs("eezott: resource limit: ", stderr);
@@ -748,6 +750,12 @@ static Bn *nat_op(int code, const Bn *a, const Bn *b) {
     die("internal: unknown native %d", code); return NULL;
 }
 static char last_fallback[2][64]; static int last_fallback_code;
+static long fb_count[16]; static char fb_first[16][2][64];
+void fallback_report(void) {
+    if (!getenv("EEZOTT_TRIPWIRE_METHODS")) return;
+    fprintf(stderr, "  native fallbacks by code (1 add 2 sub 3 mul 4 div 5 mod 6 pow 7 eq 8 lt 9 le 10 minv):\n");
+    for (int c = 1; c <= 10; c++) if (fb_count[c]) fprintf(stderr, "    code %d: %ld  first: arg1 = %s; arg2 = %s\n", c, fb_count[c], fb_first[c][0], fb_first[c][1]);
+}
 typedef struct { int code, d; Val *fallback, *arg1; } NatNative;
 static Val *natfn(void *data, Val *arg) {
     NatNative *nn = data;
@@ -762,7 +770,9 @@ static Val *natfn(void *data, Val *arg) {
             return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
         return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
     }
-    if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the last native that fell back to its body, for the tripwire's diagnostic */
+    static int diag = -1; if (diag < 0) diag = getenv("EEZOTT_TRIPWIRE_METHODS") != NULL;
+    if (diag) {   /* the last native that fell back to its body, for the tripwire's diagnostic */
+        fb_count[nn->code]++;
         Val *x[2] = { a, b };
         for (int i = 0; i < 2; i++) {
             Val *v = x[i]; int k = 0; char *d = NULL;
@@ -773,6 +783,7 @@ static Val *natfn(void *data, Val *arg) {
             free(d);
         }
         last_fallback_code = nn->code;
+        if (!fb_first[nn->code][0][0]) { snprintf(fb_first[nn->code][0], 64, "%s", last_fallback[0]); snprintf(fb_first[nn->code][1], 64, "%s", last_fallback[1]); }
     }
     return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
 }
@@ -1021,8 +1032,16 @@ Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
 }
 
 /* ---- application ---- */
+static long *unf_count;   /* diagnostic: how many times each definition's body was evaluated (EEZOTT_UNFOLD_COUNTS) */
+void unfold_counts_report(void) {
+    if (!unf_count) return;
+    fprintf(stderr, "  unfoldings per definition (top):\n");
+    for (int k = 0; k < 12; k++) { int best = -1; for (int i = 0; i < ndefs; i++) if (unf_count[i] > 0 && (best < 0 || unf_count[i] > unf_count[best])) best = i;
+        if (best < 0) break; fprintf(stderr, "    %8ld  %s\n", unf_count[best], defs[best].name); unf_count[best] = -unf_count[best]; }
+}
 /* a rigid definition application to its value: the definition applied to its spine */
 Val *unfold_def(Val *v) {
+    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = calloc(65536, sizeof(long)); } }
     /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
        the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
        hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
@@ -1030,6 +1049,7 @@ Val *unfold_def(Val *v) {
        length (neu_app lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
     if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
     int save = meta_blocked; meta_blocked = 0;
+    if (unf_count) unf_count[v->n]++;   /* diagnostic: body evaluations per definition (EEZOTT_UNFOLD_COUNTS) */
     Val *f;
     if (v->par && v->par->k == V_NEU && v->par->h == H_DEF && v->par->n == v->n && v->par->args.n + 1 == v->args.n) {
         /* incremental along the spine: the parent's unfolding (memoised there), then the one entry this neutral adds.
