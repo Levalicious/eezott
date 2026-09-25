@@ -1,15 +1,17 @@
 #import prelude
 #import wnat
 -- M17: the word-backed naturals as a sub-theory of the naturals. wnat bundles the interpretation wbval with
--- the laws that make it carry each limb operation onto the natural one; accel_add is that sub-theory used the
--- way the runtime uses it - a natural sum, computed in limbs, read back through the interpretation.
-def use_add : (x y : WB) -> Path Nat (wbval (badd x y)) (add (wbval x) (wbval y)) := wnat_add
-def use_mul : (x y : WB) -> Path Nat (wbval (bmul x y)) (mul (wbval x) (wbval y)) := wnat_mul
-def use_inv : (x y : WB) -> Path Nat (wbval (bminv x y)) (minv (wbval x) (wbval y)) := wnat_inv
-def accelerated : (x y : Nat) -> Path Nat (wbval (badd (nelim x) (nelim y))) (add x y) := accel_add
-def chained (x y : Nat) : Path Nat (wbval (bmul (badd (nelim x) (nelim y)) (nelim x))) (mul (add x y) x) :=
-  compPath Nat (wbval (bmul (badd (nelim x) (nelim y)) (nelim x))) (mul (wbval (badd (nelim x) (nelim y))) (wbval (nelim x))) (mul (add x y) x)
-    (wnat_mul (badd (nelim x) (nelim y)) (nelim x))
-    (compPath Nat (mul (wbval (badd (nelim x) (nelim y))) (wbval (nelim x))) (mul (add x y) (wbval (nelim x))) (mul (add x y) x)
-       (cong Nat Nat (\u -> mul u (wbval (nelim x))) (wbval (badd (nelim x) (nelim y))) (add x y) (accel_add x y))
+-- the laws that make it carry each chain operation onto the natural one; accel_add is that sub-theory used the
+-- way the runtime uses it - a natural sum, computed in chains, read back through the interpretation.
+def use_add : (x y : WB) -> Path Nat (wbval (nadd x y)) (add (wbval x) (wbval y)) := wnat_add
+def use_mul : (x y : WB) -> Path Nat (wbval (nmul x y)) (mul (wbval x) (wbval y)) := wnat_mul
+def use_div : (x y : WB) -> Path Nat (wbval (bdiv_wb x y)) (div (wbval x) (wbval y)) := wnat_div
+def use_inv : (x y : WB) -> Path Nat (wbval (bminv_wb x y)) (minv (wbval x) (wbval y)) := wnat_inv
+def use_pow : (x e : WB) -> Path Nat (wbval (bpow_wb x e)) (pow (wbval x) (wbval e)) := wnat_pow
+def accelerated : (x y : Nat) -> Path Nat (wbval (nadd (nelim x) (nelim y))) (add x y) := accel_add
+def chained (x y : Nat) : Path Nat (wbval (nmul (nadd (nelim x) (nelim y)) (nelim x))) (mul (add x y) x) :=
+  compPath Nat (wbval (nmul (nadd (nelim x) (nelim y)) (nelim x))) (mul (wbval (nadd (nelim x) (nelim y))) (wbval (nelim x))) (mul (add x y) x)
+    (wnat_mul (nadd (nelim x) (nelim y)) (nelim x))
+    (compPath Nat (mul (wbval (nadd (nelim x) (nelim y))) (wbval (nelim x))) (mul (add x y) (wbval (nelim x))) (mul (add x y) x)
+       (cong Nat Nat (\u -> mul u (wbval (nelim x))) (wbval (nadd (nelim x) (nelim y))) (add x y) (accel_add x y))
        (cong Nat Nat (\u -> mul (add x y) u) (wbval (nelim x)) x (wnat_embed x)))
