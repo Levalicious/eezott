@@ -1,0 +1,14 @@
+#import word
+-- M17 (the pivot to A), S6.1/6.2: the normal form, the zero test and the padded comparisons at closed instances,
+-- decided by the kernel; and one law at a closed instance, computing both sides.
+def t1 : Path Nat (wbval (wnorm (lcons 0 (lcons 0 (lcons 5 (lnil {Word})))))) 5 := prefl Nat 5
+def t2 : Path Nat (wlen (wnorm (lcons 0 (lcons 0 (lcons 5 (lnil {Word})))))) 1 := prefl Nat 1
+def t3 : Path Nat (bisz (lcons 0 (lcons 0 (lnil {Word})))) 1 := prefl Nat 1
+def t4 : Path Nat (bisz (lcons 0 (lcons 3 (lnil {Word})))) 0 := prefl Nat 0
+def t5 : Path Nat (blt_wb (lcons 1 (lcons 2 (lnil {Word}))) (lcons 5 (lnil {Word}))) 0 := prefl Nat 0
+def t6 : Path Nat (blt_wb (lcons 5 (lnil {Word})) (lcons 1 (lcons 2 (lnil {Word})))) 1 := prefl Nat 1
+def t7 : Path Nat (ble_wb (lcons 7 (lnil {Word})) (lcons 7 (lnil {Word}))) 1 := prefl Nat 1
+def t8 : Path Nat (beq_wb (lcons 0 (lcons 7 (lnil {Word}))) (lcons 7 (lnil {Word}))) 1 := prefl Nat 1
+def t9 : Path Nat (beq_wb (lcons 8 (lnil {Word})) (lcons 7 (lnil {Word}))) 0 := prefl Nat 0
+def t10 : Path Nat (blt_wb (lcons 1 (lcons 2 (lnil {Word}))) (lcons 5 (lnil {Word}))) (blt 18446744073709551618 5) :=
+  blt_wb_val (lcons 1 (lcons 2 (lnil {Word}))) (lcons 5 (lnil {Word}))
