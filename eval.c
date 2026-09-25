@@ -1905,6 +1905,11 @@ static int conv1_b(int depth, Val *a, Val *b) {
                Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
             if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_DEF, a->n, a->lvl, b->lvl)
                 && conv_spine(depth, &a->args, &b->args)) return 1;
+            /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
+               height). A wrapper's body usually reaches the other definition's own head, and the congruence fast path
+               then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
+               a literal fuel, say - and the comparison walks that body's closures (Bug_Eezott_ConvUnfoldsBothSides). */
+            if (a->n != b->n) { if (a->n > b->n) a = fmeta(unfold_def(a)); else b = fmeta(unfold_def(b)); continue; }
             a = fmeta(unfold_def(a)); b = fmeta(unfold_def(b)); continue;
         }
         if (ad) { a = fmeta(unfold_def(a)); continue; }

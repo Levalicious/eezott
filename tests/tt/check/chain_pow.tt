@@ -1,0 +1,14 @@
+#import word
+-- M17 (the pivot to A), S6.3: the power by the binary method at closed instances, decided by the kernel.
+-- One-limb exponents materialise; the two-limb exponents are only reachable with bases 0 and 1.
+def t1 : Path Nat (wbval (bpow_wb (lcons 3 (lnil {Word})) (lcons 40 (lnil {Word})))) (pow 3 40) := prefl Nat (pow 3 40)
+def t2 : Path Nat (wbval (bpow_wb (lcons 2 (lnil {Word})) (lcons 64 (lnil {Word})))) 18446744073709551616 := prefl Nat 18446744073709551616
+def t3 : Path Nat (wbval (bpow_wb (lcons 7 (lnil {Word})) (lcons 0 (lnil {Word})))) 1 := prefl Nat 1
+def t4 : Path Nat (wbval (bpow_wb (lcons 7 (lnil {Word})) (lnil {Word}))) 1 := prefl Nat 1
+def t5 : Path Nat (wbval (bpow_wb (lcons 1 (lnil {Word})) (lcons 5 (lcons 7 (lnil {Word}))))) 1 := prefl Nat 1
+def t6 : Path Nat (wbval (bpow_wb (lnil {Word}) (lcons 5 (lcons 7 (lnil {Word}))))) 0 := prefl Nat 0
+def t7 : Path Nat (wbval (bpow_wb (lcons 10 (lnil {Word})) (lcons 30 (lnil {Word})))) 1000000000000000000000000000000 := prefl Nat 1000000000000000000000000000000
+-- the chain stays normal: 3^40 has 64 bits, two limbs would be 128; the result has exactly one limb
+def t8 : Path Nat (wlen (bpow_wb (lcons 3 (lnil {Word})) (lcons 40 (lnil {Word})))) 1 := prefl Nat 1
+-- the law at a closed instance: both sides compute
+def t9 : Path Nat (wbval (bpow_wb (lcons 3 (lnil {Word})) (lcons 40 (lnil {Word})))) (pow 3 40) := bpow_wb_val (lcons 3 (lnil {Word})) (lcons 40 (lnil {Word}))
