@@ -75,7 +75,9 @@ static Term *mk_defapp(int d, Term **args, int nargs) {
     }
     return t;
 }
-/* A fold whose step is an addition has a closed form, and stdlib/tt/fold.tt proves it (elim_add): a step
+/* A fold whose step factors through the limb algebra compiles as a whole; one whose step does not cannot be
+   carried at all. The factorisations there is a theorem for are the ones below. stdlib/tt/fold.tt proves the
+   first (elim_add): a step
    that adds w to the running value, taken n times from z, is z + n * w. The successor run suc (suc .. ih)
    is that step with w the number of successors. Anything else is still refused - a closed form is licensed
    by a theorem, never guessed - and a step whose w mentions the hypothesis or the predecessor has none.
@@ -196,7 +198,10 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
     case T_DEF:
-        if (nat_limbs && defs[t->n].native) {   /* a native is the limb primitive (or a wrapper around it) */
+        /* A native is the limb primitive (or a wrapper around it). The licence for this rewrite is
+           stdlib/tt/wnat.tt: wbval carries each limb operation onto the natural one, so running the limb
+           operation and reading the answer back through wbval is the same number. */
+        if (nat_limbs && defs[t->n].native) {
             switch (defs[t->n].native) {
             case 1: fputs("badd", out); break;
             case 2: fputs("bsub", out); break;
