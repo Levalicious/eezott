@@ -255,6 +255,7 @@ struct Val {
        after the memo can unstick a reduction, so any assignment or rollback invalidates). */
     Val *unf; int unf_n; int unf_mv; int unf_stable;
     Val *par;           /* the neutral this one extends by its last spine entry (neu_app): unfold_def reuses its unfolding */
+    int defer;          /* V_NEU/H_ELIM: a saturated elimination not yet reduced (call-by-need): elim_force reduces it on demand, keeping the result in unf */
 };
 Val *pair_snd(Val *p);
 
@@ -302,7 +303,9 @@ extern int metas_version;   /* bumped whenever a meta is solved or a rollback cl
 int meta_new(Val *ty, int ctxn, const char **names, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
 Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
+extern int force_depth;                      /* forces active on the C stack: a walk driven from outside nests here, not in elim_reduce */
 Val *fmeta(Val *v);                          /* metas only: definition applications stay rigid (what conversion compares) */
+Val *elim_force(Val *v);                     /* a deferred elimination to its value, or itself when it is stuck */
 Val *unfold_def(Val *v);                     /* a rigid definition application to its value: the definition applied to the spine */
 typedef struct { int u, p; } MMark;
 MMark meta_mark(void); void meta_rollback(MMark m);
@@ -380,7 +383,7 @@ Term *numeral_term(int d, Term *lt, const Bn *n);   /* the literal as constructo
 Val *vnum(int d, LVal l, Bn *n);
 Val *num_view(Val *v);                              /* zero, or suc applied to the literal below */
 int native_code(const char *name);                  /* 1.. for add sub mul div mod pow eq lt le; 0 otherwise */
-Val *native_wrapper(int code, int d, Val *fallback);
+Val *native_wrapper(int code, int d, Val *fallback, int def);   /* def: the native's own definition, the head of its guard neutral */
 /* M16a: machine words in the theory. 'word Word : U := Sigma D .(P)' registers the word type (D shaped like the naturals, P
    irrelevant); 'word wadd : Word -> Word -> Word := body' registers an operation the erasure emits as the run-time primitive of
    that name, its body being the specification the checker computes by. Pairs and projections at the word type erase to the

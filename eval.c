@@ -756,18 +756,23 @@ void fallback_report(void) {
     fprintf(stderr, "  native fallbacks by code (1 add 2 sub 3 mul 4 div 5 mod 6 pow 7 eq 8 lt 9 le 10 minv):\n");
     for (int c = 1; c <= 10; c++) if (fb_count[c]) fprintf(stderr, "    code %d: %ld  first: arg1 = %s; arg2 = %s\n", c, fb_count[c], fb_first[c][0], fb_first[c][1]);
 }
-typedef struct { int code, d; Val *fallback, *arg1; } NatNative;
+typedef struct { int code, d, def; Val *fallback, *arg1; } NatNative;   /* def: the native's definition (the head of its guard neutral) */
 static Val *natfn(void *data, Val *arg) {
     NatNative *nn = data;
     if (!nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *nn; m->arg1 = arg; return vlam_native("n", natfn, m); }
     Val *a = force(nn->arg1), *b = force(arg);
     if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) {
         /* pow is the one native whose result may be a number no limb list can hold (M17). When it is, the
-           kernel does not compute it: the definition's own fold takes over, and over a machine-sized
-           literal that fold is the neutral the chunk rule leaves. So the checker STATES such a power -
-           the runtimes denote it, as a value of their own kind - and neither invents a number. */
-        if (nn->code == 6 && !bn_fits_pow(a->num, b->num))
-            return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
+           kernel does not compute it and does not unfold it either: the native application itself stands, a
+           rigid neutral whose unfolding is itself - canonical enough for force, opaque to conversion (the same
+           power compares by its spine), and the laws (pow_add, pow_mul) prove what it cannot compute. Lean's
+           pow guard (S2). An elimination on it, or a native over it, stays a neutral: no canonical form exists. */
+        if (nn->code == 6 && !bn_fits_pow(a->num, b->num)) {
+            Val *v = mkval(V_NEU); v->h = H_DEF; v->n = nn->def; v->lvl = a->lvl;
+            Arg x = {0}; x.v = nn->arg1; v = neu_app(v, x); x.v = arg; v = neu_app(v, x);
+            v->unf = v; v->unf_n = v->args.n; v->unf_stable = 1;
+            return v;
+        }
         return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
     }
     static int diag = -1; if (diag < 0) diag = getenv("EEZOTT_TRIPWIRE_METHODS") != NULL;
@@ -787,8 +792,8 @@ static Val *natfn(void *data, Val *arg) {
     }
     return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
 }
-Val *native_wrapper(int code, int d, Val *fallback) {
-    NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->fallback = fallback; nn->arg1 = NULL;
+Val *native_wrapper(int code, int d, Val *fallback, int def) {
+    NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->def = def; nn->fallback = fallback; nn->arg1 = NULL;
     return vlam_native("m", natfn, nn);
 }
 static Val *elim_apply_list(int data, VList *args);
@@ -855,10 +860,10 @@ static void term_heads(FILE *f, Term *t, int d) {
    bounds. What it must count is NESTING: a walk nests (the branch forces its induction hypothesis inside this
    call), while a program that merely uses many literals does not. Counted as a running total instead, the
    tripwire fires on the 66th innocent use of a literal anywhere in the run, and names an innocent walker.
-   The chunk rule below keeps almost every walk from starting at all; the tripwire stays as the backstop for
-   the methods whose term cannot be inspected (M16b A2). */
+   Eliminations reduce on demand (elim_force), so a walk starts only where a native or an elimination forces the
+   hypothesis inside the step; a walk that conversion drives from outside is iterative and meets the resource
+   limits instead - the checker's own elimination, work proportional to the value, as Lean's and Agda's (S2). */
 static int elim_num_depth;
-static int elim_num_big;   /* the elimination under way is on a machine-sized literal: one successor of it is a word of steps */
 static struct { int data; char lit[16]; } elim_trace[64];   /* the nesting chain's first 64 levels, for the tripwire's diagnostic */
 static Val *elim_reduce_go(int data, VList *args);
 static Val *elim_reduce(int data, VList *args) {
@@ -867,8 +872,12 @@ static Val *elim_reduce(int data, VList *args) {
     int bits = bn_bitlen(target->num);
     /* a machine-sized literal walked past 64 levels, or ANY literal nested past 4096: the second rule is the
        backstop for walks on literals below the word bounds, which the first rule cannot see (closed computations
-       nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous) */
-    if ((bits > 40 && elim_num_depth > 64) || elim_num_depth > 4096) {
+       nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous). The nesting is
+       the eliminations' or the forces': a step whose method returns a rigid native over its hypothesis (mul 3 ih)
+       walks when the native forces it, each step inside the last native's force, and elim_reduce itself returns
+       every time - so the forces are counted too (S2) */
+    int nest = elim_num_depth > force_depth ? elim_num_depth : force_depth;
+    if ((bits > 40 && nest > 64) || nest > 4096) {
         char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
         if (strlen(dec) > 40) { dec[40] = 0; }
         if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the nesting chain's outermost levels, then the eliminator's methods */
@@ -883,13 +892,11 @@ static Val *elim_reduce(int data, VList *args) {
             }
         }
         die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
-                     datas[data].name, elim_num_depth, dec, cur_decl_name ? cur_decl_name : "the top level");
+                     datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
     }
     if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
     elim_num_depth++;
-    int save_big = elim_num_big; elim_num_big = bits > 40;
     Val *r = elim_reduce_go(data, args);
-    elim_num_big = save_big;
     elim_num_depth--;
     return r;
 }
@@ -916,14 +923,10 @@ static Val *elim_reduce_go(int data, VList *args) {
             continue;
         }
         if (!c->args[j].isrec) continue;
-        /* a method that does not mention its induction hypothesis does not get one computed: a case analysis on a literal
-           (isZero, pred, if01 ..) would otherwise recurse down to zero (M16a) */
+        /* a method that does not mention its induction hypothesis does not get one at all: a case analysis on a literal
+           (isZero, pred, if01 ..) then never builds the recursive elimination (M16a). One that does gets it deferred:
+           elim_apply_list ends in a saturated elimination, which vapp leaves unreduced until something forces it. */
         if (c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn && !term_mentions_var(res->clo.t, 0)) { res = vapp(res, target->args.a[np + j].v, 0); continue; }
-        /* A method that does mention it walks the literal one successor per step, and one successor of a machine-sized
-           literal is a word of steps: no chunk of a fold is the value its step expects, so there is no walk to make
-           here. The elimination stands as a neutral - the same term, just not unfolded - which is what the method's
-           own use of it would compute anyway (M16b A2). */
-        if (elim_num_big && c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn) { meta_blocked = 1; return NULL; }
         Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
         for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
         for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);
@@ -998,6 +1001,33 @@ static Val *elim_apply_list(int data, VList *args) {
     Val *e = mkval(V_NEU); e->h = H_ELIM; e->n = data; e->lvl = elim_lvl;
     Val *r = e;
     for (int i = 0; i < args->n; i++) r = vapp(r, args->a[i].v, args->a[i].irr);
+    return r;
+}
+/* A saturated elimination is reduced on demand, as a rigid definition application is unfolded on demand: the value is
+   the shared cell and its reduction is kept in it (unf), guarded as unfold_def's memo is. So an induction hypothesis
+   is computed only where the method forces it, the branches of a decision only where the decision selects them, and
+   a fold over a literal walks only as far as something forces (S2: what the chunk rule approximated by refusing).
+   A stuck elimination (its target not canonical) comes back as itself with the flag dropped: the neutral it is. */
+Val *elim_force(Val *v) {
+    if (!v->defer) return v;
+    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
+    Data *D = &datas[v->n];
+    int arity = D->nparams + D->nblock + block_ncons(v->n) + D->nidx + 1;
+    int save = meta_blocked; meta_blocked = 0;
+    Val *r;
+    if (v->args.n > arity) {   /* an application of the elimination's result: the parent's reduction, then this entry */
+        Val *p = v->par;
+        r = elim_force(p);
+        if (r == p) { v->defer = 0; meta_blocked |= save; return v; }
+        r = vapply_arg(r, &v->args.a[v->args.n - 1]);
+    } else {
+        elim_lvl = v->lvl;
+        r = elim_reduce(v->n, &v->args);
+        if (!r) r = elim_hcomp(v->n, &v->args);
+        if (!r) { v->defer = 0; meta_blocked |= save; return v; }
+    }
+    v->unf = r; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
+    meta_blocked |= save;
     return r;
 }
 
@@ -1075,7 +1105,7 @@ Val *vapp(Val *f, Val *a, int irr) {
             Val *v = neu_app(f, ar);
             Data *D = &datas[f->n];
             int arity = D->nparams + D->nblock + block_ncons(f->n) + D->nidx + 1;
-            if (v->args.n == arity) { elim_lvl = f->lvl; Val *r = elim_reduce(f->n, &v->args); if (r) return r; r = elim_hcomp(f->n, &v->args); if (r) return r; }
+            if (v->args.n == arity) v->defer = 1;   /* saturated: reduced on demand (elim_force), call by need */
             return v;
         }
         return neu_app(f, ar);
@@ -1860,6 +1890,11 @@ static Term *quote_iv(int depth, IVal a) {
    a proof nobody reads. */
 Val *nf_force(Val *v) {
     v = force(v);
+    if (v->k == V_CON && v->args.n > 0) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
+        Val *w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl;
+        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (!a.irr) a.v = nf_force(a.v); w = vapply_arg(w, &a); }
+        return w;
+    }
     if (v->k != V_PAIR) return v;
     Val *w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; w->a = nf_force(v->a);
     if (!v->irr) w->b = nf_force(pair_snd(v));
@@ -1980,6 +2015,7 @@ static int conv1_b(int depth, Val *a, Val *b) {
        in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
     for (;;) {
         int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
+        int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
         if (ad && bd) {
             /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
                Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
@@ -1988,12 +2024,28 @@ static int conv1_b(int depth, Val *a, Val *b) {
             /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
                height). A wrapper's body usually reaches the other definition's own head, and the congruence fast path
                then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
-               a literal fuel, say - and the comparison walks that body's closures (Bug_Eezott_ConvUnfoldsBothSides). */
-            if (a->n != b->n) { if (a->n > b->n) a = fmeta(unfold_def(a)); else b = fmeta(unfold_def(b)); continue; }
-            a = fmeta(unfold_def(a)); b = fmeta(unfold_def(b)); continue;
+               a literal fuel, say - and the comparison walks that body's closures (Bug_Eezott_ConvUnfoldsBothSides).
+               A native's guard neutral unfolds to itself: it is rigid, and two of them differ by their spines. */
+            Val *ua, *ub;
+            if (a->n != b->n) {
+                if (a->n > b->n) { ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } }
+                else { ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } }
+                break;
+            }
+            ua = fmeta(unfold_def(a)); ub = fmeta(unfold_def(b));
+            if (ua == a && ub == b) break;
+            a = ua; b = ub; continue;
         }
-        if (ad) { a = fmeta(unfold_def(a)); continue; }
-        if (bd) { b = fmeta(unfold_def(b)); continue; }
+        if (ad) { Val *u = fmeta(unfold_def(a)); if (u != a) { a = u; continue; } }
+        if (bd) { Val *u = fmeta(unfold_def(b)); if (u != b) { b = u; continue; } }
+        /* deferred eliminations: the same one by spine congruence, else reduced (a stuck one drops its flag) */
+        if (ae && be) {
+            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)
+                && conv_spine(depth, &a->args, &b->args)) return 1;
+            a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
+        }
+        if (ae) { a = fmeta(elim_force(a)); continue; }
+        if (be) { b = fmeta(elim_force(b)); continue; }
         break;
     }
     /* a level variable is a level value in the context and a neutral variable under a binder opened by conversion */

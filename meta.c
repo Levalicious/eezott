@@ -49,10 +49,19 @@ Val *fmeta(Val *v) {
     return v;
 }
 
-Val *force(Val *v) {
+int force_depth;
+static Val *force_go(Val *v);
+Val *force(Val *v) { force_depth++; Val *r = force_go(v); force_depth--; return r; }
+static Val *force_go(Val *v) {
     v = fmeta(v);
-    while (v->k == V_NEU && v->h == H_DEF) { v = fmeta(unfold_def(v)); }
-    return v;
+    for (;;) {
+        /* a rigid definition application unfolds; one that unfolds to itself (a native's guard neutral: a power no limb
+           list holds) is as canonical as it gets */
+        if (v->k == V_NEU && v->h == H_DEF) { Val *u = fmeta(unfold_def(v)); if (u == v) return v; v = u; continue; }
+        /* a deferred elimination reduces; a stuck one comes back as itself, its flag dropped */
+        if (v->k == V_NEU && v->h == H_ELIM && v->defer) { Val *u = fmeta(elim_force(v)); if (u == v) return v; v = u; continue; }
+        return v;
+    }
 }
 MMark meta_mark(void) { MMark m = { nundo, nposts }; return m; }
 void meta_rollback(MMark m) {

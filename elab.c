@@ -1565,7 +1565,7 @@ static void elab_def(SDecl *s) {
         if (!code) die("line %d: native %s: not a kernel primitive (add sub mul div mod pow beq blt ble)", s->line, s->name);
         if (D.poly) die("line %d: native %s: a native definition takes no level", s->line, s->name);
         int d = native_type_data(D.vty, s->line, s->name);
-        D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback);
+        D.native = code; D.vfallback = D.vval; D.vval = native_wrapper(code, d, D.vfallback, ndefs);
     }
     defs = realloc(defs, (ndefs + 1) * sizeof(Def)); if (!defs) die_resource("out of memory");
     defs[ndefs++] = D;

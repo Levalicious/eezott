@@ -4,5 +4,7 @@
 -- about the number without computing it, and nothing here is evaluated into limbs at all
 def big_law : Path Nat (mul (pow 3 (pow 2 64)) (pow 3 (pow 2 64))) (pow 3 (add (pow 2 64) (pow 2 64))) :=
   sym Nat (pow 3 (add (pow 2 64) (pow 2 64))) (mul (pow 3 (pow 2 64)) (pow 3 (pow 2 64))) (pow_add 3 (pow 2 64) (pow 2 64))
+-- the power itself is stated, not computed: the native application is a rigid neutral (the pow guard, S2),
+-- equal to itself by its spine; and a fold that would compute it is stated too - defining it forces nothing
+def guard_refl : Path Nat (pow 3 18446744073709551616) (pow 3 18446744073709551616) := prefl Nat (pow 3 18446744073709551616)
 def stated : Nat := elim Nat (\_ -> Nat) 1 (\k ih -> mul 3 ih) 18446744073709551616
-def stated_typechecks : Path Nat stated (pow 3 18446744073709551616) := prefl Nat (pow 3 18446744073709551616)

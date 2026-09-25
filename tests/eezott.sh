@@ -202,12 +202,12 @@ check chain_walk.tt  chain 15                        # the walk, with the step's
 checkNF limb_minv.tt main 1
 checkNF big_pow.tt   main 12157665459056928801
 check big_pow.tt     chain 12157665459056928801
-# a number no limb list can hold is not refused: the kernel states it as the definition's own fold, the
-# neutral the chunk rule leaves (M17)
+# a number no limb list can hold is not refused: the kernel states it as the native application itself, a
+# rigid neutral (the pow guard, M17 S2); its laws (pow_add, pow_mul) prove what conversion cannot compute
 out=$(tt -c -n huge "$TT/big_pow.tt" 2>&1 >/dev/null | grep "^huge = ")
-case "$out" in *"elim Nat"*"18446744073709551616"*)
+case "$out" in "huge = pow 3 18446744073709551616")
     pass "big_pow.tt: an unholdable power is stated, not refused";;
-  *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = elim Nat ... 18446744073709551616" "$out";; esac
+  *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = pow 3 18446744073709551616" "$out";; esac
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 
 for f in "$TT"/bad/*.tt; do
