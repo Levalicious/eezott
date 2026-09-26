@@ -136,10 +136,11 @@ int unify_meta(int depth, Val *m, Val *other) {
     Ren r = { lv, k, depth, m->n, 0, 0 };
     body = ren_vars(body, &r, 0);
     if (r.occurs) return 0;
-    if (r.scope) { meta_postpone(depth, m, other); return 1; }
+    if (r.scope) { meta_postpone(depth, m, other); return 3; }   /* 3: postponed for a variable out of the spine's scope */
     solve(m->n, body, k, isi);
     return 1;
 }
+void meta_drop_last_post(void) { if (nposts > 0) nposts--; }
 
 static const char *vshow(int depth, Val *v, const char **names, int nnames) {
     char *buf = NULL; size_t sz = 0; FILE *f = open_memstream(&buf, &sz);

@@ -308,7 +308,8 @@ Val *elim_force(Val *v);                     /* a deferred elimination to its va
 Val *unfold_def(Val *v);                     /* a rigid definition application to its value: the definition applied to the spine */
 typedef struct { int u, p; } MMark;
 MMark meta_mark(void); void meta_rollback(MMark m);
-int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */
+int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 3 if postponed for a variable out of scope, 0 if refused (the meta occurs) */
+void meta_drop_last_post(void);                  /* undo the postponement unify_meta just made */
 void meta_postpone(int depth, Val *a, Val *b);
 void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
 int metas_retry(void);                       /* retry them without dying: 1 if none remain (the erasure's law matching) */

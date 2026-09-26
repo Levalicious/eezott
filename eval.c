@@ -2021,8 +2021,23 @@ static int conv1_b(int depth, Val *a, Val *b) {
         int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
         int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
         /* a metavariable is solved by the other side as written - a rigid definition application, a deferred
-           elimination - never by its unfolding: the solution is the term the user wrote (M19) */
-        if ((a->k == V_NEU && a->h == H_META) || (b->k == V_NEU && b->h == H_META)) break;
+           elimination - so the solution is the term the user wrote (M19). Only when that postpones for a variable
+           out of the spine's scope is the other side unfolded and the constraint tried again: a definition may
+           drop the variable, and that solution was found before. */
+        { int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
+          if ((am || bm) && !(am && bm)) {
+              Val *o = am ? b : a, *mv = am ? a : b;
+              int r = unify_meta(depth, mv, o);
+              if (r != 3) return r != 0;
+              Val *u = o;
+              if (o->k == V_NEU && o->h == H_DEF) u = fmeta(unfold_def(o));
+              else if (o->k == V_NEU && o->h == H_ELIM && o->defer) u = fmeta(elim_force(o));
+              if (u == o) return 1;   /* nothing to unfold: it stays postponed */
+              meta_drop_last_post();
+              if (am) b = u; else a = u;
+              continue;
+          }
+          if (am && bm) break; }
         if (ad && bd) {
             /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
                Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
