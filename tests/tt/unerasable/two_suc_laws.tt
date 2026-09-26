@@ -1,0 +1,4 @@
+#import num
+-- M19 (S4): the successor's law stated twice: the role is ambiguous, the erasure refuses
+def sucN_val2 : (x : Num) -> Path Nat (valN (sucN x)) (suc (valN x)) := sucN_val
+def main : Nat := 3

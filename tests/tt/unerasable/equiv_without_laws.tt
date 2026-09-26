@@ -1,0 +1,21 @@
+#import num
+-- M19 (S4): an equivalence in scope for a type shaped like the naturals, with no law for its successor: refused
+data N3 : U where
+  | z3 : N3
+  | s3 : N3 -> N3
+def n3ToNat : N3 -> Nat := elim N3 (\_ -> Nat) 0 (\_ ih -> suc ih)
+def natToN3 : Nat -> N3 := elim Nat (\_ -> N3) z3 (\_ ih -> s3 ih)
+def n3_rt1 : (a : N3) -> Path N3 (natToN3 (n3ToNat a)) a :=
+  elim N3 (\a -> Path N3 (natToN3 (n3ToNat a)) a) (prefl N3 z3) (\k ih -> cong N3 N3 s3 (natToN3 (n3ToNat k)) k ih)
+def n3_rt2 : (n : Nat) -> Path Nat (n3ToNat (natToN3 n)) n :=
+  elim Nat (\n -> Path Nat (n3ToNat (natToN3 n)) n) (prefl Nat 0) (\k ih -> cong Nat Nat suc (n3ToNat (natToN3 k)) k ih)
+def g3 (y : Num) : N3 := natToN3 (valN y)
+def f3 (a : N3) : Num := ofNat (n3ToNat a)
+def n3_s : (b : Num) -> Path Num (f3 (g3 b)) b :=
+  \b -> compPath Num (ofNat (n3ToNat (natToN3 (valN b)))) (ofNat (valN b)) b
+          (cong Nat Num ofNat (n3ToNat (natToN3 (valN b))) (valN b) (n3_rt2 (valN b))) (ofNat_valN b)
+def n3_t : (a : N3) -> Path N3 (g3 (f3 a)) a :=
+  \a -> compPath N3 (natToN3 (valN (ofNat (n3ToNat a)))) (natToN3 (n3ToNat a)) a
+          (cong Nat N3 natToN3 (valN (ofNat (n3ToNat a))) (n3ToNat a) (ofNat_val (n3ToNat a))) (n3_rt1 a)
+def n3Equiv : Equiv N3 Num := isoToEquiv N3 Num f3 g3 n3_s n3_t
+def main : N3 := s3 z3

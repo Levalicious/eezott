@@ -1,0 +1,37 @@
+#import num
+-- M19 (S4): a second type shaped like the naturals, with its own equivalence to Num in scope and the interface's laws
+-- stated with the equivalence's inverse g2. Nothing names N2 anywhere: the erasure finds the equivalence by its type
+-- and each role by the shape of its law, exactly as for Nat. A literal at N2 has no digit laws, so it converts through
+-- the equivalence's forward map, evaluated by the checker. tw doubles by a fold: no scheme theorem is in scope for N2,
+-- so it walks by the zero test and the predecessor. tw 4 = 8.
+data N2 : U where
+  | z2 : N2
+  | s2 : N2 -> N2
+def n2ToNat : N2 -> Nat := elim N2 (\_ -> Nat) 0 (\_ ih -> suc ih)
+def natToN2 : Nat -> N2 := elim Nat (\_ -> N2) z2 (\_ ih -> s2 ih)
+def n2_rt1 : (a : N2) -> Path N2 (natToN2 (n2ToNat a)) a :=
+  elim N2 (\a -> Path N2 (natToN2 (n2ToNat a)) a) (prefl N2 z2) (\k ih -> cong N2 N2 s2 (natToN2 (n2ToNat k)) k ih)
+def n2_rt2 : (n : Nat) -> Path Nat (n2ToNat (natToN2 n)) n :=
+  elim Nat (\n -> Path Nat (n2ToNat (natToN2 n)) n) (prefl Nat 0) (\k ih -> cong Nat Nat suc (n2ToNat (natToN2 k)) k ih)
+def g2 (y : Num) : N2 := natToN2 (valN y)
+def f2 (a : N2) : Num := ofNat (n2ToNat a)
+def n2_s : (b : Num) -> Path Num (f2 (g2 b)) b :=
+  \b -> compPath Num (ofNat (n2ToNat (natToN2 (valN b)))) (ofNat (valN b)) b
+          (cong Nat Num ofNat (n2ToNat (natToN2 (valN b))) (valN b) (n2_rt2 (valN b))) (ofNat_valN b)
+def n2_t : (a : N2) -> Path N2 (g2 (f2 a)) a :=
+  \a -> compPath N2 (natToN2 (valN (ofNat (n2ToNat a)))) (natToN2 (n2ToNat a)) a
+          (cong Nat N2 natToN2 (valN (ofNat (n2ToNat a))) (n2ToNat a) (ofNat_val (n2ToNat a))) (n2_rt1 a)
+def n2Equiv : Equiv N2 Num := isoToEquiv N2 Num f2 g2 n2_s n2_t
+-- the interface's laws, through g2
+def n2_suc : (y : Num) -> Path N2 (g2 (sucN y)) (s2 (g2 y)) := \y -> cong Nat N2 natToN2 (valN (sucN y)) (suc (valN y)) (sucN_val y)
+def n2_zero : Path N2 (g2 zeroN) z2 := prefl N2 z2
+def n2_isz : (y : Num) -> Path Bool (iszN y) true -> Path N2 (g2 y) z2 := \y h -> cong Nat N2 natToN2 (valN y) 0 (iszN_true y h)
+def pred2 : N2 -> N2 := elim N2 (\_ -> N2) z2 (\k _ -> k)
+def natToN2_pred : (n : Nat) -> Path N2 (natToN2 (pred n)) (pred2 (natToN2 n)) :=
+  elim Nat (\n -> Path N2 (natToN2 (pred n)) (pred2 (natToN2 n))) (prefl N2 z2) (\k _ -> prefl N2 (natToN2 k))
+def n2_pred : (y : Num) -> Path N2 (g2 (predN y)) (pred2 (g2 y)) :=
+  \y -> compPath N2 (natToN2 (valN (predN y))) (natToN2 (pred (valN y))) (pred2 (natToN2 (valN y)))
+          (cong Nat N2 natToN2 (valN (predN y)) (pred (valN y)) (predN_val y)) (natToN2_pred (valN y))
+-- the program
+def tw : N2 -> N2 := \a -> elim N2 (\_ -> N2) z2 (\k ih -> s2 (s2 ih)) a
+def main : N2 := tw 4

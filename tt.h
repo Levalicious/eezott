@@ -96,7 +96,6 @@ struct STerm {
 typedef struct { const char *name; STerm *ty; STerm *boundary; int line; } SCon;   /* boundary: a system, for path constructors */
 typedef struct SDecl {
     int isdata, isnative, isword; const char *name; int line;   /* isnative: a 'native' definition (M15); isword: a 'word' one (M16a) */
-    int lib;                          /* declared by the prelude or an import, not by the program (erase.c: the unary Nat's side) */
     SBinder *params; int nparams;     /* data: parameters; def: binder sugar folded into ty/val */
     STerm *ty;                        /* def: type; data: index telescope ending in U */
     STerm *val;                       /* def */
@@ -309,9 +308,12 @@ Val *elim_force(Val *v);                     /* a deferred elimination to its va
 Val *unfold_def(Val *v);                     /* a rigid definition application to its value: the definition applied to the spine */
 typedef struct { int u, p; } MMark;
 MMark meta_mark(void); void meta_rollback(MMark m);
-int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */
+int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 3 if postponed for a variable out of scope, 0 if refused (the meta occurs) */
+void meta_drop_last_post(void);                  /* undo the postponement unify_meta just made */
 void meta_postpone(int depth, Val *a, Val *b);
 void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
+int metas_retry(void);                       /* retry them without dying: 1 if none remain (the erasure's law matching) */
+int meta_solved(int id);
 Term *zonk(Term *t);                         /* replace every meta by its solution applied (dies on an unsolved one) */
 void meta_assign(int id, Term *t, int ctxn);  /* solve a meta whose spine is the context by a term of that context */
 int term_mentions_meta(Term *t, int id);
@@ -321,8 +323,7 @@ int term_mentions_meta(Term *t, int id);
 typedef struct { const char *name; Term *ty; Term *val; Val *vty; Val *vval; int irr; int line; Val **vty_at, **vval_at; int nat; int poly;
                  int native; Val *vfallback;          /* native: the kernel primitive (native_code) the definition computes by on literals; vfallback its body's value */
                  int isword, wordop;                  /* M16a: isword: the word type (erases to tc_u); wordop: 1 + the run-time primitive the op erases to */
-                 int seq;                             /* declaration order across files (erasure emits in it) */
-                 int lib; } Def;                      /* a library declaration (the prelude, an import): erased with the unary Nat, and again in chain mode when program code reaches it */
+                 int seq; } Def;                      /* declaration order across files (erasure emits in it) */
 /* poly: the global's terms mention its hidden level (atom -1); ty/val are then under it, vty/vval are its instance at level 0,
    and def_at/def_ty_at instantiate it (memoised for constant levels) */
 typedef struct {
@@ -359,7 +360,6 @@ struct Data {
                                               ordinal of its first constructor among the block's; a lone data type is a block of one */
     Data **at; int nat;                    /* instances at constant levels (data_at) */
     int seq;                               /* declaration order across files */
-    int lib;                               /* a library declaration: its code gets a chain copy when program code reaches it */
 };
 extern int decl_seq;                       /* the next declaration's sequence number */
 
@@ -395,6 +395,7 @@ const char *wordop_name(int code);
 void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
-extern int nf_main;                  /* erase the checker's normal form of main instead of its source */
+extern int nf_main;
+                  /* erase the checker's normal form of main instead of its source */
 
 #endif

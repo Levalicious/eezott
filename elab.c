@@ -763,6 +763,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
         Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
         if (is_word_type(c, pty)) t->n = 1;
+        t->irr = pty->irr;   /* from an irrelevant pair: at run time the pair is its first component (M19) */
         Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
         return app_spine(c, args + 1, n - 1, t, rty, ty);
     }
@@ -1351,7 +1352,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
     datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die_resource("out of memory");
     for (int i = 0; i < n; i++) {
         SDecl *s = ms[i];
-        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib; D.nparams = nparams; D.ptys = ptys;
+        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.nparams = nparams; D.ptys = ptys;
         LVal l; Term *ity = check_type(&c, s->ty, &l);
         Term *w = ity; int m = 0;
         for (Term *x = ity; x->k == T_PI; x = x->b) m++;
@@ -1537,7 +1538,7 @@ static void elab_def(SDecl *s) {
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
-    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib;
+    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++;
     D.poly = term_mentions_hidden(ty) || term_mentions_hidden(val);
     if (!D.poly) { ty = subst_hidden(ty, lv_const(0)); val = subst_hidden(val, lv_const(0)); }
     D.ty = ty; D.val = val;

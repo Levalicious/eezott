@@ -136,10 +136,11 @@ int unify_meta(int depth, Val *m, Val *other) {
     Ren r = { lv, k, depth, m->n, 0, 0 };
     body = ren_vars(body, &r, 0);
     if (r.occurs) return 0;
-    if (r.scope) { meta_postpone(depth, m, other); return 1; }
+    if (r.scope) { meta_postpone(depth, m, other); return 3; }   /* 3: postponed for a variable out of the spine's scope */
     solve(m->n, body, k, isi);
     return 1;
 }
+void meta_drop_last_post(void) { if (nposts > 0) nposts--; }
 
 static const char *vshow(int depth, Val *v, const char **names, int nnames) {
     char *buf = NULL; size_t sz = 0; FILE *f = open_memstream(&buf, &sz);
@@ -167,6 +168,17 @@ void metas_finish(const char *what, int line, int m0) {
         die("line %d: in %s, the implicit argument ?%d (line %d, of type %s) could not be inferred; write it, f {e} ..", line, what, id, m->line, vshow(m->ctxn, m->ty, m->names, m->ctxn));
     }
 }
+
+/* retry the postponed constraints until none is solved (the erasure's law matching): 1 if none remain, 0 if one fails or is undetermined */
+int metas_retry(void) {
+    for (;;) {
+        int n = nposts; if (n == 0) return 1;
+        Post *ps = xalloc((n + 1) * sizeof(Post)); memcpy(ps, posts, n * sizeof(Post)); nposts = 0;
+        for (int i = 0; i < n; i++) if (!conv(ps[i].depth, ps[i].a, ps[i].b)) return 0;
+        if (nposts >= n) return 0;
+    }
+}
+int meta_solved(int id) { return tmetas[id].sol != NULL; }
 
 /* assign a meta minted with the context as its spine the term t of that context: the solution abstracts the context's variables,
    under which t's indices are unchanged (binder j is the variable at level j) */
