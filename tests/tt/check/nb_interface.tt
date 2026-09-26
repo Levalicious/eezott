@@ -1,0 +1,20 @@
+#import nb
+-- M18 (i): the run-time Nat's interface on the low-first chain, at closed instances, decided by the kernel; and
+-- the laws used at instances. 2^64 + 3 is lcons 3 (lcons 1 lnil) low-first.
+def t1 : Path Nat (wbvalL (lcons 3 (lcons 1 (lnil {Word})))) 18446744073709551619 := prefl Nat 18446744073709551619
+def t2 : Path NB (nsucc (lcons 18446744073709551615 (lnil {Word}))) (lcons 0 (lcons 1 (lnil {Word}))) := prefl NB (lcons 0 (lcons 1 (lnil {Word})))
+def t3 : Path NB (npred (lcons 0 (lcons 1 (lnil {Word})))) (lcons 18446744073709551615 (lnil {Word})) := prefl NB (lcons 18446744073709551615 (lnil {Word}))
+def t4 : Path NB (npred (lcons 1 (lnil {Word}))) (lnil {Word}) := prefl NB (lnil {Word})
+def t5 : Path NB (nsucc (lnil {Word})) (lcons 1 (lnil {Word})) := prefl NB (lcons 1 (lnil {Word}))
+def t6 : Path Bool (nisz (npred (lcons 1 (lnil {Word})))) true := prefl Bool true
+def t7 : Path Nat (wbvalL (naddN (lcons 18446744073709551615 (lnil {Word})) (lcons 1 (lnil {Word})))) 18446744073709551616 := prefl Nat 18446744073709551616
+def t8 : Path NB (naddN (lcons 18446744073709551615 (lnil {Word})) (lcons 1 (lnil {Word}))) (lcons 0 (lcons 1 (lnil {Word}))) := prefl NB (lcons 0 (lcons 1 (lnil {Word})))
+def t9 : Path Nat (nltN (lcons 5 (lnil {Word})) (lcons 0 (lcons 1 (lnil {Word})))) 1 := prefl Nat 1
+def t10 : Path Nat (wbvalL (nmulN (lcons 3 (lnil {Word})) (lcons 5 (lnil {Word})))) 15 := prefl Nat 15
+-- a two-word product is not evaluated here (the checker's closed chain evaluation frees nothing; the runtime does): its law is
+def t10b : Path Nat (wbvalL (nmulN (lcons 0 (lcons 1 (lnil {Word}))) (lcons 0 (lcons 1 (lnil {Word}))))) (mul 18446744073709551616 18446744073709551616) := nmulN_val (lcons 0 (lcons 1 (lnil {Word}))) (lcons 0 (lcons 1 (lnil {Word})))
+def t11 : Path Nat (wlimb (wlowL (lcons 7 (lcons 1 (lnil {Word}))))) 7 := prefl Nat 7
+def t12 : Path Nat (wbvalL (wsingleL 9)) 9 := wsingleL_val 9
+def t13 : Path Nat (wbvalL (nsucc (lcons 18446744073709551615 (lnil {Word})))) (suc 18446744073709551615) := nsucc_val (lcons 18446744073709551615 (lnil {Word}))
+def t14 : Path Bool (isNormL (nsucc (lcons 18446744073709551615 (lnil {Word})))) true := nsucc_norm (lcons 18446744073709551615 (lnil {Word})) (prefl Bool true)
+def t15 : Path Nat (wbvalL (nbNat_add (lcons 2 (lnil {Word})) (lcons 3 (lnil {Word})))) 5 := prefl Nat 5

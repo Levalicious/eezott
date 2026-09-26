@@ -1111,8 +1111,12 @@ Val *vapp(Val *f, Val *a, int irr) {
         return neu_app(f, ar);
     case V_DATA: return neu_app(f, ar);
     case V_CON: {
-        Val *av = force(a);
-        if (av->k == V_NUM && f->args.n == 0 && cons[f->n].data == av->n) {   /* suc of a literal is the literal above */
+        /* suc of a literal is the literal above - when the argument already is one. It is not forced here: under
+           call by need the argument of suc is an induction hypothesis more often than not, and forcing it walked
+           the literal the elimination was deferred on (Fix_Eezott_VappConForcedItsArgument, S2). */
+        Val *av = fmeta(a);
+        while (av->k == V_NEU && av->h == H_DEF) { Val *u = fmeta(unfold_def(av)); if (u == av) break; av = u; }   /* through definitions (memoised), not through deferred eliminations */
+        if (av->k == V_NUM && f->args.n == 0 && cons[f->n].data == av->n) {
             int zi, si;
             if (peano_shape(av->n, &zi, &si) && f->n == si) return vnum(av->n, av->lvl, bn_succ(av->num));
         }
@@ -2042,6 +2046,10 @@ static int conv1_b(int depth, Val *a, Val *b) {
         if (ae && be) {
             if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)
                 && conv_spine(depth, &a->args, &b->args)) return 1;
+            { static const char *dt = NULL; static int dtc = 0; if (!dt) { dt = getenv("EEZOTT_DEFER_TRACE"); if (!dt) dt = ""; }
+              if (*dt && cur_decl_name && !strcmp(cur_decl_name, dt) && dtc < 12) { dtc++; const char *nm[2048] = {0};
+                fprintf(stderr, "[defer] same=%d nargs %d/%d: ", a->n == b->n, a->args.n, b->args.n);
+                term_print(stderr, quote(0, a), nm, 0); fputs("   vs   ", stderr); term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr); } }
             a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
         }
         if (ae) { a = fmeta(elim_force(a)); continue; }
