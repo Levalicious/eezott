@@ -1,0 +1,4 @@
+#import num
+-- M19 (S4): two equivalences for the Nat in scope: the erasure refuses to choose
+def numEquiv2 : Equiv Nat Num := numEquiv
+def main : Nat := 3

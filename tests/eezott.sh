@@ -42,6 +42,7 @@ oracle() {      # kind value -> expected bitstring
         bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         nat)  printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M18), the same for every program
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        unary) printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # the Nat with no equivalence in scope: the Scott numeral
         chain) printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M17): the oracle is the literal's own words
         pair) printf "${CHAIN_CONS}"'pair := a -> b -> k -> k(a)(b)\nn := pair(%s)(%s);\nn\n' "$(chain_lit "${2%%,*}")" "$(chain_lit "${2#*,}")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # the erasure's own pair of two chains, "A,B"
     esac
@@ -55,6 +56,12 @@ checkN() {      # file: a program whose main is a higher inductive value; its ru
                 # the checker's normal form of main (eezott -N), printed through the same normalizer
     local a b; a=$(run_typed "$1" "" ""); b=$(run_typed "$1" "" "-N")
     if [ "$a" = "$b" ] && [ "${a#TYPECHECK_ERROR}" = "$a" ] && [ "${a#EEZOC_ERROR}" = "$a" ]; then pass "$1 = its normal form (eezott -N)"; else fail "$1 = its normal form (eezott -N)" "$b" "$a"; fi
+}
+checkUnary() {  # file value: the program with the prelude alone - no equivalence in scope - runs its Nat unary (M19)
+    local want; want=$(oracle unary "$2")
+    local erased; erased=$("$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$TT/$1" 2>&1) || { fail "$1 = unary $2 (no equivalence)" "$want" "$erased"; return; }
+    local got; got=$(printf '%s\n' "$erased" | "$EEZOC" -f xbcl 2>&1 | "$EEZO" -f xbcl 2>&1)
+    if [ "$got" = "$want" ]; then pass "$1 = unary $2 (no equivalence)"; else fail "$1 = unary $2 (no equivalence)" "$want" "$got"; fi
 }
 checkNF() {     # file name value: the checker's normal form of the definition (eezott -n), printed as a decimal literal (M15)
     local got; got=$(tt -c -n "$2" "$TT/$1" 2>&1 >/dev/null | grep "^$2 = ")
@@ -201,6 +208,11 @@ check nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the
 check limb_minv.tt   chain 1                         # the inverse of 3 mod 2^127-1, 3 times it is 1
 check limb_double.tt chain 36893488147419103232      # a fold with a successor step: read as an addition, its closed form by elim_add_l
 check limb_plus7.tt  chain 129127208515966861312     # a fold with an addition step, its closed form by elim_add
+# M19 (S4): a second type shaped like the naturals, its own equivalence and laws in scope, a literal through the forward map
+check n2_rep.tt      chain 8
+# and the Nat with no equivalence in scope stays unary
+checkUnary add_two_three.tt 5
+checkUnary mul_two_three.tt 6
 check limb_square.tt chain 1                         # a fold with no closed form: the walk
 check chain_walk.tt  chain 15                        # the walk, with the step's arithmetic on the chain
 checkNF limb_minv.tt main 1
