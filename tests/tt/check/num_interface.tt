@@ -1,0 +1,30 @@
+#import num
+-- M19 (S1): the canonical positional numeral at closed instances, decided by the kernel; the laws at instances.
+-- 2^64 + 3 is posN (consP 3 (topP 1)): low word first, the top word nonzero by its type.
+def n1 : Num := posN (topP wpone)
+def nM63 : Num := posN (topP wpM63)
+def nM64 : Num := posN (consP 0 (topP wpone))
+def t1 : Path Nat (valN (posN (consP 3 (topP wpone)))) 18446744073709551619 := prefl Nat 18446744073709551619
+def t2 : Path Num (sucN nM63) nM64 := prefl Num nM64                             -- the carry into a new top word
+def t3 : Path Num (predN nM64) nM63 := prefl Num nM63                             -- the borrow peels the zero top
+def t4 : Path Num (predN n1) zeroN := prefl Num zeroN                             -- one's predecessor is the nullary zero
+def t5 : Path Num (sucN zeroN) n1 := prefl Num n1
+def t6 : Path Bool (iszN (predN n1)) true := prefl Bool true
+def t7 : Path Nat (valN (addN nM63 n1)) 18446744073709551616 := prefl Nat 18446744073709551616
+def t8 : Path Num (addN nM63 n1) nM64 := prefl Num nM64
+def t9 : Path Nat (ltN (posN (topP (5, refl))) nM64) 1 := prefl Nat 1
+def t10 : Path Nat (valN (mulN (posN (topP (3, refl))) (posN (topP (5, refl))))) 15 := prefl Nat 15
+def t10b : Path Nat (valN (mulN nM64 nM64)) (mul 18446744073709551616 18446744073709551616) := mulN_val nM64 nM64
+def t11 : Path Nat (wlimb (lowN (posN (consP 7 (topP wpone))))) 7 := prefl Nat 7
+def t12 : Path Nat (valN (singleN 9)) 9 := singleN_val 9
+def t12b : Path Num (singleN 0) zeroN := prefl Num zeroN
+def t13 : Path Nat (valN (sucN nM63)) (suc 18446744073709551615) := sucN_val nM63
+def t14 : Path Num (ofNat 3) (posN (topP (3, refl))) := prefl Num (posN (topP (3, refl)))
+def t15 : Path Nat (valN (ofNat 3)) 3 := ofNat_val 3
+def t16 : Path Num (ofNat (valN nM64)) nM64 := ofNat_valN nM64
+-- the digit laws, at an instance
+def t17 : Path Nat (valP (consP 3 (topP wpone))) (add (wlimb 3) (mul (valP (topP wpone)) M64)) := val_consP 3 (topP wpone)
+def t18 : Path Nat (valN (predN (posN (consP 0 (consP 0 (topP wpone)))))) (pred (mul 18446744073709551616 18446744073709551616)) := predN_val (posN (consP 0 (consP 0 (topP wpone))))
+-- univalence computes over the numeral: transport along ua numEquiv is ofNat, and its value is the literal
+def t19 : Path Num (transp (\i -> numPath i) i0 5) (ofNat 5) := prefl Num (ofNat 5)
+def t20 : Path Nat (valN (transp (\i -> numPath i) i0 5)) 5 := prefl Nat 5
