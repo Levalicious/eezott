@@ -17,4 +17,3 @@ def t11 : Path Nat (wlimb (wlowL (lcons 7 (lcons 1 (lnil {Word}))))) 7 := prefl 
 def t12 : Path Nat (wbvalL (wsingleL 9)) 9 := wsingleL_val 9
 def t13 : Path Nat (wbvalL (nsucc (lcons 18446744073709551615 (lnil {Word})))) (suc 18446744073709551615) := nsucc_val (lcons 18446744073709551615 (lnil {Word}))
 def t14 : Path Bool (isNormL (nsucc (lcons 18446744073709551615 (lnil {Word})))) true := nsucc_norm (lcons 18446744073709551615 (lnil {Word})) (prefl Bool true)
-def t15 : Path Nat (wbvalL (nbNat_add (lcons 2 (lnil {Word})) (lcons 3 (lnil {Word})))) 5 := prefl Nat 5

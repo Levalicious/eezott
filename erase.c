@@ -50,7 +50,6 @@ typedef struct {
     Term *zero, *suc, *isz, *pred;   /* the interface */
     Term *single, *low;              /* the word boundary: a word's value, a value's low word (NULL: no law) */
     Term *native[NR_COUNT];          /* by code (NULL: no law, the body runs) */
-    int native_direct[NR_COUNT];     /* the law reads h x y = f (g x) (g y): the operation answers in d itself (a decision) */
     Term *P, *gP, *npos, *top, *cons;   /* the digits (NULL: none): the positive type and its value map, the injection, the top word, a word under a numeral */
 } Rep;
 static Rep *reps; static int nreps;
@@ -871,11 +870,11 @@ static void find_representation(int d, int zi, int si, int equiv_def) {
         int mh = newm(); Match a, b;
         int na = match_laws(tpi(r->R, tpi(r->R, tpath(D, tapp(r->g, tapp(tapp(tm(mh), tvar(1)), tvar(0))), rhs))), mh, 1, &a);
         if (na > 1) die("the run-time representation's law for %s is ambiguous: %s and %s both have its shape", defs[f].name, defs[a.def2].name, defs[a.def].name);
-        if (na == 1) { r->native[code] = a.sol[0]; r->native_direct[code] = 0; continue; }
+        if (na == 1) { r->native[code] = a.sol[0]; continue; }
         int mh2 = newm();   /* answering in d itself (a decision): h x y matches any left side, so only when the value form has none */
         int nb = match_laws(tpi(r->R, tpi(r->R, tpath(D, tapp(tapp(tm(mh2), tvar(1)), tvar(0)), rhs))), mh2, 1, &b);
         if (nb > 1) die("the run-time representation's law for %s is ambiguous: %s and %s both have its shape", defs[f].name, defs[b.def2].name, defs[b.def].name);
-        if (nb == 1) { r->native[code] = b.sol[0]; r->native_direct[code] = 1; }
+        if (nb == 1) r->native[code] = b.sol[0];   /* answering in d itself: a decision */
     }
     /* the digits, in the order that pins them: a word under a numeral (l : Word) (p : P) -> Path d (gP (cons l p)) (add (fst l) (mul (gP p) 2^64))
        binds the positive type P and its value map gP; then the top word (w : W) -> Path d (gP (top w)) (fst (fst w)), W a pair type over the
