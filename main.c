@@ -26,7 +26,6 @@ static char *slurp(FILE *f) {
 static const char *libdirs[32]; static int nlibdirs;
 static char *loaded[256]; static int nloaded;
 static SDecl *decls_head, **decls_tail = &decls_head;
-static const char *program_path;   /* the program's own file: its declarations are the program's, every other file's are the library's */
 
 static char *read_path(const char *path) {
     FILE *f = fopen(path, "r"); if (!f) return NULL;
@@ -65,12 +64,17 @@ static void load_source(char *src, const char *path) {
             char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
             char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
             if (*name) load_file(resolve_import(strcmp(path, "<stdin>") ? path : NULL, name));
+        } else if (!strncmp(p, "#represent ", 11)) {   /* the Nat's run-time representation: a definition of type NatRepr (erase.c) */
+            p += 11; while (*p == ' ' || *p == '\t') p++;
+            char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
+            char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
+            if (represent_name && strcmp(represent_name, name)) die("%s: '#represent %s': the Nat is already represented by %s", path, name, represent_name);
+            represent_name = name;
         }
         while (*line && *line != '\n') line++;
         if (*line == '\n') line++;
     }
     SDecl *d = parse_program(src, path);
-    for (SDecl *x = d; x; x = x->next) x->lib = strcmp(path, program_path) != 0;
     *decls_tail = d;
     while (*decls_tail) decls_tail = &(*decls_tail)->next;
 }
@@ -84,6 +88,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
+    fprintf(stderr, "                A '#represent NAME' line names the definition (of type NatRepr) that represents the Nat at run time\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
     fprintf(stderr, "  -h            Show this help\n");
     fprintf(stderr, "\nInput is read from FILE, or stdin if absent. Output is eezoc source on stdout.\n");
@@ -104,7 +109,6 @@ int main(int argc, char **argv) {
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }
         else fname = argv[i];
     }
-    program_path = fname ? fname : "<stdin>";
     for (int i = 0; i < npreludes; i++) load_file(preludes[i]);
     if (fname) load_file(fname);
     else load_source(slurp(stdin), "<stdin>");

@@ -13,7 +13,7 @@ EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
 LIB="${SCRIPT_DIR}/../stdlib/tt"
 # No cap is imposed here: the default is the system's own limits. EEZOTT_MAX_ALLOC exists for whoever wants one
 # (export it and the checker picks it up); a resource abort is still never a judgement.
-tt() { "$EEZOTT" -p "$LIB/prelude.tt" -L "$LIB" "$@"; }
+tt() { "$EEZOTT" -p "$LIB/prelude.tt" -p "$LIB/nb.tt" -L "$LIB" "$@"; }   # nb.tt: the Nat's run-time representation (#represent nbNat)
 EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
 EEZO="${SCRIPT_DIR}/../eezo/eezo"
 TT="${SCRIPT_DIR}/tt"
@@ -27,17 +27,19 @@ scott_nat() {   # Scott numeral literal for n, in eezoc syntax
     while [ "$n" -gt 0 ]; do s="z -> s -> s($s)"; n=$((n-1)); done
     printf '%s' "$s"
 }
-chain_lit() {   # decimal -> the chain (M17): the normalised, most-significant-first Scott list of the machine words (zero: lnil)
+chain_lit() {   # decimal -> the Nat at run time (M18): the normalised Scott list of its machine words, LOW word first (zero: lnil)
     python3 -c 'import sys
-n = int(sys.argv[1]); s = "lnil"
-while n: s = "lcons(%dw)(%s)" % (n % (1 << 64), s); n >>= 64
+n = int(sys.argv[1]); ws = []
+while n: ws.append(n % (1 << 64)); n >>= 64
+s = "lnil"
+for w in reversed(ws): s = "lcons(%dw)(%s)" % (w, s)
 print(s)' "$1"
 }
 CHAIN_CONS='lnil := h0 -> h1 -> h0\nlcons := a -> b -> h0 -> h1 -> h1(a)(b)\n'
 oracle() {      # kind value -> expected bitstring
     case "$1" in
         bool) printf '#import bool\n%s' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
-        nat)  printf 'n := %s;\nn' "$(scott_nat "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
+        nat)  printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M18), the same for every program
         word) printf 'n := %sw;\nn' "$2" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;
         chain) printf "${CHAIN_CONS}"'n := %s;\nn' "$(chain_lit "$2")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # a Nat is the chain (M17): the oracle is the literal's own words
         pair) printf "${CHAIN_CONS}"'pair := a -> b -> k -> k(a)(b)\nn := pair(%s)(%s);\nn\n' "$(chain_lit "${2%%,*}")" "$(chain_lit "${2#*,}")" | "$EEZOC" -f xbcl | "$EEZO" -f xbcl ;;   # the erasure's own pair of two chains, "A,B"

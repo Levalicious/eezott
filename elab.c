@@ -1351,7 +1351,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
     datas = realloc(datas, (ndatas + n) * sizeof(Data)); if (!datas) die_resource("out of memory");
     for (int i = 0; i < n; i++) {
         SDecl *s = ms[i];
-        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib; D.nparams = nparams; D.ptys = ptys;
+        Data D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.nparams = nparams; D.ptys = ptys;
         LVal l; Term *ity = check_type(&c, s->ty, &l);
         Term *w = ity; int m = 0;
         for (Term *x = ity; x->k == T_PI; x = x->b) m++;
@@ -1537,7 +1537,7 @@ static void elab_def(SDecl *s) {
     Term *ts[2] = { zonk(ty), zonk(val) };
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
-    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++; D.lib = s->lib;
+    Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++;
     D.poly = term_mentions_hidden(ty) || term_mentions_hidden(val);
     if (!D.poly) { ty = subst_hidden(ty, lv_const(0)); val = subst_hidden(val, lv_const(0)); }
     D.ty = ty; D.val = val;
