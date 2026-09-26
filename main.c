@@ -64,12 +64,6 @@ static void load_source(char *src, const char *path) {
             char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
             char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
             if (*name) load_file(resolve_import(strcmp(path, "<stdin>") ? path : NULL, name));
-        } else if (!strncmp(p, "#represent ", 11)) {   /* the Nat's run-time representation: a definition of type NatRepr (erase.c) */
-            p += 11; while (*p == ' ' || *p == '\t') p++;
-            char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
-            char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
-            if (represent_name && strcmp(represent_name, name)) die("%s: '#represent %s': the Nat is already represented by %s", path, name, represent_name);
-            represent_name = name;
         }
         while (*line && *line != '\n') line++;
         if (*line == '\n') line++;
@@ -88,7 +82,6 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
-    fprintf(stderr, "                A '#represent NAME' line names the definition (of type NatRepr) that represents the Nat at run time\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
     fprintf(stderr, "  -h            Show this help\n");
     fprintf(stderr, "\nInput is read from FILE, or stdin if absent. Output is eezoc source on stdout.\n");

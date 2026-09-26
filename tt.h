@@ -311,6 +311,8 @@ MMark meta_mark(void); void meta_rollback(MMark m);
 int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 0 if refused (the meta occurs) */
 void meta_postpone(int depth, Val *a, Val *b);
 void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
+int metas_retry(void);                       /* retry them without dying: 1 if none remain (the erasure's law matching) */
+int meta_solved(int id);
 Term *zonk(Term *t);                         /* replace every meta by its solution applied (dies on an unsolved one) */
 void meta_assign(int id, Term *t, int ctxn);  /* solve a meta whose spine is the context by a term of that context */
 int term_mentions_meta(Term *t, int id);
@@ -393,6 +395,6 @@ void elab_program(SDecl *decls);
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
 extern int nf_main;
-extern const char *represent_name;   /* '#represent NAME': the definition whose value is the Nat's run-time representation (a NatRepr) */                  /* erase the checker's normal form of main instead of its source */
+                  /* erase the checker's normal form of main instead of its source */
 
 #endif

@@ -763,6 +763,7 @@ static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
             die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
         Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
         if (is_word_type(c, pty)) t->n = 1;
+        t->irr = pty->irr;   /* from an irrelevant pair: at run time the pair is its first component (M19) */
         Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
         return app_spine(c, args + 1, n - 1, t, rty, ty);
     }

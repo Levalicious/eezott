@@ -33,24 +33,50 @@
 #include <stdlib.h>
 
 int keep_kan, nf_main;
-/* One Nat (M18). At run time a natural is the representation the library declares - '#represent NAME', a definition
-   of type NatRepr (stdlib/tt/nb.tt: the low-first chain of machine words) - and the erasure reads that definition's
-   value by position: the type, zero, suc, the empty test, pred, the value, the normal-form test, the word boundary,
-   then the natives in the kernel's order (add sub mul div mod pow eq lt le minv). The laws that follow in the
-   bundle are its licence; the erasure checks the definition's type is NatRepr and reads nothing by name. Every
-   declaration erases the same way, once: zero, suc and elim Nat to the interface, so a unary program converts one
-   constructor at a time where it observes a number, and the natives to the bundle's operations. Nothing is unary
-   at run time. */
-const char *represent_name;
-static int nat_data = -1;      /* the prelude's Nat */
-static int list_data = -1;     /* the prelude's List: the chain literal's constructors (the one representation-shaped piece, until ofNat) */
-static int is_nat(int d) { return nat_data >= 0 && d == nat_data; }
-enum { R_TYPE, R_ZERO, R_SUCC, R_ISZ, R_PRED, R_TONAT, R_NORM, R_SINGLE, R_LOW, R_NATIVE0, R_COUNT = R_NATIVE0 + 10 };
-static Term *rep[R_COUNT];     /* the bundle's run-time components, as terms (NULL: no representation declared) */
-static Term *rep_at(int i, const char *what) {
-    if (!rep[i]) die("the Nat has no run-time representation here (%s): a '#represent' line names one - stdlib/tt/nb.tt's is nbNat", what);
-    return rep[i];
+/* One Nat (M19). A data type shaped like the naturals runs as the representation an equivalence in scope names:
+   for each such type d, exactly one definition of type Equiv d R (the prelude's Equiv, the notion Glue is built on,
+   the one definition this file knows by name) makes R the run-time type of d, and every role of the erasure - the
+   constructors, the case analysis (answered in a two-constructor data type whose first constructor is its true),
+   the word boundary, the natives, the digits of a literal - is the implementation the SHAPE of a law in scope
+   names: a pattern with metavariables is unified against the type of every definition, and the implementation is
+   read off the solution. A role with two laws is refused as ambiguous; a native with no law erases as its own body
+   (a fold over the interface); a representation with no digit laws converts its literals through the
+   equivalence's own forward map, evaluated by the checker. Nothing else is found by name. */
+enum { NR_ADD = 1, NR_SUB, NR_MUL, NR_DIV, NR_MOD, NR_POW, NR_EQ, NR_LT, NR_LE, NR_MINV, NR_COUNT };   /* native_code's order */
+typedef struct {
+    int d, zi, si;                   /* the data type, its zero and its successor */
+    int equiv;                       /* the definition of type Equiv d R */
+    Term *R, *g;                     /* the run-time type; the value map R -> d the laws are stated with (the equivalence's inverse) */
+    Term *zero, *suc, *isz, *pred;   /* the interface */
+    Term *single, *low;              /* the word boundary: a word's value, a value's low word (NULL: no law) */
+    Term *native[NR_COUNT];          /* by code (NULL: no law, the body runs) */
+    int native_direct[NR_COUNT];     /* the law reads h x y = f (g x) (g y): the operation answers in d itself (a decision) */
+    Term *P, *gP, *npos, *top, *cons;   /* the digits (NULL: none): the positive type and its value map, the injection, the top word, a word under a numeral */
+} Rep;
+static Rep *reps; static int nreps;
+static Rep *rep_of(int d) { for (int i = 0; i < nreps; i++) if (reps[i].d == d) return &reps[i]; return NULL; }
+static int is_nat(int d) { return rep_of(d) != NULL; }   /* runs as a representation */
+static Rep *rep_need(int d, const char *what) {
+    Rep *r = d >= 0 ? rep_of(d) : NULL;
+    if (!r) die("%s: %s has no run-time representation (no equivalence in scope)", what, d >= 0 ? datas[d].name : "the word type's naturals");
+    return r;
 }
+static Term *role_need(Term *t, const char *what) {
+    if (!t) die("the run-time representation has no law for %s", what);
+    return t;
+}
+static int native_dom(int def) {   /* the data type a native computes on: the domain of its type, or -1 */
+    Val *ty = force(defs[def].vty);
+    if (ty->k != V_PI) return -1;
+    Val *dom = force(ty->dom);
+    return dom->k == V_DATA ? dom->n : -1;
+}
+static int native_of(int d, int code) {   /* the native of that code on d, or -1 */
+    for (int i = 0; i < ndefs; i++) if (defs[i].native == code && native_dom(i) == d) return i;
+    return -1;
+}
+static Term *literal_via_map(Rep *r, Term *t);
+static void erase_literal(Rep *r, Term *t, int depth);
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 static void emit_sel(int nb, int m);
@@ -89,15 +115,15 @@ static Term *mk_defapp(int d, Term **args, int nargs) {
    is that step with w the number of successors. Anything else is still refused - a closed form is licensed
    by a theorem, never guessed - and a step whose w mentions the hypothesis or the predecessor has none.
    Emits the form and returns 1, or returns 0 and emits nothing. */
-static Term *fold_closed_w(Term *body) {   /* the w of a step that adds w to the hypothesis, or NULL: no closed form */
-    int addd = def_named("add"), muld = def_named("mul"), zi, si;
-    if (addd < 0 || muld < 0 || !peano_shape(nat_data, &zi, &si)) return NULL;
+static Term *fold_closed_w(Rep *rep, Term *body) {   /* the w of a step that adds w to the hypothesis, or NULL: no closed form */
+    int addd = native_of(rep->d, NR_ADD), muld = native_of(rep->d, NR_MUL), si = rep->si;
+    if (addd < 0 || muld < 0) return NULL;
     Term *w = NULL, *jlit = NULL;
     Term *b = body; int j = 0;
     while (b->k == T_APP && b->a->k == T_CON && b->a->n == si) { b = b->b; j++; }   /* suc^j ih */
     if (j > 0 && b->k == T_VAR && b->n == 0) {
         jlit = xalloc(sizeof *jlit);
-        jlit->k = T_NUM; jlit->n = nat_data; jlit->num = bn_from_u64((u64)j);
+        jlit->k = T_NUM; jlit->n = rep->d; jlit->num = bn_from_u64((u64)j);
         w = jlit;
     } else if (body->k == T_APP && body->a->k == T_APP && body->a->a->k == T_DEF && body->a->a->n == addd) {
         Term *a1 = body->a->b, *a2 = body->b;      /* add a1 a2, with the hypothesis on either side */
@@ -108,9 +134,9 @@ static Term *fold_closed_w(Term *body) {   /* the w of a step that adds w to the
     }
     return w;
 }
-static int nat_fold_closed(Term *body, Term *z, Term *scrut, int depth) {
-    int addd = def_named("add"), muld = def_named("mul");
-    Term *w = fold_closed_w(body);
+static int nat_fold_closed(Rep *rep, Term *body, Term *z, Term *scrut, int depth) {
+    int addd = native_of(rep->d, NR_ADD), muld = native_of(rep->d, NR_MUL);
+    Term *w = fold_closed_w(rep, body);
     if (!w) return 0;
     Term *mulargs[2] = { scrut, w };
     Term *mul = mk_defapp(muld, mulargs, 2);
@@ -124,6 +150,7 @@ static int nat_elim_spine(Term *t, int depth, int emit) {
     Term *node[8]; int n = 0; Term *h = t;
     while (h->k == T_APP) { if (n < 8) node[n] = h; n++; h = h->a; }
     if (h->k != T_ELIM || !is_nat(h->n)) return 0;
+    Rep *rep = rep_of(h->n);
     if (n > 8) die("an elimination on the Nat is applied to more arguments than the erasure can see through");
     /* the eliminator's own arguments are the innermost four: the motive (irrelevant, so never emitted), the
        methods in constructor order, and the scrutinee; anything outside them applies the elimination's result */
@@ -146,16 +173,16 @@ static int nat_elim_spine(Term *t, int depth, int emit) {
     /* The methods live in the context outside the binder v<depth> introduced here and never mention it, so they
        are erased at that depth (a binder of their own may reuse the name inside its own scope, harmlessly).
        The empty test is a Bool: true selects its first handler, the zero case. */
-    Term *isz = rep_at(R_ISZ, "an elimination"), *pred = rep_at(R_PRED, "an elimination");
+    Term *isz = role_need(rep->isz, "an elimination's zero test"), *pred = role_need(rep->pred, "an elimination's predecessor");
     if (!emit) {   /* the dependency walk: what the emission below will refer to */
-        Term *w = term_mentions_var(body, 0) ? fold_closed_w(body) : NULL;
-        if (w) { visit(rep_at(R_NATIVE0, "a fold")); visit(rep_at(R_NATIVE0 + 2, "a fold")); visit(mz); visit(scrut); visit(w); }
+        Term *w = term_mentions_var(body, 0) ? fold_closed_w(rep, body) : NULL;
+        if (w) { visit(mk_ref(T_DEF, native_of(rep->d, NR_ADD))); visit(mk_ref(T_DEF, native_of(rep->d, NR_MUL))); visit(mz); visit(scrut); visit(w); }
         else { visit(isz); visit(pred); visit(mz); visit(ms); visit(scrut); }
         for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) visit(node[i]->b);
         return 1;
     }
     if (term_mentions_var(body, 0)) {
-        if (!nat_fold_closed(body, mz, scrut, depth)) {   /* the walk: fix over the predecessor */
+        if (!nat_fold_closed(rep, body, mz, scrut, depth)) {   /* the walk: fix over the predecessor */
             fprintf(out, "(fix(self -> v%d -> ", depth); erase(isz, depth); fprintf(out, "(v%d)(", depth); erase(mz, depth);
             fputs(")(", out); erase(ms, depth); fputc('(', out); erase(pred, depth); fprintf(out, "(v%d))(self(", depth); erase(pred, depth); fprintf(out, "(v%d))))))(", depth);
             erase(scrut, depth); fputc(')', out);
@@ -230,30 +257,29 @@ static void erase(Term *t, int depth) {
         if (t->irr) { erase(t->c, depth + 1); break; }
         fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
     case T_DEF:
-        /* a native is the bundle's operation of the same value (its law in the bundle is the licence) */
-        if (defs[t->n].native) { erase(rep_at(R_NATIVE0 + defs[t->n].native - 1, defs[t->n].name), depth); break; }
+        if (defs[t->n].native) {   /* a native is the representation's operation its law names; without a law, its own body */
+            Rep *r = rep_of(native_dom(t->n));
+            if (r && r->native[defs[t->n].native]) { erase(r->native[defs[t->n].native], depth); break; }
+        }
         if (defs[t->n].wordop) fputs(wordop_name(defs[t->n].wordop), out);   /* a word operation is its run-time primitive */
         else if (defs[t->n].isword) fputs("tc_u", out);                     /* the word type: a machine word normalizes to itself */
         else fprintf(out, "tt_%s", defs[t->n].name);
         break;
-    case T_NUM:
-        if (is_nat(t->n)) {   /* the literal's machine words, low word first, none for zero - the chain the checker holds it as;
-                                 the representation's List constructors are named here until the bundle's own ofNat carries a literal */
-            rep_at(R_TYPE, "a literal");
-            for (int i = 0; i < t->num->n; i++) fprintf(out, "tt_c_lcons(%lluw)(", (unsigned long long)t->num->limb[i]);
-            fputs("tt_c_lnil", out); for (int i = 0; i < t->num->n; i++) fputc(')', out);
-            break;
-        }
+    case T_NUM: {
+        Rep *r = rep_of(t->n);
+        if (r) { erase_literal(r, t, depth); break; }   /* the representation's digits, or its forward map */
         erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
+    }
     case T_IRR: fputs("tc_u", out); break;
     case T_CON:
-        if (is_nat(cons[t->n].data)) { erase(rep_at(cons[t->n].nargs == 0 ? R_ZERO : R_SUCC, cons[t->n].name), depth); break; }   /* the representation's zero and successor */
+        { Rep *r = rep_of(cons[t->n].data);
+          if (r) { erase(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name), depth); break; } }   /* the representation's zero and successor */
         fprintf(out, "tt_c_%s", cons[t->n].name); break;
     case T_ELIM:
         if (is_nat(t->n)) die("an elimination on the Nat is compiled from its whole spine, so it cannot be erased head-first");
         fprintf(out, "tt_rec_%s", datas[t->n].name); break;
     case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
-        if (is_nat(t->n)) { erase(rep_at(R_TYPE, "the Nat's code"), depth); break; }   /* the representation's type is the Nat's code */
+        { Rep *r = rep_of(t->n); if (r) { erase(r->R, depth); break; } }   /* the representation's type is the Nat's code */
         if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
             if (datas[t->n].nblock == 1) fputs("self", out);
             else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }
@@ -276,21 +302,25 @@ static void erase(Term *t, int depth) {
         fputs("tt_transp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_INS: erase(t->a, depth); break;
     case T_OUTS: erase(t->d, depth); break;
-    case T_SIGMA: fputs("tc_sigma(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
+    case T_SIGMA:
+        if (t->irr) { erase(t->a, depth); break; }   /* an irrelevant second component: at run time the type is its first (M16a, for every such type) */
+        fputs("tc_sigma(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
     case T_PAIR:
         if (t->n) {   /* at the word type: the machine word */
             if (t->a->k == T_NUM) { char *s = bn_to_dec(t->a->num); fprintf(out, "%sw", s); free(s); }
-            else { erase(rep_at(R_LOW, "a word from a Nat"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); }   /* the representation's low word */
+            else { erase(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); }   /* the representation's low word */
             break;
         }
+        if (t->irr) { erase(t->a, depth); break; }   /* an irrelevant second component: the pair is its first */
         fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out);
         if (t->irr) fputs("tc_u", out); else erase(t->b, depth);   /* an irrelevant component has no run-time content */
         fputc(')', out); break;
     case T_FST:
-        if (t->n) { erase(rep_at(R_SINGLE, "a word's value"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); break; }   /* a word's value: the representation's one-word chain */
+        if (t->n) { erase(role_need(rep_need(word_nat, "a word's value")->single, "a word's value"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); break; }   /* a word's value: the representation's one-word numeral */
+        if (t->irr) { erase(t->a, depth); break; }
         fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
     case T_SND:
-        if (t->n) { fputs("tc_u", out); break; }
+        if (t->n || t->irr) { fputs("tc_u", out); break; }
         fputs("tt_snd(", out); erase(t->a, depth); fputc(')', out); break;
     case T_GLUE: fputs("tc_glue(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_GLUEEL: fputs("tt_glue(", out); erase(t->c->b, depth); fputs(")(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
@@ -569,7 +599,7 @@ static void emit_block_recs(Data *B) {
 
 /* Only what main reaches is emitted, and each declaration after what its erasure refers to: eezoc expands a
    definition at every reference, so a definition must stand before its uses, and the order of declaration is not
-   that order once the Nat's representation (declared last, in nb.tt) is what every earlier fold's suc and elim
+   that order once the Nat's representation (declared last, in num.tt) is what every earlier fold's suc and elim
    erase to. So the emission is a depth-first walk from main: a definition's body is walked first, every
    definition and data type it reaches is emitted, then the definition itself; a data type's block is emitted
    whole (constructors, codes, eliminators) after the types its constructors mention, and refers to itself freely. */
@@ -636,22 +666,27 @@ static void emit_block(int d) {
     }
     data_state[b] = 2;
 }
-static void visit_rep(int i, const char *what) { visit(rep_at(i, what)); }
 static void visit(Term *t) {
     if (!t) return;
     switch (t->k) {
     case T_DEF:
-        if (defs[t->n].native) { visit_rep(R_NATIVE0 + defs[t->n].native - 1, defs[t->n].name); break; }   /* the bundle's operation stands for it */
+        if (defs[t->n].native) {   /* the representation's operation stands for it; without a law, its body */
+            Rep *r = rep_of(native_dom(t->n));
+            if (r && r->native[defs[t->n].native]) { visit(r->native[defs[t->n].native]); break; }
+        }
         if (defs[t->n].wordop || defs[t->n].isword) break;   /* the primitive stands for it: its body is not emitted */
         emit_def(t->n);
         break;
-    case T_NUM: if (is_nat(t->n)) { rep_at(R_TYPE, "a literal"); emit_block(list_data); break; } visit(numeral_term(t->n, t->a, t->num)); break;
-    case T_PAIR: if (t->n && t->a->k != T_NUM) visit_rep(R_LOW, "a word from a Nat"); visit(t->a); if (!t->irr) visit(t->b); break;
-    case T_FST: if (t->n) visit_rep(R_SINGLE, "a word's value"); visit(t->a); break;
+    case T_NUM: { Rep *r = rep_of(t->n);
+        if (r) { if (r->npos) { visit(r->zero); visit(r->npos); visit(r->cons); visit(r->top); } else visit(literal_via_map(r, t)); break; }
+        visit(numeral_term(t->n, t->a, t->num)); break; }
+    case T_PAIR: if (t->n && t->a->k != T_NUM) visit(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word")); visit(t->a); if (!t->irr) visit(t->b); break;
+    case T_FST: if (t->n) visit(role_need(rep_need(word_nat, "a word's value")->single, "a word's value")); visit(t->a); break;
+    case T_SIGMA: visit(t->a); if (!t->irr) visit(t->b); break;
     case T_SND: visit(t->a); break;
-    case T_CON: if (is_nat(cons[t->n].data)) { visit_rep(cons[t->n].nargs == 0 ? R_ZERO : R_SUCC, cons[t->n].name); break; } emit_block(cons[t->n].data); break;
-    case T_ELIM: if (is_nat(t->n)) { visit_rep(R_ISZ, "an elimination"); visit_rep(R_PRED, "an elimination"); break; } emit_block(t->n); break;
-    case T_DATA: if (is_nat(t->n)) { visit_rep(R_TYPE, "the Nat's code"); break; } emit_block(t->n); break;
+    case T_CON: { Rep *r = rep_of(cons[t->n].data); if (r) { visit(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name)); break; } emit_block(cons[t->n].data); break; }
+    case T_ELIM: { Rep *r = rep_of(t->n); if (r) { visit(role_need(r->isz, "an elimination's zero test")); visit(role_need(r->pred, "an elimination's predecessor")); break; } emit_block(t->n); break; }
+    case T_DATA: { Rep *r = rep_of(t->n); if (r) { visit(r->R); break; } emit_block(t->n); break; }
     case T_SYS: for (int i = 0; i < t->nbr; i++) { visit(t->br[i].face); visit(t->br[i].body); } break;
     case T_APP: if (nat_elim_spine(t, 0, 0)) break; visit(t->a); if (!t->irr) visit(t->b); break;   /* a Nat elimination's spine: what its erasure refers to */
     case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { visit(t->a); visit(t->b); } visit(t->c); break;
@@ -665,22 +700,183 @@ static void visit(Term *t) {
     }
 }
 
-/* The representation: '#represent NAME' names a definition whose type must be NatRepr (found by that name, as the
-   prelude's Nat and List are). Its value is a tuple; the run-time components are read by position and quoted to
-   terms (a definition stays a definition: nsucc erases as tt_nsucc). The laws behind them are checked with the
-   bundle's type, so this is where the equivalence licenses the erasure. */
-static void read_representation(void) {
-    if (!represent_name) return;
-    int r = -1, ty = -1;
-    for (int i = 0; i < ndefs; i++) { if (!strcmp(defs[i].name, represent_name)) r = i; if (!strcmp(defs[i].name, "NatRepr")) ty = i; }
-    if (r < 0) die("'#represent %s': no such definition", represent_name);
-    if (ty < 0) die("'#represent %s': the type NatRepr is not defined", represent_name);
-    if (!conv(0, defs[r].vty, defs[ty].vval)) die("'#represent %s': its type is not NatRepr", represent_name);
-    Val *v = defs[r].vval;
-    for (int i = 0; i < R_COUNT; i++) {
-        rep[i] = quote(0, fmeta(vproj(v, 1)));   /* rigid: a definition stays a definition */
-        v = vproj(v, 2);
+/* ---- the representations: the equivalence in scope, and each role by the shape of its law ---- */
+static Term *tvar(int i) { return mk_var(i); }
+static Term *tref(TKind k, int id) { return mk_ref_l(k, id, mk_lval(lv_const(0))); }
+static Term *tapp(Term *f, Term *a) { return mk_app(f, a, 0); }
+static int newm(void) { return meta_new(vu(0), 0, NULL, 0); }
+static Term *tm(int id) { return meta_term(id, 0); }
+static Term *tpath(Term *A, Term *x, Term *y) { Term *line = mk_lam("_", shift(A, 0, 1), 0); line->isi = 1; return mk_term(T_PATHP, line, x, y, NULL); }
+static Term *tpi(Term *A, Term *B) { return mk_pi("y", A, B, 0); }
+static Term *tfst(Term *a) { return mk_term(T_FST, a, NULL, NULL, NULL); }
+static Term *tsnd(Term *a) { return mk_term(T_SND, a, NULL, NULL, NULL); }
+static Term *tlam(Term *body) { return mk_lam("y", body, 0); }
+/* \x -> f x is f: a solution read as the implementation it names */
+static Term *eta_strip(Term *t) {
+    while (t && t->k == T_LAM && !t->irr && t->a->k == T_APP && !t->a->irr && t->a->b->k == T_VAR && t->a->b->n == 0 && !term_mentions_var(t->a->a, 0))
+        t = shift(t->a->a, 0, -1);
+    return t;
+}
+/* Unify a pattern type (closed, with the nm metas m0.. minted for it) against the type of every definition in scope: the
+   number of definitions that have its shape; for the last of them, the definition and the metas' solutions (every meta
+   must be solved, postponed constraints retried). Every attempt is rolled back, so the metas are fresh for the next. */
+typedef struct { int def, def2; Term *sol[8]; } Match;
+/* a definition's type has the pattern's shape: as many leading binders, none an interval where the pattern's is not, and the
+   same form after them (a path, or the equivalence). conv is asked only then: on types of another shape it can die rather
+   than fail - a projection on an interval variable, say - and it would waste its time */
+static int shape_ok(Val *ty, Term *pat, int equiv_def) {
+    int i = 0;
+    for (Term *p = pat; p->k == T_PI; p = p->b, i++) {
+        Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty);   /* as written; through a definition only when it is one */
+        if (t->k != V_PI || t->isi != p->isi) return 0;
+        ty = inst(&t->clo, p->isi ? vivar(i) : vvar(i));
     }
+    Term *end = pat; while (end->k == T_PI) end = end->b;
+    Val *t = fmeta(ty);
+    if (end->k == T_PATHP) { if (t->k != V_PATHP) t = force(ty); return t->k == V_PATHP; }
+    if (t->k == V_NEU && t->h == H_DEF && t->n == equiv_def) return 1;   /* the equivalence, as written */
+    return force(ty)->k == V_SIGMA;                                      /* or spelled out: conv decides */
+}
+static int the_equiv_def = -1;
+static int match_laws(Term *pat, int m0, int nm, Match *m) {
+    Val *pv = eval(NULL, pat); int hits = 0; m->def = m->def2 = -1;
+    for (int i = 0; i < ndefs; i++) {
+        if (!shape_ok(defs[i].vty, pat, the_equiv_def)) continue;
+        MMark mk = meta_mark();
+        int c1 = conv(0, defs[i].vty, pv), c2 = c1 ? metas_retry() : 0, ok = c1 && c2;
+        for (int k = 0; ok && k < nm; k++) if (!meta_solved(m0 + k)) ok = 0;
+        if (ok) { hits++; m->def2 = m->def; m->def = i; for (int k = 0; k < nm; k++) m->sol[k] = eta_strip(zonk(tmetas[m0 + k].solt)); }
+        meta_rollback(mk);
+    }
+    return hits;
+}
+/* the one law of a role: its solutions in sols; NULL when there is none (dies if must), refused when there are two */
+static int rep_trace = -1;
+static int find_role(const char *what, Term *pat, int m0, int nm, int must, Term **sols) {
+    Match m; int n = match_laws(pat, m0, nm, &m);
+    if (rep_trace < 0) rep_trace = getenv("EEZOTT_REP_TRACE") != NULL;
+    if (rep_trace) fprintf(stderr, "[rep] %s: %d law(s)%s%s\n", what, n, n ? " e.g. " : "", n ? defs[m.def].name : "");
+    if (n > 1) die("the run-time representation's law for %s is ambiguous: %s and %s both have its shape", what, defs[m.def2].name, defs[m.def].name);
+    if (n == 0) { if (must) die("the run-time representation has no law for %s", what); return 0; }
+    for (int k = 0; k < nm; k++) sols[k] = m.sol[k];
+    return 1;
+}
+/* the solution v of a left side fst (L y): L, read off the value of v y - a neutral whose last spine entry is the projection */
+static Term *peel_fst(Term *v, const char *what) {
+    Val *x = force(vapp(eval(NULL, v), vvar(0), 0));
+    if (x->k != V_NEU || x->args.n == 0 || x->args.a[x->args.n - 1].proj != 1) die("the law for %s must read the first component of the operation's result", what);
+    Val *w = mkval(V_NEU); *w = *x; w->args.n--;
+    return eta_strip(mk_lam("y", quote(1, w), 0));
+}
+static Term *m64_literal(int d) { return mk_num(d, NULL, bn_from_dec("18446744073709551616")); }
+/* pred, as the eliminator: elim d (\_ -> d) zero (\k _ -> k) x */
+static Term *tpred(Rep *r, Term *x) {
+    Term *D = tref(T_DATA, r->d);
+    Term *e = tref(T_ELIM, r->d);
+    e = tapp(e, mk_lam("_", D, 0));
+    e = tapp(e, tref(T_CON, r->zi));
+    e = tapp(e, mk_lam("k", mk_lam("_", mk_var(1), 0), 0));
+    return tapp(e, x);
+}
+static void find_representation(int d, int zi, int si, int equiv_def) {
+    Term *D = tref(T_DATA, d), *sols[8];
+    int mR = newm();
+    Match m; int n = match_laws(tapp(tapp(tref(T_DEF, equiv_def), D), tm(mR)), mR, 1, &m);
+    if (n == 0) return;   /* no equivalence in scope: the type runs as itself */
+    if (n > 1) die("%s has two run-time representations in scope, %s and %s: one is needed", datas[d].name, defs[m.def2].name, defs[m.def].name);
+    reps = realloc(reps, (nreps + 1) * sizeof(Rep)); if (!reps) die_resource("out of memory");
+    Rep *r = &reps[nreps++]; memset(r, 0, sizeof *r);
+    r->d = d; r->zi = zi; r->si = si; r->equiv = m.def; r->R = m.sol[0];
+    /* the successor's law binds the value map g: (y : R) -> Path d (g (s y)) (suc (g y)) */
+    int mg = newm(), ms = newm();
+    find_role("the successor", tpi(r->R, tpath(D, tapp(tm(mg), tapp(tm(ms), tvar(0))), tapp(tref(T_CON, si), tapp(tm(mg), tvar(0))))), mg, 2, 1, sols);
+    r->g = sols[0]; r->suc = sols[1];
+    /* and g must be the equivalence's inverse: the centre of its fibres, y -> fst (fst (snd e y)) */
+    Term *centre = tlam(tfst(tfst(tapp(tsnd(tref(T_DEF, r->equiv)), tvar(0)))));
+    if (!conv(0, eval(NULL, r->g), eval(NULL, centre)))
+        die("the laws of %s's run-time representation are stated with a value map that is not the inverse of the equivalence %s", datas[d].name, defs[r->equiv].name);
+    /* zero: Path d (g z) zero */
+    int mz = newm();
+    find_role("zero", tpath(D, tapp(r->g, tm(mz)), tref(T_CON, zi)), mz, 1, 1, sols); r->zero = sols[0];
+    /* the zero test: (y : R) -> Path B (i y) true -> Path d (g y) zero, B a data type of two nullary constructors, true its first */
+    int mB = newm(), mI = newm(), mT = newm();
+    find_role("the zero test", tpi(r->R, mk_pi("_", tpath(tm(mB), tapp(tm(mI), tvar(0)), tm(mT)), tpath(D, tapp(r->g, tvar(1)), tref(T_CON, zi)), 0)), mB, 3, 1, sols);
+    { Term *B = sols[0], *T = sols[2];
+      int ok = B->k == T_DATA && datas[B->n].ncons == 2 && cons[datas[B->n].cons[0]].nargs == 0 && cons[datas[B->n].cons[1]].nargs == 0
+               && T->k == T_CON && T->n == datas[B->n].cons[0];
+      if (!ok) die("the zero test's law of %s's representation does not answer in a type of two nullary constructors with its first as true", datas[d].name); }
+    r->isz = sols[1];
+    /* the predecessor: (y : R) -> Path d (g (p y)) (pred (g y)) */
+    int mp = newm();
+    find_role("the predecessor", tpi(r->R, tpath(D, tapp(r->g, tapp(tm(mp), tvar(0))), tpred(r, tapp(r->g, tvar(0))))), mp, 1, 1, sols); r->pred = sols[0];
+    /* the word boundary and the digits need the word type */
+    if (word_type >= 0 && word_nat == d) {
+        Term *W = tref(T_DEF, word_type);
+        int msg = newm();
+        if (find_role("a word's value", tpi(W, tpath(D, tapp(r->g, tapp(tm(msg), tvar(0))), tfst(tvar(0)))), msg, 1, 0, sols)) r->single = sols[0];
+        int modd = native_of(d, NR_MOD);
+        if (modd >= 0) {   /* (y : R) -> Path d (fst (lo y)) (mod (g y) 2^64): fst (lo y) is no pattern, so the left side is bound whole and lo peeled off it */
+            int mv = newm();
+            if (find_role("a value's low word", tpi(r->R, tpath(D, tapp(tm(mv), tvar(0)), tapp(tapp(tref(T_DEF, modd), tapp(r->g, tvar(0))), m64_literal(d)))), mv, 1, 0, sols))
+                r->low = peel_fst(sols[0], "a value's low word");
+        }
+    }
+    /* the natives: (x y : R) -> Path d (g (h x y)) (f (g x) (g y)), or answering in d itself: Path d (h x y) (f (g x) (g y)) */
+    for (int code = 1; code < NR_COUNT; code++) {
+        int f = native_of(d, code); if (f < 0) continue;
+        Term *rhs = tapp(tapp(tref(T_DEF, f), tapp(r->g, tvar(1))), tapp(r->g, tvar(0)));
+        int mh = newm(); Match a, b;
+        int na = match_laws(tpi(r->R, tpi(r->R, tpath(D, tapp(r->g, tapp(tapp(tm(mh), tvar(1)), tvar(0))), rhs))), mh, 1, &a);
+        if (na > 1) die("the run-time representation's law for %s is ambiguous: %s and %s both have its shape", defs[f].name, defs[a.def2].name, defs[a.def].name);
+        if (na == 1) { r->native[code] = a.sol[0]; r->native_direct[code] = 0; continue; }
+        int mh2 = newm();   /* answering in d itself (a decision): h x y matches any left side, so only when the value form has none */
+        int nb = match_laws(tpi(r->R, tpi(r->R, tpath(D, tapp(tapp(tm(mh2), tvar(1)), tvar(0)), rhs))), mh2, 1, &b);
+        if (nb > 1) die("the run-time representation's law for %s is ambiguous: %s and %s both have its shape", defs[f].name, defs[b.def2].name, defs[b.def].name);
+        if (nb == 1) { r->native[code] = b.sol[0]; r->native_direct[code] = 1; }
+    }
+    /* the digits, in the order that pins them: a word under a numeral (l : Word) (p : P) -> Path d (gP (cons l p)) (add (fst l) (mul (gP p) 2^64))
+       binds the positive type P and its value map gP; then the top word (w : W) -> Path d (gP (top w)) (fst (fst w)), W a pair type over the
+       word with an irrelevant second; then the injection (p : P) -> Path d (g (npos p)) (gP p) */
+    if (word_type >= 0 && word_nat == d) {
+        int addd = native_of(d, NR_ADD), muld = native_of(d, NR_MUL);
+        if (addd >= 0 && muld >= 0) {
+            Term *W = tref(T_DEF, word_type);
+            int mP = newm(), mgP = newm(), mc = newm();
+            if (find_role("a word under a numeral", tpi(W, tpi(tm(mP), tpath(D, tapp(tm(mgP), tapp(tapp(tm(mc), tvar(1)), tvar(0))),
+                    tapp(tapp(tref(T_DEF, addd), tfst(tvar(1))), tapp(tapp(tref(T_DEF, muld), tapp(tm(mgP), tvar(0))), m64_literal(d)))))), mP, 3, 0, sols)) {
+                r->P = sols[0]; r->gP = sols[1]; r->cons = sols[2];
+                int mq = newm(), mt = newm();
+                Term *pw = mk_term(T_SIGMA, W, tapp(tm(mq), tvar(0)), NULL, NULL); pw->name = "w"; pw->irr = 1;
+                find_role("the top word of a numeral", tpi(pw, tpath(D, tapp(r->gP, tapp(tm(mt), tvar(0))), tfst(tfst(tvar(0))))), mq, 2, 1, sols);
+                r->top = sols[1];
+                int mnp = newm();
+                find_role("the injection of a numeral", tpi(r->P, tpath(D, tapp(r->g, tapp(tm(mnp), tvar(0))), tapp(r->gP, tvar(0)))), mnp, 1, 1, sols);
+                r->npos = sols[0];
+            }
+        }
+    }
+}
+static void find_representations(void) {
+    int equiv_def = def_named("Equiv");
+    if (equiv_def < 0) return;
+    the_equiv_def = equiv_def;
+    for (int d = 0; d < ndatas; d++) { int zi, si; if (peano_shape(d, &zi, &si)) find_representation(d, zi, si, equiv_def); }
+}
+/* a literal of a represented type: its machine words low word first through the digit roles, or, without digit laws,
+   the equivalence's forward map applied to it by the checker and the value quoted */
+static Term *literal_via_map(Rep *r, Term *t) {
+    Val *f = vproj(defs[r->equiv].vval, 1);
+    return quote(0, nf_force(vapp(f, vnum(r->d, lv_const(0), t->num), 0)));
+}
+static void erase_literal(Rep *r, Term *t, int depth) {
+    if (!r->npos) { erase(literal_via_map(r, t), depth); return; }
+    int n = t->num->n;
+    if (n == 0) { erase(r->zero, depth); return; }
+    erase(r->npos, depth); fputc('(', out);
+    for (int i = 0; i + 1 < n; i++) { erase(r->cons, depth); fprintf(out, "(%lluw)(", (unsigned long long)t->num->limb[i]); }
+    erase(r->top, depth); fprintf(out, "(%lluw)", (unsigned long long)t->num->limb[n - 1]);
+    for (int i = 0; i + 1 < n; i++) fputc(')', out);
+    fputc(')', out);
 }
 
 void erase_program(FILE *f) {
@@ -692,11 +888,7 @@ void erase_program(FILE *f) {
     if (defs[mainid].irr) die("'main' is a type; a program must be a value");
     if (nf_main) defs[mainid].val = quote(0, nf_force(defs[mainid].vval));   /* the checker's normal form instead of the source (rigid: definitions are opaque values) */
     def_state = xalloc((ndefs + 1) * sizeof(int)); data_state = xalloc((ndatas + 1) * sizeof(int));
-    for (int i = 0; i < ndatas; i++) {
-        if (nat_data < 0 && !strcmp(datas[i].name, "Nat")) nat_data = i;
-        if (list_data < 0 && !strcmp(datas[i].name, "List")) list_data = i;
-    }
-    read_representation();
+    find_representations();
     fputs("#import prelude\n", out);
     /* the interval as three-valued Scott data (i0, half, i1) with Kleene's tables; a closed face is i0 or i1 and
        selects (tt_sel: 1 -> x, 0 -> y); half is the symbol of tt_forall. Then the run-time meaning of systems,

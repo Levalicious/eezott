@@ -168,6 +168,17 @@ void metas_finish(const char *what, int line, int m0) {
     }
 }
 
+/* retry the postponed constraints until none is solved (the erasure's law matching): 1 if none remain, 0 if one fails or is undetermined */
+int metas_retry(void) {
+    for (;;) {
+        int n = nposts; if (n == 0) return 1;
+        Post *ps = xalloc((n + 1) * sizeof(Post)); memcpy(ps, posts, n * sizeof(Post)); nposts = 0;
+        for (int i = 0; i < n; i++) if (!conv(ps[i].depth, ps[i].a, ps[i].b)) return 0;
+        if (nposts >= n) return 0;
+    }
+}
+int meta_solved(int id) { return tmetas[id].sol != NULL; }
+
 /* assign a meta minted with the context as its spine the term t of that context: the solution abstracts the context's variables,
    under which t's indices are unchanged (binder j is the variable at level j) */
 void meta_assign(int id, Term *t, int ctxn) {

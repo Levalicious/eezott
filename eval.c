@@ -2020,6 +2020,9 @@ static int conv1_b(int depth, Val *a, Val *b) {
     for (;;) {
         int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
         int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
+        /* a metavariable is solved by the other side as written - a rigid definition application, a deferred
+           elimination - never by its unfolding: the solution is the term the user wrote (M19) */
+        if ((a->k == V_NEU && a->h == H_META) || (b->k == V_NEU && b->h == H_META)) break;
         if (ad && bd) {
             /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
                Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
