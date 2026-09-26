@@ -77,6 +77,7 @@ static int native_of(int d, int code) {   /* the native of that code on d, or -1
 }
 static Term *literal_via_map(Rep *r, Term *t);
 static void erase_literal(Rep *r, Term *t, int depth);
+static int rep_trace = -1;   /* EEZOTT_REP_TRACE: print each role's and scheme's match */
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
 static void emit_sel(int nb, int m);
@@ -108,43 +109,79 @@ static Term *mk_defapp(int d, Term **args, int nargs) {
     }
     return t;
 }
-/* A fold whose step factors through the limb algebra compiles as a whole; one whose step does not cannot be
-   carried at all. The factorisations there is a theorem for are the ones below. stdlib/tt/fold.tt proves the
-   first (elim_add): a step
-   that adds w to the running value, taken n times from z, is z + n * w. The successor run suc (suc .. ih)
-   is that step with w the number of successors. Anything else is still refused - a closed form is licensed
-   by a theorem, never guessed - and a step whose w mentions the hypothesis or the predecessor has none.
-   Emits the form and returns 1, or returns 0 and emits nothing. */
-static Term *fold_closed_w(Rep *rep, Term *body) {   /* the w of a step that adds w to the hypothesis, or NULL: no closed form */
-    int addd = native_of(rep->d, NR_ADD), muld = native_of(rep->d, NR_MUL), si = rep->si;
-    if (addd < 0 || muld < 0) return NULL;
-    Term *w = NULL, *jlit = NULL;
-    Term *b = body; int j = 0;
-    while (b->k == T_APP && b->a->k == T_CON && b->a->n == si) { b = b->b; j++; }   /* suc^j ih */
-    if (j > 0 && b->k == T_VAR && b->n == 0) {
-        jlit = xalloc(sizeof *jlit);
-        jlit->k = T_NUM; jlit->n = rep->d; jlit->num = bn_from_u64((u64)j);
-        w = jlit;
-    } else if (body->k == T_APP && body->a->k == T_APP && body->a->a->k == T_DEF && body->a->a->n == addd) {
-        Term *a1 = body->a->b, *a2 = body->b;      /* add a1 a2, with the hypothesis on either side */
-        int h1 = a1->k == T_VAR && a1->n == 0, h2 = a2->k == T_VAR && a2->n == 0;
-        w = h1 ? a2 : (h2 ? a1 : NULL);
-        if (w && (term_mentions_var(w, 0) || term_mentions_var(w, 1))) w = NULL;
-        if (w) w = shift(w, 2, -2);   /* out from under the method's two binders, into the elimination's own context */
-    }
-    return w;
+/* The closed form of an elimination whose method uses its hypothesis is what a theorem in scope licenses (M19, S3): a
+   definition whose type, under its binders, is Path d (elim d M Z S n) R. Its binders become metavariables in the
+   elimination's own context, its left side is unified with the elimination, and its right side, with the solutions,
+   is the form emitted - evaluated first, so a literal scrutinee is computed by the checker. Two theorems for one
+   elimination are refused; none, and the elimination walks. A step of j successors is first read as the addition
+   of j, its definitional equal, so the theorem about additions applies to it. */
+static int scheme_theorem(Val *ty, int d) {   /* the shape: binders, then a path from an elimination on d */
+    int i = 0;
+    for (;;) { Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) break; ty = inst(&t->clo, t->isi ? vivar(i) : vvar(i)); i++; }
+    Val *t = fmeta(ty); if (t->k != V_PATHP) t = force(ty); if (t->k != V_PATHP) return 0;
+    Val *l = fmeta(t->b);
+    return l->k == V_NEU && l->h == H_ELIM && l->n == d;
 }
-static int nat_fold_closed(Rep *rep, Term *body, Term *z, Term *scrut, int depth) {
-    int addd = native_of(rep->d, NR_ADD), muld = native_of(rep->d, NR_MUL);
-    Term *w = fold_closed_w(rep, body);
-    if (!w) return 0;
-    Term *mulargs[2] = { scrut, w };
-    Term *mul = mk_defapp(muld, mulargs, 2);
-    Term *addargs[2] = { z, mul };
-    erase(mk_defapp(addd, addargs, 2), depth);     /* add z (mul n w), and the erasure of the natives does the rest */
-    return 1;
+static Term *canon_step(Rep *rep, Term *body) {   /* suc^j ih (j >= 1) is add j ih; else the step as written */
+    int addd = native_of(rep->d, NR_ADD); if (addd < 0) return body;
+    Term *b = body; int j = 0;
+    while (b->k == T_APP && b->a->k == T_CON && b->a->n == rep->si) { b = b->b; j++; }
+    if (j == 0 || b->k != T_VAR || b->n != 0) return body;
+    Term *jlit = mk_num(rep->d, NULL, bn_from_u64((u64)j));
+    Term *args[2] = { jlit, mk_var(0) };
+    return mk_defapp(addd, args, 2);
+}
+static Term *scheme_closed_form(Rep *rep, Term *elimapp, int depth) {
+    Env *env = NULL; for (int i = 0; i < depth; i++) env = env_push(env, vvar(i));
+    const char **names = xalloc((depth + 1) * sizeof(char *)); for (int i = 0; i < depth; i++) names[i] = "v";
+    Val *ev = eval(env, elimapp);
+    Term *best = NULL; int hits = 0; const char *n1 = NULL, *n2 = NULL;
+    for (int i = 0; i < ndefs; i++) {
+        if (!scheme_theorem(defs[i].vty, rep->d)) continue;
+        MMark mk = meta_mark(); int m0 = ntmetas;
+        Val *ty = defs[i].vty;
+        for (;;) {   /* the theorem's binders, as metas of the elimination's context */
+            Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; }
+            int id = meta_new(t->dom, depth, names, 0);
+            ty = inst(&t->clo, eval(env, meta_term(id, depth)));
+        }
+        int ok = ty->k == V_PATHP && conv(depth, ev, ty->b) && metas_retry();
+        for (int k = m0; ok && k < ntmetas; k++) if (!meta_solved(k)) ok = 0;
+        if (ok) { hits++; n2 = n1; n1 = defs[i].name; best = quote(depth, eval(env, zonk(quote(depth, ty->c)))); }
+        if (rep_trace < 0) rep_trace = getenv("EEZOTT_REP_TRACE") != NULL;
+        if (rep_trace) fprintf(stderr, "[scheme] %s in %s: %s\n", defs[i].name, cur_decl_name ? cur_decl_name : "main", ok ? "licenses the closed form" : "does not apply");
+        meta_rollback(mk);
+    }
+    if (hits > 1) die("the closed form of an elimination in %s is ambiguous: %s and %s both license one", cur_decl_name ? cur_decl_name : "main", n2, n1);
+    return best;
 }
 static void visit(Term *t);
+static int *def_state, *data_state;   /* 0 unseen, 1 being emitted, 2 emitted */
+/* every definition a term refers to at run time (natives through the representation's operations) is in the wanted state:
+   2, emitted, for a closed form about to be emitted; not 1, being emitted, for a theorem's right side about to be visited -
+   a closed form inside the representation's own operations would reach them, so there the elimination walks */
+static int term_defs_ok(Term *t, int want) {
+    if (!t) return 1;
+    switch (t->k) {
+    case T_DEF:
+        if (defs[t->n].native) { Rep *r = rep_of(native_dom(t->n)); if (r && r->native[defs[t->n].native]) return term_defs_ok(r->native[defs[t->n].native], want); }
+        if (defs[t->n].wordop || defs[t->n].isword) return 1;
+        return want == 2 ? def_state[t->n] == 2 : def_state[t->n] != 1;
+    case T_CON: { Rep *r = rep_of(cons[t->n].data); return r ? term_defs_ok(cons[t->n].nargs == 0 ? r->zero : r->suc, want) : 1; }
+    case T_DATA: { Rep *r = rep_of(t->n); return r ? term_defs_ok(r->R, want) : 1; }
+    case T_ELIM: { Rep *r = rep_of(t->n); return r ? term_defs_ok(r->isz, want) && term_defs_ok(r->pred, want) : 1; }
+    case T_SYS: for (int i = 0; i < t->nbr; i++) if (!term_defs_ok(t->br[i].face, want) || !term_defs_ok(t->br[i].body, want)) return 0; return 1;
+    default: return term_defs_ok(t->a, want) && term_defs_ok(t->b, want) && term_defs_ok(t->c, want) && term_defs_ok(t->d, want);
+    }
+}
+static void visit_scheme_rhs(Rep *rep) {   /* the right sides of the scheme theorems in scope, under their binders */
+    for (int i = 0; i < ndefs; i++) {
+        if (!scheme_theorem(defs[i].vty, rep->d)) continue;
+        Val *ty = defs[i].vty; int k = 0;
+        for (;;) { Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; } ty = inst(&t->clo, t->isi ? vivar(k) : vvar(k)); k++; }
+        if (ty->k == V_PATHP) { Term *r = quote(k, ty->c); if (term_defs_ok(r, 1)) visit(r); }
+    }
+}
 /* an elimination on the Nat: emitted (emit) or its references walked for the dependency order (not emit) */
 static int nat_elim_spine(Term *t, int depth, int emit) {
     Term *node[8]; int n = 0; Term *h = t;
@@ -174,15 +211,24 @@ static int nat_elim_spine(Term *t, int depth, int emit) {
        are erased at that depth (a binder of their own may reuse the name inside its own scope, harmlessly).
        The empty test is a Bool: true selects its first handler, the zero case. */
     Term *isz = role_need(rep->isz, "an elimination's zero test"), *pred = role_need(rep->pred, "an elimination's predecessor");
-    if (!emit) {   /* the dependency walk: what the emission below will refer to */
-        Term *w = term_mentions_var(body, 0) ? fold_closed_w(rep, body) : NULL;
-        if (w) { visit(mk_ref(T_DEF, native_of(rep->d, NR_ADD))); visit(mk_ref(T_DEF, native_of(rep->d, NR_MUL))); visit(mz); visit(scrut); visit(w); }
-        else { visit(isz); visit(pred); visit(mz); visit(ms); visit(scrut); }
+    if (!emit) {   /* the dependency walk: what the emission below may refer to - the walk's parts, and, for a fold, the right
+                      sides of the theorems in scope (a closed form is built from them and from the elimination's own terms) */
+        visit(isz); visit(pred); visit(mz); visit(ms); visit(scrut);
+        if (term_mentions_var(body, 0)) visit_scheme_rhs(rep);
         for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) visit(node[i]->b);
         return 1;
     }
+    Term *closed = NULL;
+    if (term_mentions_var(body, 0)) {   /* a fold: the closed form a theorem licenses, if one does */
+        Term *body2 = canon_step(rep, body);
+        Term *ms2 = body2 == body ? ms : mk_lam("k", mk_lam("ih", body2, 0), 0);
+        Term *e = mk_app(mk_app(mk_app(node[n - 1], mz, node[n - 2]->irr), ms2, node[n - 3]->irr), scrut, node[n - 4]->irr);
+        closed = scheme_closed_form(rep, e, depth);
+        if (closed && !term_defs_ok(closed, 2)) closed = NULL;   /* its parts are not all emitted (a cycle through the representation): the walk */
+    }
     if (term_mentions_var(body, 0)) {
-        if (!nat_fold_closed(rep, body, mz, scrut, depth)) {   /* the walk: fix over the predecessor */
+        if (closed) erase(closed, depth);
+        else {   /* the walk: fix over the predecessor */
             fprintf(out, "(fix(self -> v%d -> ", depth); erase(isz, depth); fprintf(out, "(v%d)(", depth); erase(mz, depth);
             fputs(")(", out); erase(ms, depth); fputc('(', out); erase(pred, depth); fprintf(out, "(v%d))(self(", depth); erase(pred, depth); fprintf(out, "(v%d))))))(", depth);
             erase(scrut, depth); fputc(')', out);
@@ -634,8 +680,6 @@ static void emit_glue_runtime(void) {
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }
 
-static int *def_state, *data_state;   /* 0 unseen, 1 being emitted, 2 emitted */
-static void visit(Term *t);
 static void emit_def(int d) {
     if (def_state[d] == 2) return;
     if (def_state[d] == 1) die("internal: the definitions %s reach themselves at run time", defs[d].name);
@@ -751,7 +795,6 @@ static int match_laws(Term *pat, int m0, int nm, Match *m) {
     return hits;
 }
 /* the one law of a role: its solutions in sols; NULL when there is none (dies if must), refused when there are two */
-static int rep_trace = -1;
 static int find_role(const char *what, Term *pat, int m0, int nm, int must, Term **sols) {
     Match m; int n = match_laws(pat, m0, nm, &m);
     if (rep_trace < 0) rep_trace = getenv("EEZOTT_REP_TRACE") != NULL;

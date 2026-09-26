@@ -199,7 +199,8 @@ check limb_pred.tt   chain 18446744073709551622
 check limb_zero.tt   bool false
 check nest_sigma.tt  pair "18446744073709551616,3"   # a Nat inside a value: the chain's code is the list's over the word's
 check limb_minv.tt   chain 1                         # the inverse of 3 mod 2^127-1, 3 times it is 1
-check limb_double.tt chain 36893488147419103232      # a fold with an addition step, compiled to its closed form
+check limb_double.tt chain 36893488147419103232      # a fold with a successor step: read as an addition, its closed form by elim_add_l
+check limb_plus7.tt  chain 129127208515966861312     # a fold with an addition step, its closed form by elim_add
 check limb_square.tt chain 1                         # a fold with no closed form: the walk
 check chain_walk.tt  chain 15                        # the walk, with the step's arithmetic on the chain
 checkNF limb_minv.tt main 1

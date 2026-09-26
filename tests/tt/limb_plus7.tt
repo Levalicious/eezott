@@ -1,0 +1,7 @@
+#import prelude
+#import word
+#import fold
+-- M19 (S3): a fold whose step adds seven to the running value; fold.tt's elim_add licenses the closed form
+-- z + n * w, which the erasure emits in place of the walk: 7 * 2^64
+def plus7 (n : Nat) : Nat := elim Nat (\_ -> Nat) 0 (\k ih -> add ih 7) n
+def main : Nat := plus7 18446744073709551616
