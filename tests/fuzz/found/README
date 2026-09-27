@@ -18,11 +18,11 @@ boundary_image_wrong.tt  (promoted: bad/boundary_image_wrong_method.tt, fixed) a
                        Masked in the suite because every HIT motive there ignores its element arguments.
 
 Found by the generators (tests/fuzz-gen.py, stage F3), 2026-09-27:
-runtime_transport_along_comppath.tt   transport Bool Bool (compPath U Bool Bool Bool R N) false: the checker computes true, the
+runtime_transport_along_comppath.tt   (promoted: tests/tt/transport_comppath_u.tt, fixed) transport Bool Bool (compPath U Bool Bool Bool R N) false: the checker computes true, the
                        pristine run time false. hcomp inside compPath is at the variable type A; with A := U it dispatches to
                        the universe's run-time code tc_u, whose hcomp handler is the identity (the base), while the statically
                        recognised hcomp U builds the Glue (tt_hcompU). Masked by the suite: its compositions were not . not.
-checker_crash_filler_over_nested_comp.tt  eezott -c segfaults (vsys_faces, eval.c:1762, from the Glue hcomp filler) on
+checker_crash_filler_over_nested_comp.tt  (promoted: tests/tt/check/filler_over_nested_comp.tt, fixed) eezott -c segfaulted (vsys_faces, eval.c:1762, from the Glue hcomp filler) on
                        \i -> transp (\k -> p4 (i /\ k)) i0 true with p4 = compPath (compPath R R) N; a single compPath is fine.
 The regression the same batch found in the level fix (q1 := compPath U Bool Bool Bool R N refused once N was monomorphic) is
 fixed on the branch (the hidden level now takes constraints) and lives on as tests/tt/check/pinned_use_propagates.tt.

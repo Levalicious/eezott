@@ -1,4 +1,4 @@
--- found by tests/fuzz-gen.py value family (seed 2): the checker says true, the run time false: hcomp at a variable type A := U (inside compPath) dispatches to tc_u, whose hcomp handler is the identity
+-- M20 F3 (found by the generators; promoted): the checker said true, the run time false - hcomp at a variable type A := U (inside compPath) dispatches to tc_u, whose hcomp handler is the identity
 def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
 def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
 def N : Path U Bool Bool := ua Bool Bool notEquiv
