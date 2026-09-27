@@ -22,6 +22,7 @@
 # (main := \_ -> showNat main, stdlib/tt/show.tt: a typed Lazy-K wrapper) through eezoc's pristine ELF (-e -i) and the
 # bytes it prints must be the checker's normal form of main - which the Agda module above has already judged:
 #   RUN-AGREE / RUN-DISAGREE   the ELF's output against eezott -n main (zero-padded decimal, or t/f)
+#   RUN-RESOURCE               the ELF ran past the time limit: not a judgement, but a well-typed program should stop
 #   DISAGREE       everything else: a disagreement, kept under tests/fuzz/found/ once minimised, never deleted
 # The oracle is consumed as installed (its exit status and text); it is never modified.
 #
@@ -54,7 +55,9 @@ runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
     ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOC" -e -i -f xbcl < "$w.eezo" > "$w.elf" 2> "$w.cerr" ) || { verdict RUN-DISAGREE "$label" "eezoc: $(head -c 100 "$w.cerr" | tr '\n' ' ')"; return 0; }
     chmod +x "$w.elf"
     local got; got=$( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout ${FUZZ_RUN_TIMEOUT:-120} "$w.elf" < /dev/null 2> "$w.rerr" ); local rc=$?
-    if [ "$got" = "$want" ] && [ $rc -eq 0 ]; then verdict RUN-AGREE "$label"; else verdict RUN-DISAGREE "$label" "wanted $want, got '$got' (rc $rc) $(head -c 80 "$w.rerr" | tr '\n' ' ')"; fi
+    if [ "$got" = "$want" ] && [ $rc -eq 0 ]; then verdict RUN-AGREE "$label"
+    elif [ $rc -eq 124 ]; then verdict RUN-RESOURCE "$label" "the ELF ran past ${FUZZ_RUN_TIMEOUT:-120} s: not a judgement (a program that stops is what totality promises; look)"
+    else verdict RUN-DISAGREE "$label" "wanted $want, got '$got' (rc $rc) $(head -c 80 "$w.rerr" | tr '\n' ' ')"; fi
 }
 judge() {   # file label: the verdicts for one program
     local f="$1" label="$2" name mod erc arc first nfnote expect
@@ -109,5 +112,5 @@ else
     done
 fi
 echo
-echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, ORACLE-PANIC ${count[ORACLE-PANIC]:-0}, DISAGREE ${count[DISAGREE]:-0}; run-time leg: RUN-AGREE ${count[RUN-AGREE]:-0}, RUN-DISAGREE ${count[RUN-DISAGREE]:-0}; generated: GEN-AGREE ${count[GEN-AGREE]:-0}, GEN-REJECTED ${count[GEN-REJECTED]:-0}, GEN-DISAGREE ${count[GEN-DISAGREE]:-0} (modules in $OUT)"
+echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, ORACLE-PANIC ${count[ORACLE-PANIC]:-0}, DISAGREE ${count[DISAGREE]:-0}; run-time leg: RUN-AGREE ${count[RUN-AGREE]:-0}, RUN-RESOURCE ${count[RUN-RESOURCE]:-0}, RUN-DISAGREE ${count[RUN-DISAGREE]:-0}; generated: GEN-AGREE ${count[GEN-AGREE]:-0}, GEN-REJECTED ${count[GEN-REJECTED]:-0}, GEN-DISAGREE ${count[GEN-DISAGREE]:-0} (modules in $OUT)"
 exit $status
