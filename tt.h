@@ -393,6 +393,8 @@ extern int word_type, word_nat;                     /* the registered word type'
 int wordop_code(const char *name);                  /* 1 + the XBCL primitive's index (wadd wsub wmul wand wor wxor wshl wshr weq wlt waddc wsubb wmull wdivmod), 0 if none */
 const char *wordop_name(int code);
 void elab_program(SDecl *decls);
+Term *elim_type(int d, LVal lvl, int res_irr, LVal dl);   /* the closed type of elim D for a motive into U lvl, D taken at dl (agda.c prints it) */
+int agda_program(FILE *out, const char *modname, int first_seq);   /* first_seq: the program's own declarations start there (the preludes' are printed only when used) */   /* M20: the elaborated program as a Cubical Agda module; 3 if a construct has no Agda form */
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
 extern int nf_main;

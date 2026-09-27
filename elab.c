@@ -314,7 +314,7 @@ static Term *remap(Term *t, int n, const int *map, int d) {
 }
 /* the motive of a member is run-time content when hcomp is a formal element of it */
 static int motive_rel(int member) { Data *M = &datas[member]; return M->hit || M->nidx > 0; }
-static Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
+Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
     Data *D = data_at(d, dl); elim_dlt = mk_lval(dl);
     int np = D->nparams, m = D->nidx;
     /* the eliminators of a block share the prefix [params, P_0..P_{nbk-1}, methods of every member (K)] */

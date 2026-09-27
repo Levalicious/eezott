@@ -4,6 +4,7 @@
  *   eezott [-c] [-K] [FILE]   check FILE (or stdin); unless -c, write the erased eezoc source to stdout
  *   -K keeps every Kan operation at run time (no identity shortcut for constant lines): a differential test of the run-time rules
  *   -n NAME prints the normal form of the definition NAME (the checker's own evaluation)
+ *   -A prints the elaborated program as a Cubical Agda module instead of erasing it (M20: the differential oracle)
  *
  * The output is meant to be piped straight into eezoc:
  *   eezott prog.tt | eezoc | eezo
@@ -81,6 +82,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -t NAME       Print the type of the definition NAME after checking\n");
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
+    fprintf(stderr, "  -A            Print the elaborated program as a Cubical Agda module (exit 3 if a construct has no Agda form)\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
     fprintf(stderr, "  -h            Show this help\n");
@@ -88,13 +90,14 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    int check_only = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
+    int check_only = 0, agda = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
     const char *preludes[32]; int npreludes = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
         else if (!strcmp(argv[i], "-N")) nf_main = 1;
+        else if (!strcmp(argv[i], "-A")) agda = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
         else if (!strcmp(argv[i], "-L")) { if (++i >= argc || nlibdirs == 32) { usage(argv[0]); return 1; } libdirs[nlibdirs++] = argv[i]; }
@@ -103,6 +106,8 @@ int main(int argc, char **argv) {
         else fname = argv[i];
     }
     for (int i = 0; i < npreludes; i++) load_file(preludes[i]);
+    int nprelude = 0;   /* declarations (data members counted singly) the preludes contribute: the program's own start after them */
+    for (SDecl *d = decls_head; d; d = d->next) nprelude += d->isdata == 2 ? d->nmembers : 1;
     if (fname) load_file(fname);
     else load_source(slurp(stdin), "<stdin>");
     elab_program(decls_head);
@@ -119,6 +124,11 @@ int main(int argc, char **argv) {
             const char *names[1024]; fprintf(stderr, "%s = ", nf); term_print(stderr, quote(0, nf_force(defs[i].vval)), names, 0); fputc('\n', stderr); found = 1;
         }
         if (!found) die("-n: no definition named '%s'", nf);
+    }
+    if (agda) {   /* the module is named after the file (Agda: the top-level module name is the file name) */
+        char *mod = xstrdup("Main");
+        if (fname) { const char *b = strrchr(fname, '/'); b = b ? b + 1 : fname; mod = xstrdup(b); char *dot = strrchr(mod, '.'); if (dot) *dot = 0; for (char *p = mod; *p; p++) if (*p == '_' || *p == '-') *p = 'X'; }
+        return agda_program(stdout, mod, nprelude);
     }
     if (!check_only) erase_program(stdout);
     return 0;

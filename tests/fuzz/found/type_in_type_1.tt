@@ -1,0 +1,2 @@
+def K {A : U} (x : A) : U := A
+def uu : U := K U

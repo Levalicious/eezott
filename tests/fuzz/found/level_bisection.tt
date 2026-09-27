@@ -1,0 +1,3 @@
+def b1 (A : U) (a x : A) (r s : Path A a x) : Path (((x' : Path A a x) -> Empty) -> Empty) (\h -> h r) (\h -> h s) := isPropNeg {(x' : Path A a x) -> Empty} (\h -> h r) (\h -> h s)
+def b2 (A : U) (st : (x y : A) -> Stable (Path A x y)) (a x : A) (r s : Path A a x) : Path (Path A a x) (st a x (\h -> h r)) (st a x (\h -> h s)) := \k -> st a x (isPropNeg {(x' : Path A a x) -> Empty} (\h -> h r) (\h -> h s) k)
+def b6 (A : U) (st : (x y : A) -> Stable (Path A x y)) (a x : A) (r s : Path A a x) : Path (Path A a x) (st a x (\h -> h r)) (st a x (\h -> h s)) := \k -> st a x (isPropNeg (\h -> h r) (\h -> h s) k)
