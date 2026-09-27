@@ -143,7 +143,10 @@ void lv_hidden_bounds(int *lo, int *hi) {
 /* add y >= x + k; 0 if it would close a positive cycle */
 static int add_edge(int xk, int x, int yk, int y, int k) {
     if (derivable(xk, x, yk, y, k)) return 1;
-    if (xk != 2 && yk != 2) return 0;   /* rigid variables and constants take no new constraints: only derivable ones hold */
+    /* rigid variables and constants take no new constraints: only derivable ones hold - except the hidden level of the
+       global being elaborated (atom -1), which takes edges like a meta: a bound on it makes the global monomorphic at
+       its lower bound (lv_hidden_bounds, M20), instead of failing the conversion that found the bound */
+    if (xk != 2 && yk != 2 && !((xk == 1 && x == -1) || (yk == 1 && y == -1))) return 0;
     int back = longest(yk, y, xk, x);   /* a path y -> x of weight w closes a cycle of weight k + w */
     if (back > NEG && k + back > 0) return 0;
     if (nedges == capedges) { capedges = capedges ? 2 * capedges : 64; LEdge *ne = xalloc(capedges * sizeof(LEdge)); if (nedges) memcpy(ne, edges, nedges * sizeof(LEdge)); edges = ne; }

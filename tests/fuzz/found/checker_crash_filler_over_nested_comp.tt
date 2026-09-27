@@ -1,0 +1,9 @@
+-- found by tests/fuzz-gen.py value family (seed 2): the checker SEGFAULTS (vsys_faces, eval.c:1762, under glue_hc_body) on a transport filler along a composition whose left leg is itself a composition
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def N : Path U Bool Bool := ua Bool Bool notEquiv
+def R : Path U Bool Bool := \_ -> Bool
+def p0 : Path U Bool Bool := compPath U Bool Bool Bool R R
+def p4 : Path U Bool Bool := compPath U Bool Bool Bool p0 N
+def sq : PathP (\i -> p4 i) true (transport Bool Bool p4 true) := \i -> transp (\k -> p4 (i /\ k)) i0 true
+def main : Bool := sq i0
