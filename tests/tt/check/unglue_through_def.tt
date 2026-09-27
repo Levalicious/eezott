@@ -1,0 +1,8 @@
+-- unglue looks through a definition application: g i1 is glue [] two, so unglue (g i1) is two (unglue (glue ts a) = a),
+-- whichever way the scrutinee arrives - here as a rigid definition application (the H_DEF plan), which vunglue must
+-- unfold before deciding it is stuck. Found by the cubicaltt leg of the differential test (M20 F4): eezott rejected this
+-- with 'the path's left endpoint is suc one, expected unglue (g i1)', and glue_elem.tt's main normalised to
+-- suc (suc (unglue (g i1))) instead of 4.
+def G (i : I) : U := Glue Nat (~ i) [ ~ i -> (Nat , idEquiv Nat) ]
+def g (i : I) : G i := glue [ ~ i -> two ] two
+def main : Path Nat (unglue (g i1)) two := \_ -> two

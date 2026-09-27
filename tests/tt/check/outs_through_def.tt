@@ -1,0 +1,5 @@
+-- outS looks through a definition application: s is inS two, so outS s is two (outS (inS a) = a), the scrutinee arriving
+-- as a rigid definition application that vouts must unfold. Found with unglue_through_def.tt (M20 F4): main's normal
+-- form was outS s and the path was refused.
+def s : Sub Nat i0 [] := inS two
+def main : Path Nat (outS s) two := \_ -> two

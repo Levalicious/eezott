@@ -1,5 +1,0 @@
--- found with unglue_through_def.tt (M20 F4), 2026-09-27: outS does not look through a definition application either
--- eezott's normal form of main is outS s, not two (eezott -n main); the same shape as unglue's: vouts sees the rigid
--- definition application s, not the inS it unfolds to.
-def s : Sub Nat i0 [] := inS two
-def main : Path Nat (outS s) two := \_ -> two

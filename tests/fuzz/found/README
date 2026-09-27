@@ -28,8 +28,10 @@ The regression the same batch found in the level fix (q1 := compPath U Bool Bool
 fixed on the branch (the hidden level now takes constraints) and lives on as tests/tt/check/pinned_use_propagates.tt.
 
 Found by the cubicaltt leg (eezott -C, stage F4), 2026-09-27:
-unglue_through_def.tt  eezott REJECTS Path Nat (unglue (g i1)) two := \_ -> two with g i1 = glue [] two: vunglue sees the rigid
+unglue_through_def.tt  (promoted: check/unglue_through_def.tt, fixed on fix/eezott-unglue-through-def: vunglue forces its scrutinee)
+                       eezott REJECTED Path Nat (unglue (g i1)) two := \_ -> two with g i1 = glue [] two: vunglue saw the rigid
                        definition application g i1 (the H_DEF plan) and not the glue it unfolds to, so unglue (g i1) is its own
                        normal form (glue_elem.tt's main normalises to suc (suc (unglue (g i1)))) and converts with nothing.
                        cubicaltt saw it because glue is not inferable there; Agda reduced both sides of the normal-form equation.
-outs_through_def.tt    the same for outS: main := outS s with s := inS two normalises to outS s.
+outs_through_def.tt    (promoted: check/outs_through_def.tt, fixed the same way) the same for outS: main := outS s with s := inS two
+                       normalised to outS s.
