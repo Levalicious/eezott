@@ -1,0 +1,7 @@
+-- M19: a metavariable met by a definition application that contains it, where the definition drops that argument.
+-- Checking x : ?A against K Nat ?A: the expected type is forced before conversion, so the checker compares ?A with
+-- Nat and solves it; were the application compared as written, the occurrence of ?A in it would have to be seen
+-- through K's unfolding, which conv's meta case does (eval.c). Either way ?A := Nat.
+def K (A B : U) : U := A
+def ho {A : U} (f : A -> K Nat A) : Nat := 0
+def uo : Nat := ho (\x -> x)

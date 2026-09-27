@@ -1,0 +1,6 @@
+-- M19: a metavariable met by a definition application that mentions a variable outside the meta's scope, where the
+-- definition drops that argument. Checking x : ?A against K Nat (Vec Nat z) under the binder z: forced, the
+-- expected type is Nat; compared as written, z is out of ?A's scope and conv's meta case unfolds K to reach Nat.
+def K (A B : U) : U := A
+def hs {A : U} (g : (z : Nat) -> A -> K Nat (Vec Nat z)) : Nat := 0
+def us : Nat := hs (\z x -> x)

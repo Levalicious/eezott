@@ -2028,12 +2028,16 @@ static int conv1_b(int depth, Val *a, Val *b) {
           if ((am || bm) && !(am && bm)) {
               Val *o = am ? b : a, *mv = am ? a : b;
               int r = unify_meta(depth, mv, o);
-              if (r != 3) return r != 0;
+              if (r == 1) return 1;
+              /* r is 0 (the meta occurs in the side as written) or 3 (postponed for a variable outside the spine):
+                 either may vanish when that side is unfolded - a definition may drop the argument or the variable -
+                 so it is unfolded one step and the constraint tried again. Nothing left to unfold: an occurrence
+                 is the failure it is, a scope postponement stays. */
               Val *u = o;
               if (o->k == V_NEU && o->h == H_DEF) u = fmeta(unfold_def(o));
               else if (o->k == V_NEU && o->h == H_ELIM && o->defer) u = fmeta(elim_force(o));
-              if (u == o) return 1;   /* nothing to unfold: it stays postponed */
-              meta_drop_last_post();
+              if (u == o) return r == 3;
+              if (r == 3) meta_drop_last_post();
               if (am) b = u; else a = u;
               continue;
           }
