@@ -83,6 +83,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -A            Print the elaborated program as a Cubical Agda module (exit 3 if a construct has no Agda form)\n");
+    fprintf(stderr, "  -C            Print the elaborated program as a cubicaltt module (exit 3 if a construct has no cubicaltt form)\n");
     fprintf(stderr, "  -I            The program is a stream function (eezo -i): emit main bare, not under the normal-form driver\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
@@ -91,7 +92,7 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    int check_only = 0, agda = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
+    int check_only = 0, agda = 0, ctt = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
     const char *preludes[32]; int npreludes = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
@@ -99,6 +100,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
         else if (!strcmp(argv[i], "-N")) nf_main = 1;
         else if (!strcmp(argv[i], "-A")) agda = 1;
+        else if (!strcmp(argv[i], "-C")) ctt = 1;
         else if (!strcmp(argv[i], "-I")) stream_main = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
@@ -127,9 +129,10 @@ int main(int argc, char **argv) {
         }
         if (!found) die("-n: no definition named '%s'", nf);
     }
-    if (agda) {   /* the module is named after the file (Agda: the top-level module name is the file name) */
+    if (agda || ctt) {   /* the module is named after the file (Agda: the top-level module name is the file name) */
         char *mod = xstrdup("Main");
-        if (fname) { const char *b = strrchr(fname, '/'); b = b ? b + 1 : fname; mod = xstrdup(b); char *dot = strrchr(mod, '.'); if (dot) *dot = 0; for (char *p = mod; *p; p++) if (*p == '_' || *p == '-') *p = 'X'; }
+        if (fname) { const char *b = strrchr(fname, '/'); b = b ? b + 1 : fname; mod = xstrdup(b); char *dot = strrchr(mod, '.'); if (dot) *dot = 0; for (char *p = mod; *p; p++) if (*p == '-' || (*p == '_' && !ctt)) *p = ctt ? '_' : 'X'; }   /* cubicaltt: the module is the file's base name, _ allowed */
+        if (ctt) return ctt_program(stdout, mod, nprelude, nf);   /* -C -n NAME: likewise, as cubicaltt (M20 F4) */
         return agda_program(stdout, mod, nprelude, nf);   /* -A -n NAME: the module carries NAME's normal-form check */
     }
     if (!check_only) erase_program(stdout);

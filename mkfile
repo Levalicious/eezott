@@ -9,6 +9,7 @@ OFILES=\
 	elab.$O\
 	erase.$O\
 	agda.$O\
+	ctt.$O\
 	level.$O\
 	meta.$O\
 

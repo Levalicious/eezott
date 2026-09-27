@@ -395,7 +395,9 @@ int wordop_code(const char *name);                  /* 1 + the XBCL primitive's 
 const char *wordop_name(int code);
 void elab_program(SDecl *decls);
 Term *elim_type(int d, LVal lvl, int res_irr, LVal dl);   /* the closed type of elim D for a motive into U lvl, D taken at dl (agda.c prints it) */
-int agda_program(FILE *out, const char *modname, int first_seq, const char *nfname);   /* nfname: also emit the normal-form check of that definition (-n) */   /* first_seq: the program's own declarations start there (the preludes' are printed only when used) */   /* M20: the elaborated program as a Cubical Agda module; 3 if a construct has no Agda form */
+int agda_program(FILE *out, const char *modname, int first_seq, const char *nfname);
+int ctt_program(FILE *out, const char *modname, int first_seq, const char *nfname);    /* M20 F4: the same as a cubicaltt module (ctt.c); 3 if a construct has no cubicaltt form */
+Term *inst_tele(Term *t, int n, Term **vs, int k);   /* instantiate a term under a telescope of n binders (vs[0] the innermost, terms of the outer context; k: depth under t's own binders) */   /* nfname: also emit the normal-form check of that definition (-n) */   /* first_seq: the program's own declarations start there (the preludes' are printed only when used) */   /* M20: the elaborated program as a Cubical Agda module; 3 if a construct has no Agda form */
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
 extern int nf_main;

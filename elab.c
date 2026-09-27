@@ -177,7 +177,7 @@ static Term *E(Term *t, EInfo *I, int depth);
 static Term *boundary_at(Con *C, int end);
 
 /* instantiate a term under a telescope of n binders (vs[0] the innermost) with terms of the outer context */
-static Term *inst_tele(Term *t, int n, Term **vs, int k) {
+Term *inst_tele(Term *t, int n, Term **vs, int k) {
     if (!t) return NULL;
     Term *r;
     switch (t->k) {
