@@ -397,6 +397,7 @@ static void app_print(Term *t, int depth, int prec) {
     int nimp = 0, lvl = 0, nint = 0;   /* leading implicit arguments (a constructor's parameters), a level, missing intervals */
     if (h->k == T_CON) { Con *C = &cons[h->n]; Data *D = &datas[C->data]; nimp = D->nparams; lvl = D->poly; if (C->nint && n < nimp + C->nargs + C->nint) nint = nimp + C->nargs + C->nint - n; }
     if (nint && n < nimp + cons[h->n].nargs) { unsupported("a path constructor partially applied before its interval arguments"); nint = 0; }
+    if (nint) for (int i = 0; i < n; i++) args[i] = shift(args[i], 0, nint);   /* the given arguments print under the interval lambdas (F4 found them unshifted) */
     int paren = nint || (prec > 1 && (n > 0 || lvl || (h->k == T_DEF && defs[h->n].poly) || (h->k == T_DATA && datas[h->n].poly) || (h->k == T_ELIM && datas[h->n].poly)));
     if (paren) fputc('(', out);
     if (nint) { fputs("λ", out); for (int q = 0; q < nint; q++) { names[depth + q] = bind(depth + q, xsprintf("ι%d", q)); fprintf(out, " %s", names[depth + q]); } fputs(" → ", out); }
