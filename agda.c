@@ -31,6 +31,7 @@ static int nat_builtin = -1;        /* the data type declared BUILTIN NATURAL (t
 typedef struct { Term *ty; int depth; } KTy;
 static KTy ktys[4096];
 static const char *names[4096];
+static char *needdef, *needdata;   /* the declarations the program reaches (agda_program) */
 
 static void unsupported(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -286,8 +287,10 @@ static void tp_parg(Term *t, int depth) { tp(t, depth, 2); }   /* a position tha
 static void sp(void) { fputc(' ', out); }
 
 /* a Glue system split into its types and its equivalences (Agda's record) */
+static int sys_empty(Term *sys, int depth);
 static void glue_T(Term *Te, int depth) {
     if (Te->k != T_SYS) { fputs("(λ o → fst (", out); tp(Te, depth, 0); fputs(" o))", out); return; }
+    if (sys_empty(Te, depth)) { fputs("(λ ())", out); return; }
     Term *s = mk_term(T_SYS, NULL, NULL, NULL, NULL); s->nbr = Te->nbr; s->br = xalloc((Te->nbr + 1) * sizeof(TBranch));
     for (int i = 0; i < Te->nbr; i++) { s->br[i].face = Te->br[i].face; s->br[i].body = Te->br[i].body->k == T_PAIR ? Te->br[i].body->a : mk_term(T_FST, Te->br[i].body, NULL, NULL, NULL); }
     sys_print(s, depth);
@@ -299,6 +302,7 @@ static void equiv_rec(Term *e, int depth) {   /* eezott's Equiv (f , p) as Agda'
     fputs(" })", out);
 }
 static void glue_e(Term *Te, int depth) {
+    if (Te->k == T_SYS && sys_empty(Te, depth)) { fputs("(λ ())", out); return; }
     if (Te->k != T_SYS) {
         fputs("(λ o → (fst (snd (", out); tp(Te, depth, 0); fputs(" o)) , record { equiv-proof = snd (snd (", out); tp(Te, depth, 0); fputs(" o)) }))", out); return;
     }
@@ -413,8 +417,18 @@ static void app_print(Term *t, int depth, int prec) {
     if (paren) fputc(')', out);
 }
 
+/* a closed constructor spine of the BUILTIN NATURAL type prints as its literal (a normal form's suc^n zero) */
+static int peano_literal(Term *t, unsigned long long *out_n) {
+    unsigned long long n = 0; int zi, si;
+    if (nat_builtin < 0 || !peano_shape(nat_builtin, &zi, &si)) return 0;
+    while (t->k == T_APP && t->a->k == T_CON && t->a->n == si) { n++; t = t->b; }
+    if (t->k == T_CON && t->n == zi) { *out_n = n; return 1; }
+    if (t->k == T_NUM && t->n == nat_builtin && n) { char *s = bn_to_dec(t->num); unsigned long long v = strtoull(s, NULL, 10); free(s); if (v > (1ULL << 62)) return 0; *out_n = n + v; return 1; }
+    return 0;
+}
 static void tp(Term *t, int depth, int prec) {
     if (!t) { fputs("?", out); return; }
+    { unsigned long long n; if ((t->k == T_APP || t->k == T_CON) && peano_literal(t, &n)) { fprintf(out, "%llu", n); return; } }
     switch (t->k) {
     case T_VAR: fputs(vname(depth, t->n), out); break;
     case T_U:
@@ -485,14 +499,17 @@ static void tp(Term *t, int depth, int prec) {
     case T_SYS:
         if (sys_empty(t, depth)) fputs("(λ ())", out); else sys_print(t, depth);   /* the absurd clause: IsOne i0 is empty (isOneEmpty's type would be unsolved) */
         break;
-    case T_TRANSP:
+    case T_TRANSP: {
         if (prec > 1) fputc('(', out);
-        fputs("transp ", out); tp_arg(t->a, depth); sp(); tp_arg(t->b, depth); sp(); tp_arg(t->c, depth);
+        fputs("transp ", out);
+        Term *L = t->a->k == T_LAM ? type_level(t->a->a, depth + 1) : NULL;   /* the line's level, constant along it */
+        if (L && !term_mentions_var(L, 0)) { fputs("{ℓ = λ _ → ", out); lt_print(shift(L, 0, -1), depth, 0); fputs("} ", out); }
+        tp_arg(t->a, depth); sp(); tp_arg(t->b, depth); sp(); tp_arg(t->c, depth);
         if (prec > 1) fputc(')', out);
-        break;
+        break; }
     case T_HCOMP:
         if (prec > 1) fputc('(', out);
-        fputs("hcomp {A = ", out); tp(t->a, depth, 0); fputs("} {φ = ", out); tp(t->b, depth, 0); fputs("} ", out); tp_arg(t->c, depth); sp(); tp_arg(t->d, depth);
+        fputs("hcomp ", out); implicit_level("ℓ", type_level(t->a, depth), depth); fputs("{A = ", out); tp(t->a, depth, 0); fputs("} {φ = ", out); tp(t->b, depth, 0); fputs("} ", out); tp_arg(t->c, depth); sp(); tp_arg(t->d, depth);
         if (prec > 1) fputc(')', out);
         break;
     case T_SUB:
@@ -556,6 +573,10 @@ static void level_binder(int depth, const char *nm, int explicit_) {
     fprintf(out, explicit_ ? "(%s : Level) → " : "{%s : Level} → ", nm);
 }
 
+/* F2a, tried and withdrawn: printing the natives add/mul in Agda's BUILTIN NATPLUS/NATTIMES clause shape makes Agda compute
+   literals natively, but it changes definitional equality on open terms: in eezott  add k b  unfolds to its elim body, which
+   the prelude's laws rely on (add k b = elim Nat (\_ -> Nat) b (\k ih -> suc ih) k by refl); Agda's clause-defined add is stuck
+   on a variable k. The natives print as their bodies; big literals are the run-time leg's business (RESOURCE in Agda). */
 /* a definition: its type, then its value with the leading lambdas typed by the telescope */
 static void print_def(int i) {
     Def *D = &defs[i];
@@ -741,7 +762,6 @@ static int decl_cmp(const void *a, const void *b) { return ((const Decl *)a)->se
 
 /* ---- reachability: only what the program's own declarations use is printed (the preludes are large; a definition the
    program never touches that Agda cannot say must not hide the program) ---- */
-static char *needdef, *needdata;
 static void need_term(Term *t);
 static void need_data(int d) {
     Data *D = &datas[d]; if (needdata[d]) return;
@@ -771,7 +791,7 @@ static void need_term(Term *t) {
     }
 }
 
-int agda_program(FILE *f, const char *modname, int first_seq) {
+int agda_program(FILE *f, const char *modname, int first_seq, const char *nfname) {
     out = f; nunsup = 0;
     needdef = xalloc(ndefs + 1); needdata = xalloc(ndatas + 1);
     for (int i = 0; i < ndefs; i++) if (defs[i].seq >= first_seq) need_def(i);
@@ -794,6 +814,26 @@ int agda_program(FILE *f, const char *modname, int first_seq) {
         if (d == nat_builtin) fprintf(out, "{-# BUILTIN NATURAL %s #-}\n\n", gname(T_DATA, d));
         if (D->nblock == 1) print_elim(d, 3);
         else { for (int k = 0; k < D->nblock; k++) print_elim(D->block + k, 1); for (int k = 0; k < D->nblock; k++) print_elim(D->block + k, 2); }
+    }
+    /* F2b: the checker's normal form of the definition named by -n (the program's main, in the harness), for Agda to judge:
+       nf_d : PathP (\_ -> T) d nf ; nf_d = \_ -> nf  holds iff Agda finds d and nf convertible. Only on request: a normal
+       form may be unholdable (the literal-elimination tripwire, exit 70), which the harness then records, not the printer */
+    if (nfname) for (int i = 0; i < nd; i++) {
+        if (ds[i].isdata) continue;
+        int id = ds[i].id; Def *D = &defs[id];
+        if (strcmp(D->name, nfname) || D->poly) continue;
+        Val *ty = force(D->vty); if (ty->k != V_DATA) continue;
+        Term *nf0 = quote(0, nf_force(D->vval));
+        { unsigned long long n; int big = 0;   /* a literal beyond Agda's unary reach: no equation (the run-time leg observes the value) */
+          if (nf0->k == T_NUM) { char *dec = bn_to_dec(nf0->num); big = strlen(dec) > 5; free(dec); }
+          else if ((nf0->k == T_APP || nf0->k == T_CON) && peano_literal(nf0, &n)) big = n > 100000;
+          if (big) { fprintf(out, "-- the normal form of %s is a literal Agda would evaluate in unary: no equation; the run-time leg observes it\n", D->name); continue; } }
+        fputs("-- the checker's normal form (eezott -n), a definitional equation for Agda to check\n", out);
+        Term *T = quote(0, ty), *nf = nf0;
+        const char *nm = gname(T_DEF, id);
+        ownlvl = NULL;
+        fprintf(out, "nfˍ%s : PathP ", nm); implicit_level("ℓ", type_level(T, 0), 0); fputs("(λ _ → ", out); tp(T, 0, 0); fputs(") ", out); fputs(nm, out); sp(); tp_arg(nf, 0);
+        fprintf(out, "\nnfˍ%s = λ _ → ", nm); tp(nf, 0, 0); fputs("\n\n", out);
     }
     if (nunsup) fprintf(out, "-- %d unsupported construct%s: this module is not a faithful image of the program\n", nunsup, nunsup == 1 ? "" : "s");
     return nunsup ? 3 : 0;

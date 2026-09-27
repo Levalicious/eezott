@@ -83,6 +83,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -K            Keep every transport at run time (no shortcut along constant lines)\n");
     fprintf(stderr, "  -n NAME       Print the normal form of the definition NAME after checking\n");
     fprintf(stderr, "  -A            Print the elaborated program as a Cubical Agda module (exit 3 if a construct has no Agda form)\n");
+    fprintf(stderr, "  -I            The program is a stream function (eezo -i): emit main bare, not under the normal-form driver\n");
     fprintf(stderr, "  -L DIR        Also look for imports ('#import NAME' lines load NAME.tt once) in DIR\n");
     fprintf(stderr, "  -p FILE       Load FILE before the program, as an import (a prelude)\n");
     fprintf(stderr, "  -h            Show this help\n");
@@ -98,6 +99,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-K")) keep_kan = 1;
         else if (!strcmp(argv[i], "-N")) nf_main = 1;
         else if (!strcmp(argv[i], "-A")) agda = 1;
+        else if (!strcmp(argv[i], "-I")) stream_main = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
         else if (!strcmp(argv[i], "-L")) { if (++i >= argc || nlibdirs == 32) { usage(argv[0]); return 1; } libdirs[nlibdirs++] = argv[i]; }
@@ -128,7 +130,7 @@ int main(int argc, char **argv) {
     if (agda) {   /* the module is named after the file (Agda: the top-level module name is the file name) */
         char *mod = xstrdup("Main");
         if (fname) { const char *b = strrchr(fname, '/'); b = b ? b + 1 : fname; mod = xstrdup(b); char *dot = strrchr(mod, '.'); if (dot) *dot = 0; for (char *p = mod; *p; p++) if (*p == '_' || *p == '-') *p = 'X'; }
-        return agda_program(stdout, mod, nprelude);
+        return agda_program(stdout, mod, nprelude, nf);   /* -A -n NAME: the module carries NAME's normal-form check */
     }
     if (!check_only) erase_program(stdout);
     return 0;

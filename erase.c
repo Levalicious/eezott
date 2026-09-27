@@ -32,7 +32,7 @@
 #include "tt.h"
 #include <stdlib.h>
 
-int keep_kan, nf_main;
+int keep_kan, nf_main, stream_main;   /* stream_main (-I): the program is a stream function (eezo -i): main is emitted bare, not under the normal-form driver */
 /* One Nat (M19). A data type shaped like the naturals runs as the representation an equivalence in scope names:
    for each such type d, exactly one definition of type Equiv d R (the prelude's Equiv, the notion Glue is built on,
    the one definition this file knows by name) makes R the run-time type of d, and every role of the erasure - the
@@ -987,6 +987,7 @@ void erase_program(FILE *f) {
     fclose(out);
     /* eezoc reads `defs ; expr`: the separator must follow the last definition on its line */
     if (sz && buf[sz - 1] == '\n') buf[sz - 1] = 0;
-    fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
+    if (stream_main) fprintf(f, "%s;\ntt_%s\n", buf, defs[mainid].name);   /* M20 F2: the value is observed by a wrapper the program itself contains */
+    else { fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name); }
     free(buf);
 }
