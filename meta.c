@@ -25,13 +25,56 @@ typedef struct { int depth; Val *a, *b; } Post;
 static Post *posts; static int nposts, pcap;
 static int *undo; static int nundo, ucap;
 
-int meta_new(Val *ty, int ctxn, const char **names, int line) {
+int meta_new(Val *ty, int ctxn, const char **names, Val **tys, int line) {
     if (ntmetas == mcap) { mcap = mcap ? 2 * mcap : 64; tmetas = realloc(tmetas, mcap * sizeof(Meta)); if (!tmetas) die_resource("out of memory"); }
     Meta *m = &tmetas[ntmetas]; memset(m, 0, sizeof *m);
     m->ty = ty; m->ctxn = ctxn; m->line = line;
-    m->names = xalloc((ctxn + 1) * sizeof(char *));
-    for (int i = 0; i < ctxn; i++) m->names[i] = names[i];
+    m->names = xalloc((ctxn + 1) * sizeof(char *)); m->tys = xalloc((ctxn + 1) * sizeof(Val *));
+    for (int i = 0; i < ctxn; i++) { m->names[i] = names[i]; m->tys[i] = tys ? tys[i] : NULL; }
     return ntmetas++;
+}
+
+/* ---- the universe of a type value (M20): l with ty : U l, when the value's shape determines it ---- */
+static int val_universe(int depth, Val *v, Val **tys, LVal *out);
+/* the type of a head applied along a spine, which must end in a universe */
+static int peel_universe(int depth, Val *ty, VList *args, Val **tys, LVal *out) {
+    for (int i = 0; i < args->n; i++) {
+        Arg *a = &args->a[i]; ty = force(ty);
+        if (a->proj) return 0;
+        if (a->papp) { if (ty->k != V_PATHP) return 0; ty = vapp(ty->a, a->v, 0); continue; }
+        if (ty->k != V_PI) return 0;
+        ty = inst(&ty->clo, a->v);
+    }
+    ty = force(ty);
+    if (ty->k != V_U) return 0;
+    *out = ty->lvl; return 1;
+}
+static int val_universe(int depth, Val *v, Val **tys, LVal *out) {
+    v = force(v);
+    switch (v->k) {
+    case V_U: *out = lv_add(v->lvl, 1); return 1;
+    case V_PI: case V_SIGMA: {
+        Val *dom = force(v->dom); LVal ld, lc; int hasd = 0;
+        if (v->k == V_SIGMA || (dom->k != V_INTERVAL && dom->k != V_LEVEL)) { if (!val_universe(depth, dom, tys, &ld)) return 0; hasd = 1; }
+        Val **t2 = xalloc((depth + 2) * sizeof(Val *)); for (int i = 0; i < depth; i++) t2[i] = tys ? tys[i] : NULL; t2[depth] = dom;
+        Val *x = dom->k == V_INTERVAL ? vivar(depth) : dom->k == V_LEVEL ? vlvar(depth) : vvar(depth);
+        if (!val_universe(depth + 1, inst(&v->clo, x), t2, &lc)) return 0;
+        *out = hasd ? lv_max(ld, lc) : lc; return 1; }
+    case V_PATHP: return val_universe(depth, vapp(v->a, vi(iv_zero()), 0), tys, out);
+    case V_PARTIAL: return val_universe(depth, v->b, tys, out);
+    case V_SUB: return val_universe(depth, v->a, tys, out);
+    case V_GLUE: *out = v->lvl; return 1;
+    case V_DATA: *out = data_at(v->n, v->lvl)->lvl; return 1;
+    case V_NEU:
+        switch (v->h) {
+        case H_VAR: if (v->n < 0 || v->n >= depth || !tys || !tys[v->n]) return 0; return peel_universe(depth, tys[v->n], &v->args, tys, out);
+        case H_DEF: return peel_universe(depth, def_ty_at(v->n, v->lvl), &v->args, tys, out);
+        case H_TRANSP: { if (v->args.n) return 0; Val *T = force(vapp(v->a, vi(iv_one()), 0)); if (T->k != V_U) return 0; *out = T->lvl; return 1; }
+        case H_HCOMP: case H_OUTS: case H_UNGLUE: { if (v->args.n) return 0; Val *T = force(v->a); if (T->k != V_U) return 0; *out = T->lvl; return 1; }
+        default: return 0;
+        }
+    default: return 0;
+    }
 }
 /* ?id applied to the context's variables, oldest first: ?id #(n-1) .. #0 */
 Term *meta_term(int id, int ctxn) {
@@ -166,6 +209,20 @@ void metas_finish(const char *what, int line, int m0) {
     for (int id = m0; id < ntmetas; id++) if (!tmetas[id].sol && !tmetas[id].deferred) {
         Meta *m = &tmetas[id];
         die("line %d: in %s, the implicit argument ?%d (line %d, of type %s) could not be inferred; write it, f {e} ..", line, what, id, m->line, vshow(m->ctxn, m->ty, m->names, m->ctxn));
+    }
+    /* M20: a meta standing for a type lives in a universe U l; its solution must lie in it - the level constraint an explicit
+       argument gets from check() (elab.c: got->lvl <= U->lvl). Without it K {A : U} (x : A) : U := A gives uu : U := K U, U : U. */
+    for (int id = m0; id < ntmetas; id++) {
+        Meta *m = &tmetas[id]; if (!m->sol) continue;
+        Val *ty = force(m->ty); if (ty->k != V_U) continue;
+        Val *s = m->sol;
+        for (int i = 0; i < m->ctxn; i++) { Val *vt = m->tys[i] ? force(m->tys[i]) : NULL; s = vapp(s, vt && vt->k == V_INTERVAL ? vivar(i) : vt && vt->k == V_LEVEL ? vlvar(i) : vvar(i), 0); }
+        LVal u;
+        if (!val_universe(m->ctxn, s, m->tys, &u))   /* never happens on the corpus (0 of 140 programs); when it does, the level is not checked, so refuse rather than pass */
+            die("line %d: in %s, the implicit argument ?%d (line %d) : %s is solved by %s, whose universe cannot be determined; write it, f {e} ..", line, what, id, m->line, vshow(m->ctxn, ty, m->names, m->ctxn), vshow(m->ctxn, s, m->names, m->ctxn));
+        if (lv_enforce_leq(u, ty->lvl) != 1)
+            die("line %d: in %s, universe inconsistency: the implicit argument ?%d (line %d) : %s is solved by %s, a type in %s", line, what, id, m->line,
+                vshow(m->ctxn, ty, m->names, m->ctxn), vshow(m->ctxn, s, m->names, m->ctxn), vshow(m->ctxn, vu_l(u), m->names, m->ctxn));
     }
 }
 

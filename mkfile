@@ -8,6 +8,7 @@ OFILES=\
 	eval.$O\
 	elab.$O\
 	erase.$O\
+	agda.$O\
 	level.$O\
 	meta.$O\
 

@@ -1,0 +1,28 @@
+Disagreements the differential test (tests/fuzz.sh, M20) found, minimised by hand. Each is a program eezott judges
+otherwise than the oracle does; kept as found, never deleted, and promoted to tests/tt or tests/tt/bad once the
+disagreement is resolved (a fix on our side, or a recorded difference between the theories). Blame our
+implementation first: every entry below was ours. Fixed on fix/eezott-m20-findings (the promoted files are the regression tests;
+the bisection and the explicit variant stay here as the record).
+
+type_in_type_1.tt      (promoted: tests/tt/bad/implicit_arg_universe.tt, fixed) eezott ACCEPTED uu : U := K U with K {A : U} (x : A) : U := A. The implicit {A} is a meta whose
+                       solution (U, in U 1) never constrains the level of its type; K is taken at level 0, so U : U.
+                       With {A} written explicitly (type_in_type_explicit.tt) it is rightly refused: 'U 1 is not below U'.
+type_in_type_2.tt      (subsumed by the above once uu is refused) ... and self : uu := U was accepted: U : U inhabited (Type-in-Type through an implicit argument).
+pinned_level_lifted.tt (promoted: bad/pinned_level_lifted.tt and check/pinned_level_eta.tt, fixed) Cover : S1 -> U pins its hidden level to 0 (ua^0 against the motive U) yet stays polymorphic:
+                       coverBig : S1 -> U 1 := Cover is accepted, an instance whose body is ill-typed at that level.
+level_bisection.tt     b1/b2 (explicit {A}) take isPropNeg at the hidden level; b6 (inferred {A}) at 0: the bisection
+                       that located the first defect, from the prelude's own stableEqIsSet failing in Agda.
+boundary_image_right.tt  (promoted: check/boundary_image_method.tt, fixed) eezott REJECTED the CHM-correct swap method for QVec ('expected qcons (suc n) x (qcons n y ih)')
+boundary_image_wrong.tt  (promoted: bad/boundary_image_wrong_method.tt, fixed) and ACCEPTED the wrong one: E_con_spine images a constructor in a boundary with its recursive
+                       arguments' images in the ELEMENT positions too (m_c E(a).. E(a_rec).., CHM: m_c a.. E(a_rec)..).
+                       Masked in the suite because every HIT motive there ignores its element arguments.
+
+Found by the generators (tests/fuzz-gen.py, stage F3), 2026-09-27:
+runtime_transport_along_comppath.tt   (promoted: tests/tt/transport_comppath_u.tt, fixed) transport Bool Bool (compPath U Bool Bool Bool R N) false: the checker computes true, the
+                       pristine run time false. hcomp inside compPath is at the variable type A; with A := U it dispatches to
+                       the universe's run-time code tc_u, whose hcomp handler is the identity (the base), while the statically
+                       recognised hcomp U builds the Glue (tt_hcompU). Masked by the suite: its compositions were not . not.
+checker_crash_filler_over_nested_comp.tt  (promoted: tests/tt/check/filler_over_nested_comp.tt, fixed) eezott -c segfaulted (vsys_faces, eval.c:1762, from the Glue hcomp filler) on
+                       \i -> transp (\k -> p4 (i /\ k)) i0 true with p4 = compPath (compPath R R) N; a single compPath is fine.
+The regression the same batch found in the level fix (q1 := compPath U Bool Bool Bool R N refused once N was monomorphic) is
+fixed on the branch (the hidden level now takes constraints) and lives on as tests/tt/check/pinned_use_propagates.tt.

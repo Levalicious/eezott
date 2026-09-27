@@ -1,0 +1,10 @@
+-- M20 (tests/fuzz): a definition whose own elaboration pins its hidden level (Cover: ua^0 against the motive U) is monomorphic: not liftable to U 1
+data S1 : U where
+  | base : S1
+  | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def Cover : S1 -> U := \x -> elim S1 (\_ -> U) Bool (ua Bool Bool notEquiv) x
+-- Cover's hidden level is pinned to 0 by ua^0 : Path (U 0) ...; is Cover nonetheless liftable to U 1?
+def coverBig : S1 -> U 1 := Cover
+def coverBig2 : S1 -> U 1 := \x -> Cover x

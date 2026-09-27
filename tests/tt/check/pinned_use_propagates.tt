@@ -1,0 +1,9 @@
+-- M20 F3: a monomorphic definition (N, pinned at 0 by notEquiv) used inside a polymorphic one pins that one too, instead of failing the conversion
+def notnot (b : Bool) : Path Bool (not (not b)) b := elim Bool (\b -> Path Bool (not (not b)) b) (\_ -> true) (\_ -> false) b
+def notEquiv : Equiv Bool Bool := isoToEquiv Bool Bool not not notnot notnot
+def N : Path U Bool Bool := ua Bool Bool notEquiv
+def R : Path U Bool Bool := \_ -> Bool
+def q1 : Path U Bool Bool := compPath U Bool Bool Bool R N
+def q2 : Path U Bool Bool := compPath U Bool Bool Bool N N
+def q3 : Path U Bool Bool := compPath U Bool Bool Bool R (compPath U Bool Bool Bool N N)
+def main : Bool := transport Bool Bool q3 true

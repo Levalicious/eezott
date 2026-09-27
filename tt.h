@@ -194,6 +194,7 @@ int lv_eq(LVal a, LVal b); int lv_leq(LVal a, LVal b); int lv_is_const(LVal a, i
 LVal lv_subst(LVal a, int var, LVal s); LVal lv_subst_meta(LVal a, int id, LVal s);
 int lv_has_meta(LVal a); int lv_mentions_hidden(LVal a);
 int lv_is_hidden_plus(LVal a, int *n);        /* exactly the hidden level + n? */
+void lv_hidden_bounds(int *lo, int *hi);      /* the store's bounds on the hidden level: lo the greatest k with L >= k (0: none), hi the least with L <= k (-1: none) (M20) */
 
 /* The constraint store: an append-only log of edges y >= x + k between level
  * atoms (the constant 0, rigid variables, metas), consistent iff it has no
@@ -296,10 +297,10 @@ Val *vapply_arg(Val *f, Arg *a);             /* apply a spine entry (application
  * constraints that are not patterns are postponed and retried when the
  * declaration ends, when every meta must be solved and the solutions are
  * substituted structurally (zonk). */
-typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known */
+typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; Val **tys; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known; tys: the context's types, for the universe check of a solution (M20) */
 extern Meta *tmetas; extern int ntmetas;
 extern int metas_version;   /* bumped whenever a meta is solved or a rollback clears one: memo entries key on it */
-int meta_new(Val *ty, int ctxn, const char **names, int line);
+int meta_new(Val *ty, int ctxn, const char **names, Val **tys, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
 Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
 extern int force_depth;                      /* forces active on the C stack: a walk driven from outside nests here, not in elim_reduce */
@@ -393,9 +394,12 @@ extern int word_type, word_nat;                     /* the registered word type'
 int wordop_code(const char *name);                  /* 1 + the XBCL primitive's index (wadd wsub wmul wand wor wxor wshl wshr weq wlt waddc wsubb wmull wdivmod), 0 if none */
 const char *wordop_name(int code);
 void elab_program(SDecl *decls);
+Term *elim_type(int d, LVal lvl, int res_irr, LVal dl);   /* the closed type of elim D for a motive into U lvl, D taken at dl (agda.c prints it) */
+int agda_program(FILE *out, const char *modname, int first_seq, const char *nfname);   /* nfname: also emit the normal-form check of that definition (-n) */   /* first_seq: the program's own declarations start there (the preludes' are printed only when used) */   /* M20: the elaborated program as a Cubical Agda module; 3 if a construct has no Agda form */
 void erase_program(FILE *out);
 extern int keep_kan;                 /* erase every transport, even along constant lines */
 extern int nf_main;
+extern int stream_main;              /* -I: emit main bare, a stream function for eezo -i (M20 F2) */
                   /* erase the checker's normal form of main instead of its source */
 
 #endif

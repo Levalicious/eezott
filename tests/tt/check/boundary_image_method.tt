@@ -1,0 +1,8 @@
+data QVec (A : U) : Nat -> U where
+  | qnil : QVec A zero
+  | qcons : (n : Nat) -> A -> QVec A n -> QVec A (suc n)
+  | swap : (n : Nat) -> (x : A) -> (y : A) -> (v : QVec A n) -> (i : I) -> QVec A (suc (suc n))
+      [ ~ i -> qcons (suc n) x (qcons n y v) | i -> qcons (suc n) y (qcons n x v) ]
+-- the identity on QVec by elimination: the qcons method keeps its ELEMENT v (ignores ih), so the swap method's
+-- boundary per CHM is qcons (suc n) x (qcons n y v): the correct method is \i -> swap n x y v i
+def idQ : (n : Nat) -> QVec Bool n -> QVec Bool n := \n w -> elim QVec (\n _ -> QVec Bool n) qnil (\n x v ih -> qcons n x v) (\n x y v ih -> \i -> swap n x y v i) n w

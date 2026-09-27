@@ -1864,7 +1864,7 @@ static Val *hcompU_body(int k, const Face *f, void *data) {
 }
 static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0) {
     Val *Ab = A->a, *phi = A->b, *Te = A->c;
-    Val *tfs = vnative(N_GLUE_HF, 0, 0, 0, 4, Te, psi, u, u0);
+    Val *tfs = vnative(N_GLUE_HF, 0, 0, 0, 5, Te, psi, u, u0, phi);   /* the filler lives on phi, the Glue's face (M20: the face was read past the captures, a NULL) */
     Val *sides = vnative(N_GLUE_HC_SIDES, 0, 0, 0, 6, Ab, phi, Te, psi, u, tfs);
     Val *a1 = vhcomp(Ab, ior(psi, phi), sides, vunglue(Ab, phi, Te, u0));
     return vglueel(vapp(tfs, ione(), 0), a1, A);

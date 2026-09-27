@@ -186,6 +186,7 @@ check   word_lt.tt       bool true
 check   word_divmod.tt   chain 3
 check   word_wrap.tt     word 18446744073709551615
 checkN  word_ops.tt
+checkN  transport_comppath_u.tt   # M20 F3: hcomp in U inside compPath at run time (the value must be the checker's: true)
 checkN  word_mk.tt
 checkN  word_divmod.tt
 checkN  word_wrap.tt

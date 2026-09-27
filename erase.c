@@ -32,7 +32,7 @@
 #include "tt.h"
 #include <stdlib.h>
 
-int keep_kan, nf_main;
+int keep_kan, nf_main, stream_main;   /* stream_main (-I): the program is a stream function (eezo -i): main is emitted bare, not under the normal-form driver */
 /* One Nat (M19). A data type shaped like the naturals runs as the representation an equivalence in scope names:
    for each such type d, exactly one definition of type Equiv d R (the prelude's Equiv, the notion Glue is built on,
    the one definition this file knows by name) makes R the run-time type of d, and every role of the erasure - the
@@ -141,7 +141,7 @@ static Term *scheme_closed_form(Rep *rep, Term *elimapp, int depth) {
         Val *ty = defs[i].vty;
         for (;;) {   /* the theorem's binders, as metas of the elimination's context */
             Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; }
-            int id = meta_new(t->dom, depth, names, 0);
+            int id = meta_new(t->dom, depth, names, NULL, 0);
             ty = inst(&t->clo, eval(env, meta_term(id, depth)));
         }
         int ok = ty->k == V_PATHP && conv(depth, ev, ty->b) && metas_retry();
@@ -330,7 +330,8 @@ static void erase(Term *t, int depth) {
             else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }
         } else fprintf(out, "tc_%s", datas[t->n].name);
         break;
-    case T_U: case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
+    case T_U: fputs("tc_univ", out); break;   /* the universe as a type: its hcomp is a Glue (tc_univ); tc_u below is the inert code of what has no run-time content */
+    case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
     case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
     case T_PATHP: fputs("tc_path(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
     case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: erase_face(t, depth); break;
@@ -393,9 +394,9 @@ static void emit_con(Data *D, int ci) {
 }
 /* the formal composition of D: tt_c_D_hcomp phi u u0 selects the last handler */
 static void emit_hcomp_con(Data *D) {
-    fprintf(out, "tt_c_%s_hcomp := c -> phi -> u -> u0 -> ", D->name);   /* c: the code of its type (parameters and indices) */
+    fprintf(out, "tt_c_%s_hcomp := tt_hcv(c -> phi -> u -> u0 -> ", D->name);   /* c: the code of its type (parameters and indices); a value: the side where phi holds */
     for (int i = 0; i < nhandlers(D); i++) fprintf(out, "h%d -> ", i);
-    fprintf(out, "h%d(c)(phi)(u)(u0)\n", D->ncons);
+    fprintf(out, "h%d(c)(phi)(u)(u0))\n", D->ncons);
 }
 /* the q-th index read off a code of D: c(m -> h -> n -> p.. -> i.. -> i_q) */
 static void emit_index_of_code(Data *D, int q) {
@@ -551,10 +552,9 @@ static void emit_code_body(Data *D) {   /* p.. i.. -> k -> k(TRANSP)(HCOMP)(NF)(
         fputs("(hc -> hphi -> hu -> hu0 -> tt_hcomp(line(tt_i1))(hphi)(i -> tt_transp(line)(phi)(hu(i)))(tt_transp(line)(phi)(hu0)))", out);
     fputs(")(", out);
     emit_components(D);
-    fputs("c -> phi -> u -> u0 -> ", out);
-    if (hx) { fprintf(out, "tt_c_%s_hcomp(c)(phi)(u)(u0)", D->name); }
-    else {
-        fputs("u0", out);
+    if (hx) { fprintf(out, "c -> phi -> u -> u0 -> tt_c_%s_hcomp(c)(phi)(u)(u0)", D->name); }   /* the formal element's handler, itself under tt_hcv */
+    else {   /* compose the constructor arguments along their lines: a value handler, so the side where phi holds (tt_hcv) */
+        fputs("tt_hcv(c -> phi -> u -> u0 -> u0", out);
         for (int ci = 0; ci < D->ncons; ci++) {
             Con *C = &cons[D->cons[ci]];
             fputc('(', out);
@@ -570,6 +570,7 @@ static void emit_code_body(Data *D) {   /* p.. i.. -> k -> k(TRANSP)(HCOMP)(NF)(
             }
             fputc(')', out);
         }
+        fputc(')', out);   /* closes tt_hcv( */
     }
     /* NF := p.. i.. -> c -> x -> x(case..): constructor arguments normalized at their own types, path constructors at
        endpoints reduced through their boundary (the boundary's elements normalized), formal compositions kept */
@@ -672,9 +673,9 @@ static void emit_glue_runtime(void) {
           "(tt_forall(i -> tt_gphi(line(i))))\n", out);
     /* hcomp in a Glue type, as in the checker (hcomp_glue): compose in T on phi (a filler tf), compose in A on psi \/ phi
        with the unglued sides and e.1 of the filler on phi, and glue the filler's end over the result */
-    fputs("tt_hc_glue := a -> phi -> te -> c -> psi -> u -> u0 -> (tf -> tt_glue(phi)(tf(tt_i1))"
+    fputs("tt_hc_glue := a -> phi -> te -> tt_hcv(c -> psi -> u -> u0 -> (tf -> tt_glue(phi)(tf(tt_i1))"
           "(tt_hcomp(a)(tt_ior(psi)(phi))(i -> tt_sel(psi)(tt_unglue(phi)(te)(u(i)))(tt_sel(phi)(tt_fst(tt_snd(te))(tf(i)))(tt_absurd)))"
-          "(tt_unglue(phi)(te)(u0))))(k -> tt_hfill(tt_fst(te))(psi)(u)(u0)(k))\n", out);
+          "(tt_unglue(phi)(te)(u0))))(k -> tt_hfill(tt_fst(te))(psi)(u)(u0)(k)))\n", out);
     fputs("tt_nf_glue := a -> phi -> te -> c -> x -> x\n", out);
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }
@@ -747,7 +748,7 @@ static void visit(Term *t) {
 static Term *tvar(int i) { return mk_var(i); }
 static Term *tref(TKind k, int id) { return mk_ref_l(k, id, mk_lval(lv_const(0))); }
 static Term *tapp(Term *f, Term *a) { return mk_app(f, a, 0); }
-static int newm(void) { return meta_new(vu(0), 0, NULL, 0); }
+static int newm(void) { return meta_new(vu(0), 0, NULL, NULL, 0); }
 static Term *tm(int id) { return meta_term(id, 0); }
 static Term *tpath(Term *A, Term *x, Term *y) { Term *line = mk_lam("_", shift(A, 0, 1), 0); line->isi = 1; return mk_term(T_PATHP, line, x, y, NULL); }
 static Term *tpi(Term *A, Term *B) { return mk_pi("y", A, B, 0); }
@@ -945,21 +946,26 @@ void erase_program(FILE *f) {
     fputs("tt_sel := phi -> x -> y -> phi(y)(tt_absurd)(x)\n", out);
     fputs("tt_forall := f -> f(tt_ihalf)(tt_i0)(tt_i0)(tt_i1)\n", out);
     /* a code is k -> k(transport rule)(hcomp rule)(components); hcomp at phi = 1 is the side at i1, else the code's rule */
-    fputs("tt_hcomp := c -> phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(c(m -> h -> n -> h)(c)(phi)(u)(u0))\n", out);
+    /* hcomp at phi = 1 is the side at i1 - for a VALUE. A code's hcomp (the universe: a Glue over the base) must keep its
+       form even where phi holds, because transport along a line dispatches on the line's code at an endpoint, where the
+       composition's face holds (compPath U R (ua not) transported as the identity before M20). So the shortcut wraps each
+       value handler (tt_hcv) and the dispatcher itself has none. */
+    fputs("tt_hcomp := c -> phi -> u -> u0 -> c(m -> h -> n -> h)(c)(phi)(u)(u0)\n", out);
+    fputs("tt_hcv := h -> c -> phi -> u -> u0 -> tt_sel(phi)(u(tt_i1))(h(c)(phi)(u)(u0))\n", out);
     fputs("tt_transp := line -> phi -> a -> tt_sel(phi)(a)(line(tt_i0)(m -> h -> n -> m)(line)(phi)(a))\n", out);
     fputs("tt_comp := line -> phi -> u -> u0 -> tt_hcomp(line(tt_i1))(phi)(i -> tt_transp(j -> line(tt_ior(i)(j)))(i)(u(i)))(tt_transp(line)(tt_i0)(u0))\n", out);
     fputs("tt_hfill := c -> phi -> u -> u0 -> k -> tt_hcomp(c)(tt_ior(phi)(tt_ineg(k)))(i -> tt_sel(phi)(u(tt_iand(i)(k)))(tt_sel(tt_ineg(k))(u0)(tt_absurd)))(u0)\n", out);
     fputs("tt_fill := line -> phi -> u -> u0 -> i -> tt_comp(j -> line(tt_iand(i)(j)))(tt_ior(phi)(tt_ineg(i)))(j -> tt_sel(phi)(u(tt_iand(i)(j)))(tt_sel(tt_ineg(i))(u0)(tt_absurd)))(u0)\n", out);
-    fputs("tt_hc_id := c -> phi -> u -> u0 -> u0\n", out);
+    fputs("tt_hc_id := tt_hcv(c -> phi -> u -> u0 -> u0)\n", out);
     fputs("tt_transp_u := line -> phi -> a -> a\n", out);
     /* the printed value: a normalizer per code (tt_nf c x); data types reduce path constructors at endpoints through their
        boundaries and keep formal compositions; functions are printed as they are */
     fputs("tt_nf := c -> x -> c(m -> h -> n -> n)(c)(x)\n", out);
     fputs("tt_nf_id := c -> x -> x\n", out);
-    fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)(tt_nf_id)\n", out);
+    fputs("tc_u := k -> k(tt_transp_u)(tt_hc_id)(tt_nf_id)\n", out);   /* the inert code: words, irrelevant components, pretypes - no composition */
     fputs("tt_dom := c -> c(m -> h -> n -> d -> b -> d)\n", out);
     fputs("tt_cod := c -> c(m -> h -> n -> d -> b -> b)\n", out);
-    fputs("tt_hc_pi := d -> b -> c -> phi -> u -> u0 -> x -> tt_hcomp(b(x))(phi)(i -> u(i)(x))(u0(x))\n", out);
+    fputs("tt_hc_pi := d -> b -> tt_hcv(c -> phi -> u -> u0 -> x -> tt_hcomp(b(x))(phi)(i -> u(i)(x))(u0(x)))\n", out);
     fputs("tt_transp_pi := d -> b -> line -> phi -> f -> x -> (v -> tt_transp(i -> tt_cod(line(i))(v(i)))(phi)(f(v(tt_i0))))"
           "(i -> tt_transp(j -> tt_dom(line(tt_ior(i)(tt_ineg(j)))))(tt_ior(phi)(i))(x))\n", out);
     fputs("tt_nf_pi := d -> b -> c -> x -> x\n", out);
@@ -967,8 +973,8 @@ void erase_program(FILE *f) {
     fputs("tt_pline := c -> c(m -> h -> n -> l -> x -> y -> l)\n", out);
     fputs("tt_px := c -> c(m -> h -> n -> l -> x -> y -> x)\n", out);
     fputs("tt_py := c -> c(m -> h -> n -> l -> x -> y -> y)\n", out);
-    fputs("tt_hc_path := l -> x -> y -> c -> phi -> u -> u0 -> j -> tt_hcomp(l(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
-          "(i -> tt_sel(phi)(u(i)(j))(tt_sel(tt_ineg(j))(x)(tt_sel(j)(y)(tt_absurd))))(u0(j))\n", out);
+    fputs("tt_hc_path := l -> x -> y -> tt_hcv(c -> phi -> u -> u0 -> j -> tt_hcomp(l(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
+          "(i -> tt_sel(phi)(u(i)(j))(tt_sel(tt_ineg(j))(x)(tt_sel(j)(y)(tt_absurd))))(u0(j)))\n", out);
     fputs("tt_transp_path := l -> x -> y -> line -> phi -> p -> j -> tt_comp(i -> tt_pline(line(i))(j))(tt_ior(phi)(tt_ior(j)(tt_ineg(j))))"
           "(i -> tt_sel(phi)(p(j))(tt_sel(tt_ineg(j))(tt_px(line(i)))(tt_sel(j)(tt_py(line(i)))(tt_absurd))))(p(j))\n", out);
     fputs("tt_nf_path := l -> x -> y -> c -> p -> p\n", out);
@@ -978,15 +984,28 @@ void erase_program(FILE *f) {
     fputs("tt_snd := p -> p(a -> b -> b)\n", out);
     fputs("tt_transp_sigma := d -> b -> line -> phi -> p -> tt_pair(tt_transp(i -> tt_dom(line(i)))(phi)(tt_fst(p)))"
           "(tt_transp(i -> tt_cod(line(i))(tt_transp(j -> tt_dom(line(tt_iand(i)(j))))(tt_ior(phi)(tt_ineg(i)))(tt_fst(p))))(phi)(tt_snd(p)))\n", out);
-    fputs("tt_hc_sigma := d -> b -> c -> phi -> u -> u0 -> tt_pair(tt_hcomp(d)(phi)(i -> tt_fst(u(i)))(tt_fst(u0)))"
-          "(tt_comp(i -> b(tt_hfill(d)(phi)(j -> tt_fst(u(j)))(tt_fst(u0))(i)))(phi)(i -> tt_snd(u(i)))(tt_snd(u0)))\n", out);
+    fputs("tt_hc_sigma := d -> b -> tt_hcv(c -> phi -> u -> u0 -> tt_pair(tt_hcomp(d)(phi)(i -> tt_fst(u(i)))(tt_fst(u0)))"
+          "(tt_comp(i -> b(tt_hfill(d)(phi)(j -> tt_fst(u(j)))(tt_fst(u0))(i)))(phi)(i -> tt_snd(u(i)))(tt_snd(u0))))\n", out);
     fputs("tt_nf_sigma := d -> b -> c -> x -> tt_pair(tt_nf(d)(tt_fst(x)))(tt_nf(b(tt_fst(x)))(tt_snd(x)))\n", out);
     fputs("tc_sigma := d -> b -> k -> k(tt_transp_sigma)(tt_hc_sigma)(tt_nf_sigma)(d)(b)\n", out);
+    /* the universe's code (tc_univ): hcomp in U is the Glue of the lid over the base (tt_hcompU, which needs the prelude's
+       transpEquiv and equivProof, emitted here first: eezoc allows no forward reference, and their erasures mention no tc_univ).
+       A program without them cannot compose in the universe: tc_univ is then the inert tc_u. Before M20 the universe shared the
+       inert code, so an hcomp at a variable type that is U (compPath U ..) returned its base and transport along it the identity. */
+    { int te = -1, ep = -1;
+      for (int i = 0; i < ndefs; i++) { if (!strcmp(defs[i].name, "transpEquiv")) te = i; if (!strcmp(defs[i].name, "equivProof")) ep = i; }
+      if (te >= 0 && ep >= 0) {
+          emit_def(ep); emit_def(te);
+          fputs("tt_hc_u := c -> phi -> u -> u0 -> tt_hcompU(phi)(u)(u0)\n", out);
+          fputs("tc_univ := k -> k(tt_transp_u)(tt_hc_u)(tt_nf_id)\n", out);   /* the universe: a U term erases to it */
+      } else fputs("tc_univ := tc_u\n", out);
+    }
     emit_def(mainid);
     visit(defs[mainid].ty);   /* the normalizer's code, at the end */
     fclose(out);
     /* eezoc reads `defs ; expr`: the separator must follow the last definition on its line */
     if (sz && buf[sz - 1] == '\n') buf[sz - 1] = 0;
-    fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name);
+    if (stream_main) fprintf(f, "%s;\ntt_%s\n", buf, defs[mainid].name);   /* M20 F2: the value is observed by a wrapper the program itself contains */
+    else { fprintf(f, "%s;\ntt_nf(", buf); out = f; erase(defs[mainid].ty, 0); fprintf(f, ")(tt_%s)\n", defs[mainid].name); }
     free(buf);
 }
