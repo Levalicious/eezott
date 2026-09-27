@@ -1057,6 +1057,7 @@ static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data) {
 /* cubical subtypes: outS (inS x) = x, and outS s = u when phi holds */
 Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
     if (iv_is_one(phi->iv)) { Val *t = vsys_at(u, NULL); if (t) return t; }
+    s = force(s);   /* through a rigid definition application (the H_DEF plan): outS s with s := inS a is a, not a normal form (M20 F4 found it) */
     if (s->k == V_INS) return s->a;
     Val *v = mkval(V_NEU); v->h = H_OUTS; v->a = A; v->b = phi; v->c = u; v->dom = s; return v;
 }
@@ -1746,6 +1747,7 @@ Val *vglueel(Val *ts, Val *a, Val *G) {
 static Val *equiv_fun(Val *Te_total) { return vproj(vproj(Te_total, 2), 1); }
 Val *vunglue(Val *A, Val *phi, Val *Te, Val *b) {
     if (iv_is_one(phi->iv)) { Val *t = vsys_at(Te, NULL); if (t) return vapp(equiv_fun(t), b, 0); }
+    b = force(b);   /* through a rigid definition application, as vhcomp forces its type and base: unglue (g i1) with g i1 := glue [] a is a (M20 F4 found it stuck) */
     if (b->k == V_GLUEEL) return b->b;
     if (b->k == V_SYS) {
         VBranch *br = xalloc((b->nbr + 1) * sizeof(VBranch));
