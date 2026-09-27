@@ -141,7 +141,7 @@ static Term *scheme_closed_form(Rep *rep, Term *elimapp, int depth) {
         Val *ty = defs[i].vty;
         for (;;) {   /* the theorem's binders, as metas of the elimination's context */
             Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; }
-            int id = meta_new(t->dom, depth, names, 0);
+            int id = meta_new(t->dom, depth, names, NULL, 0);
             ty = inst(&t->clo, eval(env, meta_term(id, depth)));
         }
         int ok = ty->k == V_PATHP && conv(depth, ev, ty->b) && metas_retry();
@@ -747,7 +747,7 @@ static void visit(Term *t) {
 static Term *tvar(int i) { return mk_var(i); }
 static Term *tref(TKind k, int id) { return mk_ref_l(k, id, mk_lval(lv_const(0))); }
 static Term *tapp(Term *f, Term *a) { return mk_app(f, a, 0); }
-static int newm(void) { return meta_new(vu(0), 0, NULL, 0); }
+static int newm(void) { return meta_new(vu(0), 0, NULL, NULL, 0); }
 static Term *tm(int id) { return meta_term(id, 0); }
 static Term *tpath(Term *A, Term *x, Term *y) { Term *line = mk_lam("_", shift(A, 0, 1), 0); line->isi = 1; return mk_term(T_PATHP, line, x, y, NULL); }
 static Term *tpi(Term *A, Term *B) { return mk_pi("y", A, B, 0); }

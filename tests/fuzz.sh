@@ -11,6 +11,7 @@
 #   KNOWN-DIFF     agda rejects for a recorded difference between the theories (a proof of Empty is an irrelevant
 #                  position in eezott, elab.c; Agda allows only the absurd pattern on an irrelevant argument)
 #   RESOURCE       agda ran out of memory or time (natives compute in unary there): not a judgement
+#   ORACLE-PANIC   agda hit an internal error (a bug of the oracle's): not a judgement either; reported upstream when minimised
 #   DISAGREE       everything else: a disagreement, kept under tests/fuzz/found/ once minimised, never deleted
 # The oracle is consumed as installed (its exit status and text); it is never modified.
 #
@@ -24,7 +25,7 @@ command -v "$AGDA" >/dev/null || { echo "fuzz.sh: agda not found (apt install ag
 tt() { "$EEZOTT" -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$@"; }
 status=0; n=0
 declare -A count
-verdict() { echo "$1: $2${3:+ - $3}"; count[$1]=$(( ${count[$1]:-0} + 1 )); n=$((n+1)); [ "$1" = DISAGREE ] && status=1; }
+verdict() { echo "$1: $2${3:+ - $3}"; count[$1]=$(( ${count[$1]:-0} + 1 )); n=$((n+1)); if [ "$1" = DISAGREE ]; then status=1; fi; return 0; }
 
 for f in "$TT"/*.tt "$TT"/check/*.tt "$TT"/unerasable/*.tt; do
     [ -e "$f" ] || continue
@@ -39,10 +40,11 @@ for f in "$TT"/*.tt "$TT"/check/*.tt "$TT"/unerasable/*.tt; do
     case "$first" in
         *"declared irrelevant, so it cannot be used here"*) verdict KNOWN-DIFF "$label" "Empty-position irrelevance";;
         *"out of memory"*|*"Heap exhausted"*) verdict RESOURCE "$label" "$first";;
-        "") [ $arc -eq 124 ] && verdict RESOURCE "$label" "timeout" || verdict DISAGREE "$label" "agda rc $arc";;
+        *"Panic:"*|*"An internal error has occurred"*) verdict ORACLE-PANIC "$label" "$first";;   # the oracle itself failed: no judgement on either side
+        "") if [ $arc -eq 124 ]; then verdict RESOURCE "$label" "timeout"; else verdict DISAGREE "$label" "agda rc $arc"; fi;;
         *) verdict DISAGREE "$label" "$first";;
     esac
 done
 echo
-echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, DISAGREE ${count[DISAGREE]:-0} (modules in $OUT)"
+echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, ORACLE-PANIC ${count[ORACLE-PANIC]:-0}, DISAGREE ${count[DISAGREE]:-0} (modules in $OUT)"
 exit $status

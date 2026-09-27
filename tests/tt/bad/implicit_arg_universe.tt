@@ -1,0 +1,3 @@
+-- M20 (tests/fuzz): an implicit argument is a meta whose solution must lie in the universe of the meta's type: uu : U := K U would give U : U
+def K {A : U} (x : A) : U := A
+def uu : U := K U
