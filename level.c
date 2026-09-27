@@ -132,6 +132,14 @@ static int derivable(int xk, int x, int yk, int y, int k) {
     int l = longest(xk, x, yk, y);
     return l > NEG && l >= k;
 }
+/* M20: the bounds the store places on the hidden level L of the global being elaborated. A bounded L is not uniformly
+   liftable (its body was checked under the bound: Cover's ua^0 against the motive U pins L = 0), so the global is then
+   monomorphic at the lower bound (elab_def, elab_block). */
+void lv_hidden_bounds(int *lo, int *hi) {
+    *hi = -1; *lo = 0;
+    for (int k = 0; k <= 64; k++) if (derivable(1, -1, 0, 0, -k)) { *hi = k; break; }   /* 0 >= L - k */
+    for (int k = 64; k >= 1; k--) if (derivable(0, 0, 1, -1, k)) { *lo = k; break; }    /* L >= 0 + k */
+}
 /* add y >= x + k; 0 if it would close a positive cycle */
 static int add_edge(int xk, int x, int yk, int y, int k) {
     if (derivable(xk, x, yk, y, k)) return 1;

@@ -54,7 +54,7 @@ static void ctx_bind_i(Ctx *c, const char *name) { ctx_push(c, name, mkval(V_INT
 static Term *fresh_meta(Ctx *c, Val *ty, int line) {
     ty = force(ty);
     if (ty->k == V_LEVEL) { int m = lv_meta_new(); Term *t = mk_term(T_LMETA, NULL, NULL, NULL, NULL); t->n = m; return t; }
-    return meta_term(meta_new(ty, c->n, c->names, line), c->n);
+    return meta_term(meta_new(ty, c->n, c->names, c->tys, line), c->n);
 }
 
 /* the context restricted to a face: types and environment values re-evaluated with the face's endpoints */
@@ -212,7 +212,7 @@ static Term *E_con_spine(Term *t, EInfo *I, int depth) {
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
     for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
     Term *m = mk_var(depth + I->n + I->htot + I->r + (I->o - 1 - Cp->bord));
-    for (int j = 0; j < Cp->nargs; j++) m = mk_app(m, E(args[np + j], I, depth), Cp->args[j].irr);
+    for (int j = 0; j < Cp->nargs; j++) m = mk_app(m, args[np + j], Cp->args[j].irr);   /* the elements as they are: only the hypotheses below are images (CHM: m_c a.. E(a_rec)..; M20 found the images here) */
     for (int j = 0; j < Cp->nargs; j++) if (Cp->args[j].isrec || Cp->args[j].isrecpath) {
         Term *ih = E(args[np + j], I, depth);
         if (ih == args[np + j] || term_eq(ih, args[np + j])) die("the boundary of %s: no induction hypothesis for the argument of %s", I->C->name, Cp->name);
@@ -525,7 +525,7 @@ static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Va
         if (hty->k == V_PI && deferrable(args[i])) {   /* against a type not known yet: checked once the spine has met its expected type */
             Val *dom = force(hty->dom);
             if (dom->k == V_NEU && dom->h == H_META) {
-                int id = meta_new(dom, c->n, c->names, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
+                int id = meta_new(dom, c->n, c->names, c->tys, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
                 dnums = realloc(dnums, (ndnums + 1) * sizeof(Deferred)); if (!dnums) die_resource("out of memory");
                 dnums[ndnums].term = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
                 head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
@@ -1505,6 +1505,7 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
     resolve_deferred(&c, 0); metas_finish(ms[0]->name, line, mm0); resolve_deferred(&c, 1);
     for (int i = 0; i < nt; i++) ts[i] = zonk(ts[i]);
     LVal *lvs = xalloc((n + 1) * sizeof(LVal)); for (int i = 0; i < n; i++) lvs[i] = datas[d0 + i].lvl;
+    int hlo, hhi; lv_hidden_bounds(&hlo, &hhi);   /* before the rollback (M20, as in elab_def) */
     solve_metas(ms[0]->name, line, m0, mark, ts, nt, lvs, n);
     for (int i = 0; i < nt; i++) *slots[i] = ts[i];
     for (int i = 0; i < n; i++) datas[d0 + i].lvl = lvs[i];
@@ -1512,9 +1513,10 @@ static void elab_block(SDecl **ms, int n, SBinder *params, int nparams, int line
        count, nor do the levels of their own occurrences, which are at the hidden level by construction) */
     int poly = 0;
     for (int i = 0; i < nt; i++) if (!isty[i] && mentions_hidden_but_block(ts[i], d0, d0 + n)) poly = 1;
-    if (!poly) {   /* not polymorphic: the hidden level is 0 */
-        for (int i = 0; i < nt; i++) *slots[i] = subst_hidden(ts[i], lv_const(0));
-        for (int i = 0; i < n; i++) datas[d0 + i].lvl = lv_subst(datas[d0 + i].lvl, -1, lv_const(0));
+    if (hhi >= 0 || hlo > 0) poly = 0;   /* M20: a bounded hidden level: monomorphic at the lower bound */
+    if (!poly) {   /* not polymorphic: the hidden level is the lower bound (0 unless the store says otherwise) */
+        for (int i = 0; i < nt; i++) *slots[i] = subst_hidden(ts[i], lv_const(hlo));
+        for (int i = 0; i < n; i++) datas[d0 + i].lvl = lv_subst(datas[d0 + i].lvl, -1, lv_const(hlo));
     }
     for (int i = 0; i < n; i++) datas[d0 + i].poly = poly;
     /* every higher inductive type must have an induction principle: build it now, so that a boundary the
@@ -1536,8 +1538,12 @@ static void elab_def(SDecl *s) {
     if (typelike) c.irrpos--;
     resolve_deferred(&c, 0); metas_finish(s->name, s->line, mm0); resolve_deferred(&c, 1);
     Term *ts[2] = { zonk(ty), zonk(val) };
+    int hlo, hhi; lv_hidden_bounds(&hlo, &hhi);   /* before the store is rolled back: is the hidden level bounded? */
     solve_metas(s->name, s->line, m0, mark, ts, 2, NULL, 0);
     ty = ts[0]; val = ts[1];
+    if (hhi >= 0 || hlo > 0) {   /* M20: a bounded hidden level is not uniformly liftable (Cover : S1 -> U pinned to 0 by ua^0 was lifted to U 1): monomorphic at the lower bound */
+        ty = subst_hidden(ty, lv_const(hlo)); val = subst_hidden(val, lv_const(hlo));
+    }
     Def D = {0}; D.name = s->name; D.line = s->line; D.seq = decl_seq++;
     D.poly = term_mentions_hidden(ty) || term_mentions_hidden(val);
     if (!D.poly) { ty = subst_hidden(ty, lv_const(0)); val = subst_hidden(val, lv_const(0)); }

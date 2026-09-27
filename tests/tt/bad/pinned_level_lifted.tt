@@ -1,3 +1,4 @@
+-- M20 (tests/fuzz): a definition whose own elaboration pins its hidden level (Cover: ua^0 against the motive U) is monomorphic: not liftable to U 1
 data S1 : U where
   | base : S1
   | loop : (i : I) -> S1 [ ~ i -> base | i -> base ]

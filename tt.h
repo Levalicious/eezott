@@ -194,6 +194,7 @@ int lv_eq(LVal a, LVal b); int lv_leq(LVal a, LVal b); int lv_is_const(LVal a, i
 LVal lv_subst(LVal a, int var, LVal s); LVal lv_subst_meta(LVal a, int id, LVal s);
 int lv_has_meta(LVal a); int lv_mentions_hidden(LVal a);
 int lv_is_hidden_plus(LVal a, int *n);        /* exactly the hidden level + n? */
+void lv_hidden_bounds(int *lo, int *hi);      /* the store's bounds on the hidden level: lo the greatest k with L >= k (0: none), hi the least with L <= k (-1: none) (M20) */
 
 /* The constraint store: an append-only log of edges y >= x + k between level
  * atoms (the constant 0, rigid variables, metas), consistent iff it has no
@@ -296,10 +297,10 @@ Val *vapply_arg(Val *f, Arg *a);             /* apply a spine entry (application
  * constraints that are not patterns are postponed and retried when the
  * declaration ends, when every meta must be solved and the solutions are
  * substituted structurally (zonk). */
-typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known */
+typedef struct { Val *ty; int ctxn; int line; Term *solt; Val *sol; const char **names; Val **tys; int deferred; } Meta;   /* deferred: stands for a numeral checked once its type is known; tys: the context's types, for the universe check of a solution (M20) */
 extern Meta *tmetas; extern int ntmetas;
 extern int metas_version;   /* bumped whenever a meta is solved or a rollback clears one: memo entries key on it */
-int meta_new(Val *ty, int ctxn, const char **names, int line);
+int meta_new(Val *ty, int ctxn, const char **names, Val **tys, int line);
 Term *meta_term(int id, int ctxn);           /* ?id applied to the context's variables */
 Val *force(Val *v);                          /* the canonical value: metas resolved and definition applications unfolded */
 extern int force_depth;                      /* forces active on the C stack: a walk driven from outside nests here, not in elim_reduce */
