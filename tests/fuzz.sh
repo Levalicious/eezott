@@ -19,7 +19,7 @@
 #   GEN-DISAGREE   eezott accepted an interval pair the De Morgan ground truth rejects, or rejected one it accepts / a
 #                  value well-typed by construction: a defect of the checker, kept under tests/fuzz/found/
 # The run-time leg (F2): for a program whose main is a Nat or a Bool, the program is rerun as a stream function
-# (main := \_ -> showNat main, stdlib/tt/show.tt: a typed Lazy-K wrapper) through eezoc's pristine ELF (-e -i) and the
+# (main := \_ -> showNat main, stdlib/tt/stream.tt: a typed Lazy-K wrapper) through eezoc's pristine ELF (-e -i) and the
 # bytes it prints must be the checker's normal form of main - which the Agda module above has already judged:
 #   RUN-AGREE / RUN-DISAGREE   the ELF's output against eezott -n main (zero-padded decimal, or t/f)
 #   RUN-RESOURCE               the ELF ran past the time limit: not a judgement, but a well-typed program should stop
@@ -67,7 +67,7 @@ runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
     esac
     local w="$OUT/$(basename "$f" .tt).run.tt"
     sed -E 's/\bmain\b/mainv0/g' "$f" > "$w"; printf '\ndef main : Unit -> Out %d := \\_ -> %s mainv0\n' $width $show >> "$w"
-    ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOTT" -I -p "$LIB/prelude.tt" -p "$LIB/num.tt" -p "$LIB/show.tt" -L "$LIB" "$w" > "$w.eezo" 2> "$w.err" ) || { verdict RUN-DISAGREE "$label" "eezott -I: $(head -c 100 "$w.err" | tr '\n' ' ')"; return 0; }
+    ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOTT" -I -p "$LIB/prelude.tt" -p "$LIB/num.tt" -p "$LIB/stream.tt" -L "$LIB" "$w" > "$w.eezo" 2> "$w.err" ) || { verdict RUN-DISAGREE "$label" "eezott -I: $(head -c 100 "$w.err" | tr '\n' ' ')"; return 0; }
     ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOC" -e -i -f xbcl < "$w.eezo" > "$w.elf" 2> "$w.cerr" ) || { verdict RUN-DISAGREE "$label" "eezoc: $(head -c 100 "$w.cerr" | tr '\n' ' ')"; return 0; }
     chmod +x "$w.elf"
     local got; got=$( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout ${FUZZ_RUN_TIMEOUT:-120} "$w.elf" < /dev/null 2> "$w.rerr" ); local rc=$?
