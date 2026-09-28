@@ -1,1 +1,2 @@
-eezott
+*.o
+/eezott
