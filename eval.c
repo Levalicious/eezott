@@ -17,6 +17,7 @@
  * Agda reducer (see Programs/Reference/agda).
  */
 #include "tt.h"
+#include <sys/resource.h>
 
 Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
@@ -31,6 +32,23 @@ void die_resource(const char *fmt, ...) {
     va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
     fputc('\n', stderr);
     exit(70);
+}
+/* The C stack. The structural walks - nf_force, quote, term_print - recurse once per constructor, so a normal form the size of a
+   literal (double 2^64, built by suc (suc ih)) runs the stack out long before anything can report it: eezott -n main segfaulted
+   87205 frames deep, inside the tripwire's own diagnostic (M20 found it). main records its frame; the walkers measure their
+   distance from it against the soft limit less a margin, and abort as a resource limit, the way the tripwire does. */
+char *stack_base;
+static size_t stack_budget;
+void stack_guard(const char *what) {
+    char here;
+    if (!stack_base) return;
+    if (!stack_budget) {
+        struct rlimit rl; size_t lim = (size_t)8 << 20;
+        if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) lim = rl.rlim_cur;
+        stack_budget = lim > ((size_t)2 << 20) ? lim - ((size_t)1 << 20) : lim / 2;
+    }
+    size_t used = (size_t)(stack_base - &here);
+    if (used > stack_budget) die_resource("%s recursed %zu MB deep on the C stack: a normal form the size of a literal (work proportional to it)", what, used >> 20);
 }
 
 /* A memo entry stays valid across metas generations iff nothing inside it was blocked on an unsolved meta: resolving one
@@ -337,6 +355,7 @@ static void ref_lvl_tp(FILE *f, Term *t, const char **names, int depth) {
     fputs("^{", f); tp(f, t->a, names, depth, 0); fputc('}', f);
 }
 static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
+    stack_guard("term_print");
     unsigned long long num;
     if ((t->k == T_APP || t->k == T_CON) && numeral_of(t, &num)) { fprintf(f, "%llu", num); return; }
     switch (t->k) {
@@ -1895,6 +1914,7 @@ static Term *quote_iv(int depth, IVal a) {
    force it through. An irrelevant second component is a proof that prints as '.', and forcing it would mean walking
    a proof nobody reads. */
 Val *nf_force(Val *v) {
+    stack_guard("nf_force");
     v = force(v);
     if (v->k == V_CON && v->args.n > 0) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
         Val *w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl;
@@ -1907,6 +1927,7 @@ Val *nf_force(Val *v) {
     return w;
 }
 Term *quote(int depth, Val *v) {
+    stack_guard("quote");
     v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
     case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); Term *t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
