@@ -1,0 +1,38 @@
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: eezott            # this repository beside its dependencies: the workspace layout the mkfiles assume (../libeezo, ...)
+      - uses: Levalicious/mk@2e9df12fdc3a4d9a2793cb2d6d641817bd83cbbc
+      - uses: Levalicious/mkroot@38fc598680d6b47b13e4ac2b1f2d303023ba30d5
+      - name: dependencies at the commits deps.lock pins
+        run: sh eezott/ci/deps.sh
+      - name: build, dependencies first
+        run: for d in libeezo eezo eezoc eezott; do (cd $d && mk) || exit 1; done
+      - name: the standard library where eezoc looks for imports ($PREFIX/share/eezo/stdlib)
+        run: (cd stdlib && mk install)
+      - name: the gate
+        run: bash eezott/tests/eezott.sh
+  fuzz:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: eezott
+      - uses: Levalicious/mk@2e9df12fdc3a4d9a2793cb2d6d641817bd83cbbc
+      - uses: Levalicious/mkroot@38fc598680d6b47b13e4ac2b1f2d303023ba30d5
+      - run: sh eezott/ci/deps.sh
+      - run: for d in libeezo eezo eezoc eezott; do (cd $d && mk) || exit 1; done
+      - run: (cd stdlib && mk install)
+      - name: Agda (apt; cubicaltt is not packaged, so that leg is skipped)
+        run: sudo apt-get install -y --no-install-recommends agda
+      - name: the differential test
+        run: bash eezott/tests/fuzz.sh

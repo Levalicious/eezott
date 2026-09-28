@@ -39,8 +39,9 @@
 # The oracles are consumed as installed (their exit status and text); they are never modified.
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
-LIB="${SCRIPT_DIR}/../stdlib/tt"
+WS="${EEZO_WS:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"   # the workspace: this repository and its siblings (libeezo, eezo, eezoc, eezott, stdlib)
+EEZOTT="${EEZOTT:-$WS/eezott/eezott}"
+LIB="${LIB:-$WS/stdlib/tt}"
 TT="${SCRIPT_DIR}/tt"
 OUT="${FUZZ_OUT:-$(mktemp -d)}"
 AGDA="${AGDA:-agda}"
@@ -53,7 +54,7 @@ status=0; n=0
 declare -A count
 verdict() { echo "$1: $2${3:+ - $3}"; count[$1]=$(( ${count[$1]:-0} + 1 )); case "$1" in AGREE|DISAGREE|INEXPRESSIBLE|KNOWN-DIFF|RESOURCE|ORACLE-PANIC|GEN-REJECTED) n=$((n+1));; esac; case "$1" in DISAGREE|RUN-DISAGREE|GEN-DISAGREE|CTT-DISAGREE) status=1;; esac; return 0; }
 
-EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
+EEZOC="${EEZOC:-$WS/eezoc/eezoc}"
 runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
     local f="$1" label="$2" mty nf want show width
     case "$label" in unerasable/*) return 0;; esac   # refused at erasure by design (the gate checks that): no run-time value to observe

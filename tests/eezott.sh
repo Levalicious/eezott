@@ -9,13 +9,14 @@
 # must typecheck but be refused at erasure (Kan operations without run-time meaning).
 #
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-EEZOTT="${SCRIPT_DIR}/../eezott/eezott"
-LIB="${SCRIPT_DIR}/../stdlib/tt"
+WS="${EEZO_WS:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"   # the workspace: this repository and its siblings (libeezo, eezo, eezoc, eezott, stdlib)
+EEZOTT="${EEZOTT:-$WS/eezott/eezott}"
+LIB="${LIB:-$WS/stdlib/tt}"
 # No cap is imposed here: the default is the system's own limits. EEZOTT_MAX_ALLOC exists for whoever wants one
 # (export it and the checker picks it up); a resource abort is still never a judgement.
 tt() { "$EEZOTT" -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$@"; }   # num.tt: the equivalence Nat ~ Num in scope, the Nat's run-time representation (M19)
-EEZOC="${SCRIPT_DIR}/../eezoc/eezoc"
-EEZO="${SCRIPT_DIR}/../eezo/eezo"
+EEZOC="${EEZOC:-$WS/eezoc/eezoc}"
+EEZO="${EEZO:-$WS/eezo/eezo}"
 TT="${SCRIPT_DIR}/tt"
 status=0; n=0
 
