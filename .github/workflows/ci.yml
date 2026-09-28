@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: eezott            # this repository beside its dependencies: the workspace layout the mkfiles assume (../libeezo, ...)
-      - uses: Levalicious/mk@477dc780cdfe992debfb0c07a4d9893deb5aa8db
+      - uses: Levalicious/mk@8b33eaa94d5ae53a70b0f3b2cfd9fb1432f8cc9e
       - uses: Levalicious/mkroot@36d0977adb014e0e2775222d23ce522ddde8b570
       - name: dependencies at the commits deps.lock pins
         run: sh eezott/ci/deps.sh
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: eezott
-      - uses: Levalicious/mk@477dc780cdfe992debfb0c07a4d9893deb5aa8db
+      - uses: Levalicious/mk@8b33eaa94d5ae53a70b0f3b2cfd9fb1432f8cc9e
       - uses: Levalicious/mkroot@36d0977adb014e0e2775222d23ce522ddde8b570
       - run: sh eezott/ci/deps.sh
       - run: for d in libeezo eezo eezoc eezott; do (cd $d && mk) || exit 1; done
