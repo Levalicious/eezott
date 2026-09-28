@@ -23,6 +23,10 @@
 # bytes it prints must be the checker's normal form of main - which the Agda module above has already judged:
 #   RUN-AGREE / RUN-DISAGREE   the ELF's output against eezott -n main (zero-padded decimal, or t/f)
 #   RUN-RESOURCE               the ELF ran past the time limit: not a judgement, but a well-typed program should stop
+# The same through the IO monad (stdlib/tt/io.tt: main := run (putNat main), eezoc -e -m; 2026-09-28): the typed
+# program is a value of IO, erased to the Scott-encoded steps the monadic driver performs - the other I/O model, the
+# same observation:
+#   RUNM-AGREE / RUNM-DISAGREE / RUNM-RESOURCE
 #   DISAGREE       everything else: a disagreement, kept under tests/fuzz/found/ once minimised, never deleted
 # The cubicaltt leg (F4): the same program printed as a cubicaltt module (eezott -C: CCHM's reference implementation,
 # independent of the Agda lineage eezott followed for Glue; elims as split, hcomp/transp as hComp/comp, Glue with the
@@ -52,7 +56,7 @@ mkdir -p "$OUT/ctt"
 tt() { "$EEZOTT" -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$@"; }
 status=0; n=0
 declare -A count
-verdict() { echo "$1: $2${3:+ - $3}"; count[$1]=$(( ${count[$1]:-0} + 1 )); case "$1" in AGREE|DISAGREE|INEXPRESSIBLE|KNOWN-DIFF|RESOURCE|ORACLE-PANIC|GEN-REJECTED) n=$((n+1));; esac; case "$1" in DISAGREE|RUN-DISAGREE|GEN-DISAGREE|CTT-DISAGREE) status=1;; esac; return 0; }
+verdict() { echo "$1: $2${3:+ - $3}"; count[$1]=$(( ${count[$1]:-0} + 1 )); case "$1" in AGREE|DISAGREE|INEXPRESSIBLE|KNOWN-DIFF|RESOURCE|ORACLE-PANIC|GEN-REJECTED) n=$((n+1));; esac; case "$1" in DISAGREE|RUN-DISAGREE|RUNM-DISAGREE|GEN-DISAGREE|CTT-DISAGREE) status=1;; esac; return 0; }
 
 EEZOC="${EEZOC:-$WS/eezoc/eezoc}"
 runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
@@ -74,6 +78,17 @@ runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
     if [ "$got" = "$want" ] && [ $rc -eq 0 ]; then verdict RUN-AGREE "$label"
     elif [ $rc -eq 124 ]; then verdict RUN-RESOURCE "$label" "the ELF ran past ${FUZZ_RUN_TIMEOUT:-120} s: not a judgement (a program that stops is what totality promises; look)"
     else verdict RUN-DISAGREE "$label" "wanted $want, got '$got' (rc $rc) $(head -c 80 "$w.rerr" | tr '\n' ' ')"; fi
+    # the same value through the IO monad: main := run (putNat mainv0), the monadic driver of the ELF (-e -m)
+    local m="$OUT/$(basename "$f" .tt).runm.tt" put
+    case "$mty" in Nat) put=putNat;; Bool) put=putBool;; esac
+    sed -E 's/\bmain\b/mainv0/g' "$f" > "$m"; printf '\n#import io\ndef main : Answer := run (%s mainv0)\n' $put >> "$m"
+    ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOTT" -I -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$m" > "$m.eezo" 2> "$m.err" ) || { verdict RUNM-DISAGREE "$label" "eezott -I: $(head -c 100 "$m.err" | tr '\n' ' ')"; return 0; }
+    ( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOC" -e -m -f xbcl < "$m.eezo" > "$m.elf" 2> "$m.cerr" ) || { verdict RUNM-DISAGREE "$label" "eezoc: $(head -c 100 "$m.cerr" | tr '\n' ' ')"; return 0; }
+    chmod +x "$m.elf"
+    got=$( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout ${FUZZ_RUN_TIMEOUT:-120} "$m.elf" < /dev/null 2> "$m.rerr" ); rc=$?
+    if [ "$got" = "$want" ] && [ $rc -eq 0 ]; then verdict RUNM-AGREE "$label"
+    elif [ $rc -eq 124 ]; then verdict RUNM-RESOURCE "$label" "the ELF ran past ${FUZZ_RUN_TIMEOUT:-120} s"
+    else verdict RUNM-DISAGREE "$label" "wanted $want, got '$got' (rc $rc) $(head -c 80 "$m.rerr" | tr '\n' ' ')"; fi
 }
 cttleg() {   # file label: the cubicaltt leg (F4) - the program as a cubicaltt module, checked by cubical -b
     local f="$1" label="$2" mod erc crc first nfnote
@@ -156,5 +171,5 @@ else
     done
 fi
 echo
-echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, ORACLE-PANIC ${count[ORACLE-PANIC]:-0}, DISAGREE ${count[DISAGREE]:-0}; run-time leg: RUN-AGREE ${count[RUN-AGREE]:-0}, RUN-RESOURCE ${count[RUN-RESOURCE]:-0}, RUN-DISAGREE ${count[RUN-DISAGREE]:-0}; cubicaltt leg: CTT-AGREE ${count[CTT-AGREE]:-0}, CTT-INEXPRESSIBLE ${count[CTT-INEXPRESSIBLE]:-0}, CTT-IRR-REJECT ${count[CTT-IRR-REJECT]:-0}, CTT-NF-DIFF ${count[CTT-NF-DIFF]:-0}, CTT-RESOURCE ${count[CTT-RESOURCE]:-0}, CTT-DISAGREE ${count[CTT-DISAGREE]:-0}; generated: GEN-AGREE ${count[GEN-AGREE]:-0}, GEN-REJECTED ${count[GEN-REJECTED]:-0}, GEN-DISAGREE ${count[GEN-DISAGREE]:-0} (modules in $OUT)"
+echo "fuzz.sh: $n programs: AGREE ${count[AGREE]:-0}, INEXPRESSIBLE ${count[INEXPRESSIBLE]:-0}, KNOWN-DIFF ${count[KNOWN-DIFF]:-0}, RESOURCE ${count[RESOURCE]:-0}, ORACLE-PANIC ${count[ORACLE-PANIC]:-0}, DISAGREE ${count[DISAGREE]:-0}; run-time leg: RUN-AGREE ${count[RUN-AGREE]:-0}, RUN-RESOURCE ${count[RUN-RESOURCE]:-0}, RUN-DISAGREE ${count[RUN-DISAGREE]:-0}; monadic: RUNM-AGREE ${count[RUNM-AGREE]:-0}, RUNM-RESOURCE ${count[RUNM-RESOURCE]:-0}, RUNM-DISAGREE ${count[RUNM-DISAGREE]:-0}; cubicaltt leg: CTT-AGREE ${count[CTT-AGREE]:-0}, CTT-INEXPRESSIBLE ${count[CTT-INEXPRESSIBLE]:-0}, CTT-IRR-REJECT ${count[CTT-IRR-REJECT]:-0}, CTT-NF-DIFF ${count[CTT-NF-DIFF]:-0}, CTT-RESOURCE ${count[CTT-RESOURCE]:-0}, CTT-DISAGREE ${count[CTT-DISAGREE]:-0}; generated: GEN-AGREE ${count[GEN-AGREE]:-0}, GEN-REJECTED ${count[GEN-REJECTED]:-0}, GEN-DISAGREE ${count[GEN-DISAGREE]:-0} (modules in $OUT)"
 exit $status
