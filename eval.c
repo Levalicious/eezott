@@ -820,20 +820,33 @@ static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
 /* a term's heads only, for the tripwire's diagnostic: names of globals, binders as a backslash, variables by index */
-static void term_heads(FILE *f, Term *t, int d) {
-    if (!t) { fputs("_", f); return; }
-    if (d > 6) { fputs("..", f); return; }
-    switch (t->k) {
-    case T_VAR: fprintf(f, "v%d", t->n); break;
-    case T_DEF: fprintf(f, "%s", defs[t->n].name); break;
-    case T_CON: fprintf(f, "%s", cons[t->n].name); break;
-    case T_DATA: fprintf(f, "%s", datas[t->n].name); break;
-    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); break;
-    case T_LAM: fputs("\\ ", f); term_heads(f, t->a, d + 1); break;
-    case T_APP: fputc('(', f); term_heads(f, t->a, d + 1); fputc(' ', f); term_heads(f, t->b, d + 1); fputc(')', f); break;
-    case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
-    default: fprintf(f, "<k%d>", t->k); break;
+/* the heads of a term, six deep (a diagnostic): a list of output operations, the pieces pushed in reverse */
+typedef struct { Term *t; int d; const char *s; } THOp;
+static void term_heads(FILE *f, Term *t0, int d0) {
+    Stack ops = { NULL, 0, 0, sizeof(THOp) };
+    THOp o0 = { t0, d0, NULL }; STACK_PUSH(&ops, THOp, o0);
+    while (ops.n) {
+        THOp o = STACK_POP(&ops, THOp); Term *t = o.t; int d = o.d;
+        if (o.s) { fputs(o.s, f); continue; }
+        if (!t) { fputs("_", f); continue; }
+        if (d > 6) { fputs("..", f); continue; }
+        switch (t->k) {
+        case T_VAR: fprintf(f, "v%d", t->n); break;
+        case T_DEF: fprintf(f, "%s", defs[t->n].name); break;
+        case T_CON: fprintf(f, "%s", cons[t->n].name); break;
+        case T_DATA: fprintf(f, "%s", datas[t->n].name); break;
+        case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); break;
+        case T_LAM: { fputs("\\ ", f); THOp b = { t->a, d + 1, NULL }; STACK_PUSH(&ops, THOp, b); break; }
+        case T_APP: {
+            fputc('(', f);
+            THOp c = { NULL, 0, ")" }, y = { t->b, d + 1, NULL }, sp = { NULL, 0, " " }, x = { t->a, d + 1, NULL };
+            STACK_PUSH(&ops, THOp, c); STACK_PUSH(&ops, THOp, y); STACK_PUSH(&ops, THOp, sp); STACK_PUSH(&ops, THOp, x);
+            break; }
+        case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
+        default: fprintf(f, "<k%d>", t->k); break;
+        }
     }
+    stack_drop(&ops);
 }
 /* The literal-elimination tripwire. A method that uses its induction hypothesis walks the literal a step at a
    time, so a walk over a machine-sized literal is work proportional to the literal - 1e19 steps at the word

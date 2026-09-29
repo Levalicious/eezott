@@ -23,6 +23,7 @@
  *   comments: '#' or '--' to end of line.
  */
 #include "tt.h"
+#include "machine.h"
 #include <ctype.h>
 #include <errno.h>
 
@@ -103,9 +104,6 @@ static Tok *expect(TokKind k) {
 static const char *tokstr(Tok *t) { char *s = xalloc(t->n + 1); memcpy(s, t->s, t->n); s[t->n] = 0; return s; }
 
 static STerm *st(SKind k, int line) { STerm *t = xalloc(sizeof *t); t->k = k; t->line = line; return t; }
-static STerm *parse_term(void);
-static STerm *parse_ior(void);
-
 static int binder_ahead(void) {
     int i = 0;
     if (peek()->k == TK_DOT) i = 1;   /* .(x : A): an irrelevant binder */
@@ -115,91 +113,6 @@ static int binder_ahead(void) {
     while (peekat(i)->k == TK_NAME) i++;
     return peekat(i)->k == TK_COLON;
 }
-static void parse_binder_group(SBinder **out, int *n, int *cap) {
-    int irrel = 0;
-    if (peek()->k == TK_DOT) { next(); irrel = 1; }   /* .(x : A): irrelevant (M16b) */
-    Tok *o = next(); int imp = o->k == TK_LBRACE;   /* {x : A}: implicit */
-    if (irrel && imp) die("%s:%d: a binder cannot be both irrelevant and implicit", file, o->line);
-    int start = *n;
-    while (peek()->k == TK_NAME) {
-        Tok *t = next();
-        if (*n == *cap) { *cap = *cap ? 2 * *cap : 4; *out = rrealloc(*out, *cap * sizeof(SBinder)); }
-        (*out)[*n].name = tokstr(t); (*out)[*n].ty = NULL; (*out)[*n].line = t->line; (*out)[*n].imp = imp; (*out)[*n].irrel = irrel; (*n)++;
-    }
-    expect(TK_COLON);
-    STerm *ty = parse_term();
-    for (int i = start; i < *n; i++) (*out)[i].ty = ty;
-    expect(imp ? TK_RBRACE : TK_RP);
-}
-static SBinder *parse_binders(int *n) {
-    SBinder *b = NULL; int cap = 0; *n = 0;
-    while (binder_ahead()) parse_binder_group(&b, n, &cap);
-    return b;
-}
-
-static STerm *parse_system(void) {
-    Tok *t = expect(TK_LB);
-    STerm *r = st(S_SYS, t->line);
-    int cap = 0;
-    while (peek()->k != TK_RB) {
-        if (r->nbr) expect(TK_BAR);
-        STerm *face = parse_ior();
-        expect(TK_ARROW);
-        STerm *body = parse_term();
-        if (r->nbr == cap) { cap = cap ? 2 * cap : 4; r->br = rrealloc(r->br, cap * sizeof(SBranch)); }
-        r->br[r->nbr].face = face; r->br[r->nbr].body = body; r->nbr++;
-    }
-    expect(TK_RB);
-    return r;
-}
-
-static STerm *parse_atom(void) {
-    Tok *t = peek();
-    switch (t->k) {
-    case TK_NAME: { next(); if (t->n == 1 && t->s[0] == '_') return st(S_HOLE, t->line); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); return r; }
-    case TK_NUM: {
-        next(); STerm *r = st(S_NUM, t->line);
-        r->digits = tokstr(t);
-        errno = 0; r->num = strtoull(tokstr(t), NULL, 10);
-        if (errno == ERANGE) r->num = ULLONG_MAX;   /* only a level needs the machine word; a literal of a data type is a bignum */
-        return r; }
-    case TK_U: { next(); STerm *r = st(S_U, t->line); r->lvl = 0;
-                 if (peek()->k == TK_NUM) { Tok *n = next(); r->lvl = atoi(tokstr(n)); }
-                 else if (peek()->k == TK_LBRACE) { next(); r->a = parse_term(); expect(TK_RBRACE); }   /* U {l}: a level expression */
-                 return r; }
-    case TK_LBRACE: { next(); STerm *r = parse_term(); expect(TK_RBRACE); return r; }   /* {e}: a level argument, grouped */
-    case TK_LEVEL: next(); return st(S_LEVEL, t->line);
-    case TK_LZERO: next(); return st(S_LZERO, t->line);
-    case TK_LSUC: { next(); STerm *r = st(S_LSUC, t->line); r->a = parse_atom(); return r; }
-    case TK_LMAX: { next(); STerm *r = st(S_LMAX, t->line); r->a = parse_atom(); r->b = parse_atom(); return r; }
-    case TK_I: next(); return st(S_I, t->line);
-    case TK_I0: next(); return st(S_I0, t->line);
-    case TK_I1: next(); return st(S_I1, t->line);
-    case TK_PATHP: next(); return st(S_PATHP, t->line);
-    case TK_PATH: { next(); STerm *r = st(S_PATHP, t->line); r->lvl = 1; return r; }   /* lvl=1 marks the non-dependent sugar */
-    case TK_PARTIAL: next(); return st(S_PARTIAL, t->line);
-    case TK_TRANSP: next(); return st(S_TRANSP, t->line);
-    case TK_HCOMP: next(); return st(S_HCOMP, t->line);
-    case TK_COMP: next(); return st(S_COMP, t->line);
-    case TK_SUB: next(); return st(S_SUB, t->line);
-    case TK_INS: next(); return st(S_INS, t->line);
-    case TK_OUTS: next(); return st(S_OUTS, t->line);
-    case TK_SIGMA: next(); return st(S_SIGMA, t->line);
-    case TK_FST: next(); return st(S_FST, t->line);
-    case TK_SND: next(); return st(S_SND, t->line);
-    case TK_GLUE: next(); return st(S_GLUE, t->line);
-    case TK_GLUEEL: next(); return st(S_GLUEEL, t->line);
-    case TK_UNGLUE: next(); return st(S_UNGLUE, t->line);
-    case TK_ELIM: { next(); Tok *d = expect(TK_NAME); STerm *r = st(S_ELIM, t->line); r->name = tokstr(d); return r; }
-    case TK_LP: {   /* parenthesised term, or a pair (a , b) */
-        next(); STerm *r = parse_term();
-        if (peek()->k == TK_COMMA) { next(); STerm *q = st(S_PAIR, t->line); q->a = r; q->b = parse_term(); r = q; }
-        expect(TK_RP); return r; }
-    case TK_LB: return parse_system();
-    default: die("%s:%d: expected a term, found %s", file, t->line, tokname(t->k));
-    }
-    return NULL;
-}
 static int atom_ahead(void) {
     TokKind k = peek()->k;
     return k == TK_NAME || k == TK_NUM || k == TK_U || k == TK_ELIM || k == TK_LP || k == TK_LB || k == TK_LBRACE || k == TK_DOT || k == TK_I || k == TK_I0 || k == TK_I1 ||
@@ -207,38 +120,6 @@ static int atom_ahead(void) {
            k == TK_PATHP || k == TK_PATH || k == TK_PARTIAL || k == TK_TRANSP || k == TK_HCOMP || k == TK_COMP || k == TK_SUB || k == TK_INS || k == TK_OUTS ||
            k == TK_SIGMA || k == TK_FST || k == TK_SND || k == TK_GLUE || k == TK_GLUEEL || k == TK_UNGLUE;
 }
-
-static STerm *parse_app(void) {
-    STerm *f = parse_atom();
-    while (atom_ahead()) {
-        if ((peek()->k == TK_LP || peek()->k == TK_LBRACE) && binder_ahead()) break;
-        if (peek()->k == TK_LB && in_con_type) break;
-        int imp = peek()->k == TK_LBRACE;   /* f {e}: e supplies the next implicit argument (a plain argument when there is none) */
-        int irrel = peek()->k == TK_DOT;    /* Sigma A .B: the second component is irrelevant */
-        if (irrel) next();
-        STerm *a = parse_atom();
-        if (imp) a->imp = 1;
-        if (irrel) a->irrel = 1;
-        STerm *r = st(S_APP, f->line); r->a = f; r->b = a; f = r;
-    }
-    return f;
-}
-static STerm *parse_neg(void) {
-    Tok *t = peek();
-    if (t->k == TK_TILDE) { next(); STerm *r = st(S_INEG, t->line); r->a = parse_neg(); return r; }
-    return parse_app();
-}
-static STerm *parse_iand(void) {
-    STerm *a = parse_neg();
-    while (peek()->k == TK_AND) { Tok *t = next(); STerm *r = st(S_IAND, t->line); r->a = a; r->b = parse_neg(); a = r; }
-    return a;
-}
-static STerm *parse_ior(void) {
-    STerm *a = parse_iand();
-    while (peek()->k == TK_OR) { Tok *t = next(); STerm *r = st(S_IOR, t->line); r->a = a; r->b = parse_iand(); a = r; }
-    return a;
-}
-
 static STerm *wrap_pi(SBinder *b, int n, STerm *body) {
     for (int i = n - 1; i >= 0; i--) {
         STerm *r = st(S_PI, b[i].line); r->binders = &b[i]; r->nbinders = 1; r->a = body; body = r;
@@ -252,42 +133,196 @@ static STerm *wrap_lam(SBinder *b, int n, STerm *body) {
     return body;
 }
 
-static STerm *parse_term(void) {
-    Tok *t = peek();
-    if (t->k == TK_LAM) {
+/* ---- the parser on the machine (machine.h): each nonterminal a frame, its result through the register; the binders of a
+   group live in the frame that collects them, their number in a register of the parser's own ---- */
+static int pret_n;   /* parse_binders' count */
+typedef struct { MHdr h; STerm *r, *a, *f; SBinder *b; int n, cap, imp, irrel, start; Tok *t; } PF;
+#define F ((PF *)(mst.p + off))
+#define MRETS(x) MRET((Val *)(void *)(x))
+#define MST() ((STerm *)(void *)mret)
+static void term_step(size_t off);
+static void ior_step(size_t off);
+static void iand_step(size_t off);
+static void neg_step(size_t off);
+static void app_step(size_t off);
+static void atom_step(size_t off);
+static void system_step(size_t off);
+static void binders_step(size_t off);
+static void ppush(void (*step)(size_t)) { mpush(sizeof(PF), step); }
+static void binders_step(size_t off) {
+    MSTART
+    F->b = NULL; F->n = 0; F->cap = 0;
+    while (binder_ahead()) {
+        F->irrel = 0;
+        if (peek()->k == TK_DOT) { next(); F->irrel = 1; }   /* .(x : A): irrelevant (M16b) */
+        {   Tok *o = next(); F->imp = o->k == TK_LBRACE;   /* {x : A}: implicit */
+            if (F->irrel && F->imp) die("%s:%d: a binder cannot be both irrelevant and implicit", file, o->line); }
+        F->start = F->n;
+        while (peek()->k == TK_NAME) {
+            Tok *t = next();
+            if (F->n == F->cap) { F->cap = F->cap ? 2 * F->cap : 4; F->b = rrealloc(F->b, F->cap * sizeof(SBinder)); }
+            F->b[F->n].name = tokstr(t); F->b[F->n].ty = NULL; F->b[F->n].line = t->line; F->b[F->n].imp = F->imp; F->b[F->n].irrel = F->irrel; F->n++;
+        }
+        expect(TK_COLON);
+        MCALL(ppush(term_step));
+        for (int i = F->start; i < F->n; i++) F->b[i].ty = MST();
+        expect(F->imp ? TK_RBRACE : TK_RP);
+    }
+    pret_n = F->n; MRETS(F->b);
+    MFINISH
+}
+static void system_step(size_t off) {
+    MSTART
+    F->t = expect(TK_LB);
+    F->r = st(S_SYS, F->t->line); F->cap = 0;
+    while (peek()->k != TK_RB) {
+        if (F->r->nbr) expect(TK_BAR);
+        MCALL(ppush(ior_step)); F->a = MST();
+        expect(TK_ARROW);
+        MCALL(ppush(term_step));
+        if (F->r->nbr == F->cap) { F->cap = F->cap ? 2 * F->cap : 4; F->r->br = rrealloc(F->r->br, F->cap * sizeof(SBranch)); }
+        F->r->br[F->r->nbr].face = F->a; F->r->br[F->r->nbr].body = MST(); F->r->nbr++;
+    }
+    expect(TK_RB);
+    MRETS(F->r);
+    MFINISH
+}
+static void atom_step(size_t off) {
+    MSTART
+    F->t = peek();
+    switch (F->t->k) {   /* the atoms that parse nothing below them (no resume point inside this switch) */
+    case TK_NAME: { Tok *t = F->t; next(); if (t->n == 1 && t->s[0] == '_') MRETS(st(S_HOLE, t->line)); STerm *r = st(S_VAR, t->line); r->name = tokstr(t); MRETS(r); }
+    case TK_NUM: {
+        Tok *t = F->t; next(); STerm *r = st(S_NUM, t->line);
+        r->digits = tokstr(t);
+        errno = 0; r->num = strtoull(tokstr(t), NULL, 10);
+        if (errno == ERANGE) r->num = ULLONG_MAX;   /* only a level needs the machine word; a literal of a data type is a bignum */
+        MRETS(r); }
+    case TK_LEVEL: next(); MRETS(st(S_LEVEL, F->t->line));
+    case TK_LZERO: next(); MRETS(st(S_LZERO, F->t->line));
+    case TK_I: next(); MRETS(st(S_I, F->t->line));
+    case TK_I0: next(); MRETS(st(S_I0, F->t->line));
+    case TK_I1: next(); MRETS(st(S_I1, F->t->line));
+    case TK_PATHP: next(); MRETS(st(S_PATHP, F->t->line));
+    case TK_PATH: { next(); STerm *r = st(S_PATHP, F->t->line); r->lvl = 1; MRETS(r); }   /* lvl=1 marks the non-dependent sugar */
+    case TK_PARTIAL: next(); MRETS(st(S_PARTIAL, F->t->line));
+    case TK_TRANSP: next(); MRETS(st(S_TRANSP, F->t->line));
+    case TK_HCOMP: next(); MRETS(st(S_HCOMP, F->t->line));
+    case TK_COMP: next(); MRETS(st(S_COMP, F->t->line));
+    case TK_SUB: next(); MRETS(st(S_SUB, F->t->line));
+    case TK_INS: next(); MRETS(st(S_INS, F->t->line));
+    case TK_OUTS: next(); MRETS(st(S_OUTS, F->t->line));
+    case TK_SIGMA: next(); MRETS(st(S_SIGMA, F->t->line));
+    case TK_FST: next(); MRETS(st(S_FST, F->t->line));
+    case TK_SND: next(); MRETS(st(S_SND, F->t->line));
+    case TK_GLUE: next(); MRETS(st(S_GLUE, F->t->line));
+    case TK_GLUEEL: next(); MRETS(st(S_GLUEEL, F->t->line));
+    case TK_UNGLUE: next(); MRETS(st(S_UNGLUE, F->t->line));
+    case TK_ELIM: { next(); Tok *d = expect(TK_NAME); STerm *r = st(S_ELIM, F->t->line); r->name = tokstr(d); MRETS(r); }
+    case TK_LB: MBECOME(system_step);
+    case TK_U: case TK_LBRACE: case TK_LSUC: case TK_LMAX: case TK_LP: break;
+    default: die("%s:%d: expected a term, found %s", file, F->t->line, tokname(F->t->k));
+    }
+    if (F->t->k == TK_U) {
+        next(); F->r = st(S_U, F->t->line); F->r->lvl = 0;
+        if (peek()->k == TK_NUM) { Tok *n = next(); F->r->lvl = atoi(tokstr(n)); }
+        else if (peek()->k == TK_LBRACE) { next(); MCALL(ppush(term_step)); F->r->a = MST(); expect(TK_RBRACE); }   /* U {l}: a level expression */
+        MRETS(F->r);
+    }
+    if (F->t->k == TK_LBRACE) { next(); MCALL(ppush(term_step)); F->r = MST(); expect(TK_RBRACE); MRETS(F->r); }   /* {e}: a level argument, grouped */
+    if (F->t->k == TK_LSUC) { next(); F->r = st(S_LSUC, F->t->line); MCALL(ppush(atom_step)); F->r->a = MST(); MRETS(F->r); }
+    if (F->t->k == TK_LMAX) { next(); F->r = st(S_LMAX, F->t->line); MCALL(ppush(atom_step)); F->r->a = MST(); MCALL(ppush(atom_step)); F->r->b = MST(); MRETS(F->r); }
+    /* TK_LP: a parenthesised term, or a pair (a , b) */
+    next(); MCALL(ppush(term_step)); F->r = MST();
+    if (peek()->k == TK_COMMA) { next(); F->a = st(S_PAIR, F->t->line); F->a->a = F->r; MCALL(ppush(term_step)); F->a->b = MST(); F->r = F->a; }
+    expect(TK_RP); MRETS(F->r);
+    MFINISH
+}
+static void app_step(size_t off) {
+    MSTART
+    MCALL(ppush(atom_step)); F->f = MST();
+    while (atom_ahead()) {
+        if ((peek()->k == TK_LP || peek()->k == TK_LBRACE) && binder_ahead()) break;
+        if (peek()->k == TK_LB && in_con_type) break;
+        F->imp = peek()->k == TK_LBRACE;   /* f {e}: e supplies the next implicit argument (a plain argument when there is none) */
+        F->irrel = peek()->k == TK_DOT;    /* Sigma A .B: the second component is irrelevant */
+        if (F->irrel) next();
+        MCALL(ppush(atom_step));
+        {   STerm *a = MST();
+            if (F->imp) a->imp = 1;
+            if (F->irrel) a->irrel = 1;
+            STerm *r = st(S_APP, F->f->line); r->a = F->f; r->b = a; F->f = r; }
+    }
+    MRETS(F->f);
+    MFINISH
+}
+static void neg_step(size_t off) {
+    MSTART
+    F->t = peek();
+    if (F->t->k == TK_TILDE) { next(); F->r = st(S_INEG, F->t->line); MCALL(ppush(neg_step)); F->r->a = MST(); MRETS(F->r); }
+    MBECOME(app_step);
+    MFINISH
+}
+static void iand_step(size_t off) {
+    MSTART
+    MCALL(ppush(neg_step)); F->a = MST();
+    while (peek()->k == TK_AND) { Tok *t = next(); F->r = st(S_IAND, t->line); F->r->a = F->a; MCALL(ppush(neg_step)); F->r->b = MST(); F->a = F->r; }
+    MRETS(F->a);
+    MFINISH
+}
+static void ior_step(size_t off) {
+    MSTART
+    MCALL(ppush(iand_step)); F->a = MST();
+    while (peek()->k == TK_OR) { Tok *t = next(); F->r = st(S_IOR, t->line); F->r->a = F->a; MCALL(ppush(iand_step)); F->r->b = MST(); F->a = F->r; }
+    MRETS(F->a);
+    MFINISH
+}
+static void term_step(size_t off) {
+    MSTART
+    F->t = peek();
+    if (F->t->k == TK_LAM) {
         next();
-        SBinder *b = NULL; int n = 0, cap = 0;
+        F->b = NULL; F->n = 0; F->cap = 0;
         while (peek()->k == TK_NAME || (peek()->k == TK_LBRACE && peekat(1)->k == TK_NAME && peekat(2)->k == TK_RBRACE)) {
             int imp = peek()->k == TK_LBRACE; if (imp) next();   /* \{x}: an implicit lambda */
             Tok *x = next();
             if (imp) expect(TK_RBRACE);
-            if (n == cap) { cap = cap ? 2 * cap : 4; b = rrealloc(b, cap * sizeof(SBinder)); }
-            b[n].name = tokstr(x); b[n].ty = NULL; b[n].line = x->line; b[n].imp = imp; n++;
+            if (F->n == F->cap) { F->cap = F->cap ? 2 * F->cap : 4; F->b = rrealloc(F->b, F->cap * sizeof(SBinder)); }
+            F->b[F->n].name = tokstr(x); F->b[F->n].ty = NULL; F->b[F->n].line = x->line; F->b[F->n].imp = imp; F->n++;
         }
-        if (n == 0) die("%s:%d: lambda needs at least one binder", file, t->line);
+        if (F->n == 0) die("%s:%d: lambda needs at least one binder", file, F->t->line);
         expect(TK_ARROW);
-        return wrap_lam(b, n, parse_term());
+        MCALL(ppush(term_step));
+        MRETS(wrap_lam(F->b, F->n, MST()));
     }
-    if (t->k == TK_LET) {
-        next(); Tok *x = expect(TK_NAME); expect(TK_COLON);
-        STerm *r = st(S_LET, t->line); r->name = tokstr(x);
-        r->a = parse_term(); expect(TK_DEFEQ); r->b = parse_term(); expect(TK_IN); r->c = parse_term();
-        return r;
+    if (F->t->k == TK_LET) {
+        next(); { Tok *x = expect(TK_NAME); expect(TK_COLON); F->r = st(S_LET, F->t->line); F->r->name = tokstr(x); }
+        MCALL(ppush(term_step)); F->r->a = MST(); expect(TK_DEFEQ);
+        MCALL(ppush(term_step)); F->r->b = MST(); expect(TK_IN);
+        MCALL(ppush(term_step)); F->r->c = MST();
+        MRETS(F->r);
     }
     if (binder_ahead()) {
-        int n; SBinder *b = parse_binders(&n);
+        MCALL(ppush(binders_step)); F->b = (SBinder *)(void *)mret; F->n = pret_n;
         expect(TK_ARROW);
-        return wrap_pi(b, n, parse_term());
+        MCALL(ppush(term_step));
+        MRETS(wrap_pi(F->b, F->n, MST()));
     }
-    STerm *a = parse_ior();
+    MCALL(ppush(ior_step)); F->a = MST();
     if (peek()->k == TK_ARROW) {
         next();
-        STerm *body = parse_term();
-        SBinder *b = xalloc(sizeof *b); b->name = "_"; b->ty = a; b->line = a->line;
-        return wrap_pi(b, 1, body);
+        MCALL(ppush(term_step));
+        {   SBinder *b = xalloc(sizeof *b); b->name = "_"; b->ty = F->a; b->line = F->a->line;
+            MRETS(wrap_pi(b, 1, MST())); }
     }
-    return a;
+    MRETS(F->a);
+    MFINISH
 }
+#undef F
+/* the C entries (declarations call these; each runs the machine to its result) */
+static STerm *parse_term(void) { ppush(term_step); return (STerm *)(void *)mrun(); }
+static SBinder *parse_binders(int *n) { ppush(binders_step); SBinder *b = (SBinder *)(void *)mrun(); *n = pret_n; return b; }
+static STerm *parse_system(void) { ppush(system_step); return (STerm *)(void *)mrun(); }
 
 /* a data declaration after its 'data' token: name, parameters, index telescope, constructors */
 static void parse_data_decl(SDecl *d) {
