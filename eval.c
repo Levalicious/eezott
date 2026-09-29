@@ -63,24 +63,98 @@ Term *mk_ref_l(TKind k, int id, Term *lt) { Term *t = mk(k); t->n = id; t->a = r
 Term *mk_lval(LVal l) { Term *t = mk(T_LVAL); t->lvl = l; return t; }
 Term *mk_u_l(LVal l) { Term *u = mk_u(0); u->a = mk_lval(l); return u; }
 
-/* a generic map over a term's level values (embedded levels, and nothing else carries them) */
-static Term *map_levels(Term *t, LVal (*f)(LVal, void *), void *data) {
-    if (!t) return NULL;
-    Term *r;
-    switch (t->k) {
-    case T_LVAL: return mk_lval(f(t->lvl, data));
-    case T_LMETA: return mk_lval(f(lv_meta(t->n), data));   /* a meta as a term becomes an embedded value */
-    case T_VAR: case T_LEVEL: case T_LZERO: case T_INTERVAL: case T_I0: case T_I1: return t;
-    case T_SYS: {
-        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = map_levels(t->br[i].face, f, data); r->br[i].body = map_levels(t->br[i].body, f, data); }
-        return r;
-    }
-    default:
-        r = mk_term(t->k, map_levels(t->a, f, data), map_levels(t->b, f, data), map_levels(t->c, f, data), map_levels(t->d, f, data));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->pre = t->pre; r->lvl = t->lvl; r->imp = t->imp; r->num = t->num; return r;
+/* ---- iterative walks over terms ----
+   Terms nest as deep as the source (or the elaborator) builds them, so no walk over one recurses on the C stack: a walk
+   keeps its own stacks (the memory layer's). A node's children are its slots a b c d, or a system's faces and bodies in
+   order; a binder former has only its own slots (PI/SIGMA a b, LAM a, LET a b c) unless the walk asks for all four. A
+   child sits under one more binder than its node at PI.b, SIGMA.b, LAM.a and LET.c. Walks are reentrant (a visitor may
+   walk another term): frames address the stacks by index. */
+int term_nkids(Term *t, int all) {
+    if (t->k == T_SYS) return 2 * t->nbr;
+    if (all) return 4;
+    switch (t->k) { case T_PI: case T_SIGMA: return 2; case T_LAM: return 1; case T_LET: return 3; default: return 4; }
+}
+Term *term_kid(Term *t, int i) {
+    if (t->k == T_SYS) return i & 1 ? t->br[i >> 1].body : t->br[i >> 1].face;
+    return i == 0 ? t->a : i == 1 ? t->b : i == 2 ? t->c : t->d;
+}
+int term_kid_binds(Term *t, int i) {
+    switch (t->k) { case T_PI: case T_SIGMA: return i == 1; case T_LAM: return i == 0; case T_LET: return i == 2; default: return 0; }
+}
+typedef struct { Term *t; int d, i, n, spine; size_t kb; Term **ks; TWPost post; } TWFrame;
+static Stack twf = { NULL, 0, 0, sizeof(TWFrame) }, twk = { NULL, 0, 0, sizeof(Term *) };   /* Stacks of the memory layer */
+Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx) {
+    size_t fb = twf.n;
+    Term *cur = t; int cd = d;
+    for (;;) {
+        /* decide cur: a result for the top frame's children, or a frame of its own */
+        if (!cur) STACK_PUSH(&twk, Term *, NULL);
+        else {
+            TWDecide dc = {0};
+            int k = pre(cur, cd, ctx, &dc);
+            if (k == TW_DONE) STACK_PUSH(&twk, Term *, dc.r);
+            else {
+                TWFrame fr = { cur, cd, 0, k == TW_SPINE ? dc.nk : term_nkids(cur, all), k == TW_SPINE, twk.n, dc.ks, dc.post };
+                STACK_PUSH(&twf, TWFrame, fr);
+            }
+        }
+        /* advance: the top frame's next child, or its node from its children */
+        for (;;) {
+            if (twf.n == fb) return STACK_POP(&twk, Term *);
+            TWFrame *f = &STACK_TOP(&twf, TWFrame);
+            if (f->i < f->n) {
+                int i = f->i++;
+                if (f->spine) { cur = f->ks[i]; cd = f->d; } else { cur = term_kid(f->t, i); cd = f->d + term_kid_binds(f->t, i); }
+                break;
+            }
+            TWFrame fr = *f;
+            Term **kids = xalloc((fr.n + 1) * sizeof(Term *));   /* copied out: the callback may walk (and grow the stacks) */
+            memcpy(kids, &STACK_AT(&twk, Term *, fr.kb), fr.n * sizeof(Term *));
+            twk.n = fr.kb; twf.n--;
+            if (fr.spine) { cur = fr.post(fr.t, kids, fr.n, ctx); cd = fr.d; break; }   /* walked in the node's place */
+            STACK_PUSH(&twk, Term *, build(fr.t, kids, ctx));
+        }
     }
 }
+/* does any node satisfy the visitor (1: found, 0: look inside, -1: nothing inside)? preorder, as the recursion was */
+typedef struct { Term *t; int d; } TAItem;
+static Stack tast = { NULL, 0, 0, sizeof(TAItem) };
+int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx) {
+    size_t base = tast.n;
+    TAItem it0 = { t, d }; STACK_PUSH(&tast, TAItem, it0);
+    while (tast.n > base) {
+        TAItem it = STACK_POP(&tast, TAItem);
+        if (!it.t) continue;
+        int r = pre(it.t, it.d, ctx);
+        if (r > 0) { tast.n = base; return 1; }
+        if (r < 0) continue;
+        for (int i = term_nkids(it.t, all) - 1; i >= 0; i--) { TAItem c = { term_kid(it.t, i), it.d + term_kid_binds(it.t, i) }; STACK_PUSH(&tast, TAItem, c); }
+    }
+    return 0;
+}
+
+/* a generic map over a term's level values (embedded levels, and nothing else carries them) */
+typedef struct { LVal (*f)(LVal, void *); void *data; } MapLv;
+static int map_levels_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    MapLv *m = ctx; (void)d;
+    switch (t->k) {
+    case T_LVAL: o->r = mk_lval(m->f(t->lvl, m->data)); return TW_DONE;
+    case T_LMETA: o->r = mk_lval(m->f(lv_meta(t->n), m->data)); return TW_DONE;   /* a meta as a term becomes an embedded value */
+    case T_VAR: case T_LEVEL: case T_LZERO: case T_INTERVAL: case T_I0: case T_I1: o->r = t; return TW_DONE;
+    default: return TW_NODE;
+    }
+}
+static Term *map_levels_build(Term *t, Term **k, void *ctx) {
+    Term *r; (void)ctx;
+    if (t->k == T_SYS) {
+        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = k[2 * i]; r->br[i].body = k[2 * i + 1]; }
+        return r;
+    }
+    r = mk_term(t->k, k[0], k[1], k[2], k[3]);
+    r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->pre = t->pre; r->lvl = t->lvl; r->imp = t->imp; r->num = t->num; return r;
+}
+static Term *map_levels(Term *t, LVal (*f)(LVal, void *), void *data) { MapLv m = { f, data }; return term_walk(t, 0, 1, map_levels_pre, map_levels_build, &m); }
 static LVal f_hidden(LVal l, void *data) { return lv_subst(l, -1, *(LVal *)data); }
 Term *subst_hidden(Term *t, LVal L) { return map_levels(t, f_hidden, &L); }
 typedef struct { LVal *sol; int m0; } MetaSubst;
@@ -95,14 +169,8 @@ Term *subst_metas(Term *t, LVal *sol, int m0) {
     Term *r = map_levels(t, f_metas, &ms);
     return r;
 }
-int term_mentions_hidden(Term *t) {
-    if (!t) return 0;
-    switch (t->k) {
-    case T_LVAL: return lv_mentions_hidden(t->lvl);
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (term_mentions_hidden(t->br[i].face) || term_mentions_hidden(t->br[i].body)) return 1; return 0;
-    default: return term_mentions_hidden(t->a) || term_mentions_hidden(t->b) || term_mentions_hidden(t->c) || term_mentions_hidden(t->d);
-    }
-}
+static int mentions_hidden_pre(Term *t, int d, void *ctx) { (void)d; (void)ctx; return t->k == T_LVAL ? (lv_mentions_hidden(t->lvl) ? 1 : -1) : 0; }
+int term_mentions_hidden(Term *t) { return term_any(t, 0, 1, mentions_hidden_pre, NULL); }
 
 /* ---- globals taken at a level ---- */
 typedef struct { LVal l; void *inst; } LMemo;
@@ -184,87 +252,93 @@ int block_ncons(int d) { Data *D = &datas[d]; int K = 0; for (int i = 0; i < D->
 static int prefix_irr(int d, int i) { Data *D = &datas[d]; if (i < D->nparams) return 1; i -= D->nparams; if (i < D->nblock) { Data *M = &datas[D->block + i]; return !(M->hit || M->nidx > 0); } return 0; }
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d) { Term *t = mk(k); t->a = a; t->b = b; t->c = c; t->d = d; return t; }
 
-Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
-    if (!t) return NULL;
+/* the node construction of shift2 and subst_term (subst_term also keeps isi on the other formers) */
+static Term *shsub_build(Term *t, Term **k, int keep_isi) {
     Term *r;
     switch (t->k) {
-    case T_VAR:
-        if (t->n >= cut2) return mk_var(t->n + by2);
-        if (t->n >= cut1) return mk_var(t->n + by1);
-        return t;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return t;
-    case T_PI:  r = mk_pi(t->name, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1 + 1, by1, cut2 + 1, by2), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_LAM: r = mk_lam(t->name, shift2(t->a, cut1 + 1, by1, cut2 + 1, by2), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_SIGMA: r = mk_term(T_SIGMA, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1 + 1, by1, cut2 + 1, by2), NULL, NULL); r->name = t->name; return r;
-    case T_APP: return mk_app(shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1, by1, cut2, by2), t->irr);
-    case T_LET: return mk_let(t->name, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1, by1, cut2, by2),
-                              shift2(t->c, cut1 + 1, by1, cut2 + 1, by2), t->irr);
-    case T_SYS: {
+    case T_PI:  r = mk_pi(t->name, k[0], k[1], t->irr); r->isi = t->isi; r->imp = t->imp; return r;
+    case T_LAM: r = mk_lam(t->name, k[0], t->irr); r->isi = t->isi; r->imp = t->imp; return r;
+    case T_SIGMA: r = mk_term(T_SIGMA, k[0], k[1], NULL, NULL); r->name = t->name; return r;
+    case T_APP: if (!keep_isi) return mk_app(k[0], k[1], t->irr); break;
+    case T_LET: return mk_let(t->name, k[0], k[1], k[2], t->irr);
+    case T_SYS:
         r = mk(T_SYS); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = shift2(t->br[i].face, cut1, by1, cut2, by2); r->br[i].body = shift2(t->br[i].body, cut1, by1, cut2, by2); }
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = k[2 * i]; r->br[i].body = k[2 * i + 1]; }
         return r;
+    default: break;
     }
-    default:
-        r = mk_term(t->k, shift2(t->a, cut1, by1, cut2, by2), shift2(t->b, cut1, by1, cut2, by2),
-                    shift2(t->c, cut1, by1, cut2, by2), shift2(t->d, cut1, by1, cut2, by2));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
+    r = mk_term(t->k, k[0], k[1], k[2], k[3]);
+    r->n = t->n; r->irr = t->irr; r->name = t->name; if (keep_isi) r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
+}
+static int shsub_leaf(Term *t) {
+    switch (t->k) { case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return 1; default: return 0; }
+}
+typedef struct { int cut1, by1, cut2, by2; } Shift2;
+static int shift2_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    Shift2 *s = ctx;
+    if (t->k == T_VAR) {
+        o->r = t->n >= s->cut2 + d ? mk_var(t->n + s->by2) : t->n >= s->cut1 + d ? mk_var(t->n + s->by1) : t;
+        return TW_DONE;
     }
+    if (shsub_leaf(t)) { o->r = t; return TW_DONE; }
+    return TW_NODE;
+}
+static Term *shift2_build(Term *t, Term **k, void *ctx) { (void)ctx; return shsub_build(t, k, 0); }
+Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
+    Shift2 s = { cut1, by1, cut2, by2 };
+    return term_walk(t, 0, 0, shift2_pre, shift2_build, &s);
 }
 Term *shift(Term *t, int cut, int by) { return shift2(t, cut, by, cut, by); }
+typedef struct { int idx; Term *v; } SubstT;
+static int subst_term_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    SubstT *s = ctx; int idx = s->idx + d;
+    if (t->k == T_VAR) { o->r = t->n == idx ? s->v : t->n > idx ? mk_var(t->n - 1) : t; return TW_DONE; }
+    if (shsub_leaf(t)) { o->r = t; return TW_DONE; }
+    return TW_NODE;
+}
+static Term *subst_term_build(Term *t, Term **k, void *ctx) { (void)ctx; return shsub_build(t, k, 1); }
 Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
-    if (!t) return NULL;
-    Term *r;
-    switch (t->k) {
-    case T_VAR: if (t->n == idx) return v; if (t->n > idx) return mk_var(t->n - 1); return t;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return t;
-    case T_PI:  r = mk_pi(t->name, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_LAM: r = mk_lam(t->name, subst_term(t->a, idx + 1, v), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_SIGMA: r = mk_term(T_SIGMA, subst_term(t->a, idx, v), subst_term(t->b, idx + 1, v), NULL, NULL); r->name = t->name; return r;
-    case T_LET: return mk_let(t->name, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx + 1, v), t->irr);
-    case T_SYS: {
-        r = mk(T_SYS); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = subst_term(t->br[i].face, idx, v); r->br[i].body = subst_term(t->br[i].body, idx, v); }
-        return r;
-    }
-    default:
-        r = mk_term(t->k, subst_term(t->a, idx, v), subst_term(t->b, idx, v), subst_term(t->c, idx, v), subst_term(t->d, idx, v));
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
-    }
+    SubstT s = { idx, v };
+    return term_walk(t, 0, 0, subst_term_pre, subst_term_build, &s);
 }
 
-int term_eq(Term *a, Term *b) {
-    if (a == b) return 1;
-    if (!a || !b || a->k != b->k) return 0;
-    switch (a->k) {
-    case T_VAR: return a->n == b->n;
-    case T_U: return a->n == b->n && a->pre == b->pre && term_eq(a->a, b->a);
-    case T_LEVEL: return 1;
-    case T_LZERO: case T_LMETA: case T_META: return a->n == b->n;
-    case T_LSUC: return a->n == b->n && term_eq(a->a, b->a);
-    case T_DEF: case T_DATA: case T_CON: case T_ELIM: return a->n == b->n && term_eq(a->a, b->a);
-    case T_NUM: return a->n == b->n && term_eq(a->a, b->a) && bn_cmp(a->num, b->num) == 0;
-    case T_LVAL: return lv_eq(a->lvl, b->lvl);
-    case T_INTERVAL: case T_I0: case T_I1: return 1;
-    case T_SYS:
-        if (a->nbr != b->nbr) return 0;
-        for (int i = 0; i < a->nbr; i++) if (!term_eq(a->br[i].face, b->br[i].face) || !term_eq(a->br[i].body, b->br[i].body)) return 0;
-        return 1;
-    default: return term_eq(a->a, b->a) && term_eq(a->b, b->b) && term_eq(a->c, b->c) && term_eq(a->d, b->d);
+typedef struct { Term *a, *b; } TPair;
+static Stack tpst = { NULL, 0, 0, sizeof(TPair) };
+static void tp_push(Term *a, Term *b) { TPair p = { a, b }; STACK_PUSH(&tpst, TPair, p); }
+int term_eq(Term *a0, Term *b0) {
+    size_t base = tpst.n;
+    tp_push(a0, b0);
+    while (tpst.n > base) {
+        TPair p = STACK_POP(&tpst, TPair); Term *a = p.a, *b = p.b;
+        if (a == b) continue;
+        if (!a || !b || a->k != b->k) goto no;
+        switch (a->k) {
+        case T_VAR: if (a->n != b->n) goto no; break;
+        case T_U: if (!(a->n == b->n && a->pre == b->pre)) goto no; tp_push(a->a, b->a); break;
+        case T_LEVEL: break;
+        case T_LZERO: case T_LMETA: case T_META: if (a->n != b->n) goto no; break;
+        case T_LSUC: if (a->n != b->n) goto no; tp_push(a->a, b->a); break;
+        case T_DEF: case T_DATA: case T_CON: case T_ELIM: if (a->n != b->n) goto no; tp_push(a->a, b->a); break;
+        case T_NUM: if (a->n != b->n || bn_cmp(a->num, b->num) != 0) goto no; tp_push(a->a, b->a); break;
+        case T_LVAL: if (!lv_eq(a->lvl, b->lvl)) goto no; break;
+        case T_INTERVAL: case T_I0: case T_I1: break;
+        case T_SYS:
+            if (a->nbr != b->nbr) goto no;
+            for (int i = a->nbr - 1; i >= 0; i--) { tp_push(a->br[i].body, b->br[i].body); tp_push(a->br[i].face, b->br[i].face); }
+            break;
+        default: tp_push(a->d, b->d); tp_push(a->c, b->c); tp_push(a->b, b->b); tp_push(a->a, b->a); break;
+        }
     }
+    return 1;
+no:
+    tpst.n = base; return 0;
 }
-int term_mentions_var(Term *t, int idx) {
-    if (!t) return 0;
-    switch (t->k) {
-    case T_VAR: return t->n == idx;
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return 0;
-    case T_PI: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx + 1);
-    case T_LAM: return term_mentions_var(t->a, idx + 1);
-    case T_SIGMA: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx + 1);
-    case T_LET: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx) || term_mentions_var(t->c, idx + 1);
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (term_mentions_var(t->br[i].face, idx) || term_mentions_var(t->br[i].body, idx)) return 1; return 0;
-    default: return term_mentions_var(t->a, idx) || term_mentions_var(t->b, idx) || term_mentions_var(t->c, idx) || term_mentions_var(t->d, idx);
-    }
+static int mentions_var_pre(Term *t, int d, void *ctx) {
+    int idx = *(int *)ctx + d;
+    if (t->k == T_VAR) return t->n == idx ? 1 : -1;
+    switch (t->k) { case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return -1; default: return 0; }
 }
+int term_mentions_var(Term *t, int idx) { return term_any(t, 0, 0, mentions_var_pre, &idx); }
 
 /* printing with names: names[] indexed by de Bruijn level, depth = number bound */
 /* a closed constructor spine of a type shaped like the naturals: suc (suc (... zero)); returns 1 and its value */
@@ -629,22 +703,6 @@ Val *vupre(int l) { return vupre_l(lv_const(l)); }
 Val *vl(LVal l) { Val *v = mkval(V_L); v->lvl = l; return v; }
 Val *vlvar(int level) { return vl(lv_var(level)); }
 Val *vlevel(void) { return mkval(V_LEVEL); }
-LVal eval_level(Env *env, Term *t) {
-    switch (t->k) {
-    case T_LZERO: return lv_const(t->n);
-    case T_LVAL: return t->lvl;
-    case T_LMETA: return lv_meta(t->n);
-    case T_LSUC: return lv_add(eval_level(env, t->a), t->n);
-    case T_LMAX: return lv_max(eval_level(env, t->a), eval_level(env, t->b));
-    default: {
-        Val *v = eval(env, t);
-        if (v->k == V_L) return v->lvl;
-        if (v->k == V_NEU && v->h == H_VAR && v->args.n == 0) return lv_var(v->n);
-        die("internal: a level evaluated to a non-level");
-        return lv_const(0);
-    }
-    }
-}
 Term *quote_level(int depth, LVal l) {
     Term *r = NULL;
     for (int i = 0; i < l.n; i++) {
@@ -758,7 +816,6 @@ static Val *elim_apply_list(int data, VList *args);
 static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
 static Val *vsys(VBranch *br, int n);
-static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 /* a term's heads only, for the tripwire's diagnostic: names of globals, binders as a backslash, variables by index */
 static void term_heads(FILE *f, Term *t, int d) {
     if (!t) { fputs("_", f); return; }
@@ -790,7 +847,6 @@ static Val *elim_of_branch(Val *b, void *data) { VList a2 = vl_copy((VList *)dat
 /* the eliminator through a formal composition (a normal form on indexed families, and on HITs later):
      elim D p P m idx (hcomp A phi u u0) = comp (\k. P idx (hfill A phi u u0 k)) phi (\k. elim .. (u k)) (elim .. u0)   */
 static Val *apply_to(Val *b, void *E) { return vapp((Val *)E, b, 0); }
-static Val *elim_hcomp(int data, VList *args);
 /* ---- systems (partial elements) ---- */
 static Val *vsys(VBranch *br, int n) {
     for (int i = 0; i < n; i++) if (iv_is_one(br[i].phi->iv)) return br[i].v;   /* a total branch: the element itself */
@@ -869,6 +925,13 @@ static void mpush_subst_env(Env *e, Env **dst, int lv, IVal s);
 static void mpush_conv(int depth, Val *a, Val *b);
 static void mpush_quote(int depth, Val *v);
 static void mpush_vsys_at(Val *sys, const Face *f);
+static void mpush_vglue(Val *A, Val *phi, Val *Te);
+static void mpush_vtransp(Val *line, Val *phi, Val *u0);
+static void mpush_vhcomp(Val *A, Val *phi, Val *u, Val *u0);
+static void mpush_vunglue(Val *A, Val *phi, Val *Te, Val *b);
+static void mpush_vouts(Val *A, Val *phi, Val *u, Val *s);
+static void mpush_elim_hcomp(int data, VList args);
+static void mpush_vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data);
 static void mpush_clofn(Val *(*fn)(void *, Val *), void *data, Val *arg);
 static void mpush_subst(Val *v, int lv, IVal s);
 static void mpush_restrict(Val *v, const Face *f);
@@ -1072,21 +1135,71 @@ static Term *eval_sub(Term *t, int i) {
     if (t->k == T_UNGLUE) { Term *o[4] = { t->b, t->c, t->d, t->a }; return o[i]; }   /* vunglue's argument order */
     Term *o[4] = { t->a, t->b, t->c, t->d }; return o[i];
 }
+#undef F
+/* a level term's value: sums and maxima of levels on the machine, anything else evaluated to a level value (a context
+   variable, a definition's level). The value travels boxed through the return register. */
+typedef struct { MHdr h; Env *env; Term *t; LVal x; } LevF;
+static void eval_level_step(size_t off);
+static void mpush_eval_level(Env *env, Term *t) { LevF *f = mpush(sizeof *f, eval_level_step); f->env = env; f->t = t; }
+static Val *lvbox(LVal l) { LVal *p = xalloc(sizeof *p); *p = l; return (Val *)(void *)p; }
+#define LVUNBOX(v) (*(LVal *)(void *)(v))
+#define F ((LevF *)(mst.p + off))
+static void eval_level_step(size_t off) {
+    MSTART
+    switch (F->t->k) {
+    case T_LZERO: MRET(lvbox(lv_const(F->t->n)));
+    case T_LVAL: MRET(lvbox(F->t->lvl));
+    case T_LMETA: MRET(lvbox(lv_meta(F->t->n)));
+    default: break;
+    }
+    if (F->t->k == T_LSUC) { MCALL(mpush_eval_level(F->env, F->t->a)); MRET(lvbox(lv_add(LVUNBOX(mret), F->t->n))); }
+    if (F->t->k == T_LMAX) {
+        MCALL(mpush_eval_level(F->env, F->t->a)); F->x = LVUNBOX(mret);
+        MCALL(mpush_eval_level(F->env, F->t->b)); MRET(lvbox(lv_max(F->x, LVUNBOX(mret))));
+    }
+    MCALL(mpush_eval(F->env, F->t));
+    { Val *v = mret;
+      if (v->k == V_L) MRET(lvbox(v->lvl));
+      if (v->k == V_NEU && v->h == H_VAR && v->args.n == 0) MRET(lvbox(lv_var(v->n)));
+      die("internal: a level evaluated to a non-level"); }
+    MFINISH
+}
+#undef F
+LVal eval_level(Env *env, Term *t) { mpush_eval_level(env, t); return LVUNBOX(mrun()); }
+#define F ((EvalF *)(mst.p + off))
+/* a former taken at a level (a universe, a global): its level term evaluated, then the value */
+static void eval_lvl_step(size_t off) {
+    MSTART
+    { Term *t = F->t; int lk = t->k == T_LZERO || t->k == T_LSUC || t->k == T_LMAX || t->k == T_LMETA;
+      MCALL(mpush_eval_level(F->env, lk ? t : t->a)); }
+    { LVal l = LVUNBOX(mret); Term *t = F->t; Val *v;
+      switch (t->k) {
+      case T_U: MRET(t->pre ? vupre_l(l) : vu_l(l));
+      case T_DEF: v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = l; MRET(v);
+      case T_DATA: v = mkval(V_DATA); v->n = t->n; v->lvl = l; MRET(v);
+      case T_CON: v = mkval(V_CON); v->n = t->n; v->lvl = l; MRET(v);
+      case T_NUM: MRET(vnum(t->n, l, t->num));
+      case T_ELIM: v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = l; MRET(v);
+      default: MRET(vl(l));
+      } }
+    MFINISH
+}
 static void eval_step(size_t off) {
     Term *t = F->t; Env *env = F->env;
     switch (t->k) {
     case T_VAR: MRET(env_get(env, t->n));
-    case T_U: { LVal l = t->a ? eval_level(env, t->a) : lv_const(t->n); MRET(t->pre ? vupre_l(l) : vu_l(l)); }
+    case T_U: if (t->a) MBECOME(eval_lvl_step); MRET(t->pre ? vupre_l(lv_const(t->n)) : vu_l(lv_const(t->n)));
     case T_LEVEL: MRET(vlevel());
-    case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: MRET(vl(eval_level(env, t)));
+    case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: MBECOME(eval_lvl_step);
     case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->clo.env = env; v->clo.t = t->a; MRET(v); }
     case T_DEF: {   /* rigid: a definition application (H_DEF), unfolded where a canonical form is needed */
-        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v);
+        if (t->a) MBECOME(eval_lvl_step);
+        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = lv_const(0); MRET(v);
     }
-    case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
-    case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
-    case T_NUM: MRET(vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num));
-    case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
+    case T_DATA: { if (t->a) MBECOME(eval_lvl_step); Val *v = mkval(V_DATA); v->n = t->n; v->lvl = lv_const(0); MRET(v); }
+    case T_CON: { if (t->a) MBECOME(eval_lvl_step); Val *v = mkval(V_CON); v->n = t->n; v->lvl = lv_const(0); MRET(v); }
+    case T_NUM: if (t->a) MBECOME(eval_lvl_step); MRET(vnum(t->n, lv_const(0), t->num));
+    case T_ELIM: { if (t->a) MBECOME(eval_lvl_step); Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = lv_const(0); MRET(v); }
     case T_LVAL: MRET(vl(t->lvl));
     case T_META: { Meta *m = &tmetas[t->n]; if (m->sol) MRET(m->sol); Val *v = mkval(V_NEU); v->h = H_META; v->n = t->n; MRET(v); }
     case T_INTERVAL: MRET(vinterval());
@@ -1107,6 +1220,12 @@ static void eval_sub_step(size_t off) {
         MCALL(mpush_eval(F->env, eval_sub(F->t, F->i)));
         F->v[F->i] = mret;
     }
+    if (F->t->k == T_GLUE) {
+        MCALL(mpush_vglue(F->v[0], F->v[1], F->v[2])); F->v[3] = mret;
+        if (F->v[3]->k != V_GLUE) MRET(F->v[3]);
+        if (!F->t->d) { F->v[3]->lvl = lv_const(F->t->n); MRET(F->v[3]); }
+        MCALL(mpush_eval_level(F->env, F->t->d)); F->v[3]->lvl = LVUNBOX(mret); MRET(F->v[3]);
+    }
     { Term *t = F->t; Val **v = F->v; Env *env = F->env;
       switch (t->k) {
       case T_PI: { Val *r = mkval(V_PI); r->name = t->name; r->irr = t->irr; r->isi = t->isi; r->imp = t->imp; r->dom = v[0]; r->clo.env = env; r->clo.t = t->b; MRET(r); }
@@ -1118,12 +1237,11 @@ static void eval_sub_step(size_t off) {
       case T_PATHP: { Val *r = mkval(V_PATHP); r->a = v[0]; r->b = v[1]; r->c = v[2]; MRET(r); }
       case T_PARTIAL: { Val *r = mkval(V_PARTIAL); r->a = v[0]; r->b = v[1]; MRET(r); }
       case T_SUB: { Val *r = mkval(V_SUB); r->a = v[0]; r->b = v[1]; r->c = v[2]; MRET(r); }
-      case T_TRANSP: MRET(vtransp(v[0], v[1], v[2]));
-      case T_HCOMP: MRET(vhcomp(v[0], v[1], v[2], v[3]));
-      case T_GLUE: { Val *g = vglue(v[0], v[1], v[2]); if (g->k == V_GLUE) g->lvl = t->d ? eval_level(env, t->d) : lv_const(t->n); MRET(g); }
+      case T_TRANSP: { Val *a = v[0], *b = v[1], *c = v[2]; MTAIL(mpush_vtransp(a, b, c)); }
+      case T_HCOMP: { Val *a = v[0], *b = v[1], *c = v[2], *d = v[3]; MTAIL(mpush_vhcomp(a, b, c, d)); }
       case T_GLUEEL: MRET(vglueel(v[0], v[1], v[2]));
-      case T_UNGLUE: MRET(vunglue(v[0], v[1], v[2], v[3]));
-      case T_OUTS: MRET(vouts(v[0], v[1], v[2], v[3]));
+      case T_UNGLUE: { Val *a = v[0], *b = v[1], *c = v[2], *d = v[3]; MTAIL(mpush_vunglue(a, b, c, d)); }
+      case T_OUTS: { Val *a = v[0], *b = v[1], *c = v[2], *d = v[3]; MTAIL(mpush_vouts(a, b, c, d)); }
       case T_APP: { Val *f = v[0], *a = v[1]; int irr = t->irr; MTAIL(mpush_vapp(f, a, irr)); }
       case T_PAPP: { Val *p = v[0], *r = v[1], *x = v[2], *y = v[3]; MTAIL(mpush_vpapp(p, r, x, y)); }
       case T_FST: { Val *p = v[0]; MTAIL(mpush_vproj(p, 1)); }
@@ -1312,7 +1430,7 @@ static void elim_force_step(size_t off) {
       if (F->v->args.n > arity) goto applied; }
     elim_lvl = F->v->lvl;
     MCALL(mpush_elim_reduce(F->v->n, &F->v->args)); F->r = mret;
-    if (!F->r) F->r = elim_hcomp(F->v->n, &F->v->args);
+    if (!F->r) { MCALL(mpush_elim_hcomp(F->v->n, F->v->args)); F->r = mret; }
     if (!F->r) { F->v->defer = 0; meta_blocked |= F->save; MRET(F->v); }
     goto done;
 applied:   /* an application of the elimination's result: the parent's reduction, then this entry */
@@ -1492,7 +1610,8 @@ static void elim_reduce_go_step(size_t off) {
     F->bsys = mret;
     { VList base = vl_copy(F->args); base.n = F->np + F->nb + F->K + F->D->nidx;
       VList *bp = xalloc(sizeof *bp); *bp = base;
-      F->img = vsys_map(F->bsys, elim_of_branch, bp); }
+      MCALL(mpush_vsys_map(F->bsys, elim_of_branch, bp)); }
+    F->img = mret;
     { Val **iv = xalloc((F->D->nidx + 1) * sizeof(Val *));
       for (int j = 0; j < F->D->nidx; j++) iv[j] = F->args->a[F->np + F->nb + F->K + j].v;
       MCALL(mpush_motive_applied(F->data, *F->args, iv)); }
@@ -1500,7 +1619,7 @@ static void elim_reduce_go_step(size_t off) {
     MCALL(mpush_vapp(F->P, F->target, 0));
     { IVal phi = iv_zero();
       if (F->bsys->k == V_SYS) { for (int i = 0; i < F->bsys->nbr; i++) phi = iv_or(phi, F->bsys->br[i].phi->iv); } else phi = iv_one();
-      MRET(vouts(mret, vi(phi), F->img, F->res)); }
+      { Val *A = mret, *img = F->img, *res = F->res; MTAIL(mpush_vouts(A, vi(phi), img, res)); } }
     MFINISH
 }
 #undef F
@@ -1648,23 +1767,25 @@ static void subst_clo_kind_step(size_t off) {
     MRET(F->r);
     MFINISH
 }
+/* a Kan head's operation on its substituted parts */
+static void mpush_head_op(int h, Val **x) {
+    if (h == H_TRANSP) mpush_vtransp(x[0], x[1], x[2]);
+    else if (h == H_HCOMP) mpush_vhcomp(x[0], x[1], x[2], x[3]);
+    else if (h == H_OUTS) mpush_vouts(x[0], x[1], x[2], x[3]);
+    else mpush_vunglue(x[0], x[1], x[2], x[3]);
+}
 static void subst_parts_step(size_t off) {
     MSTART
     for (F->i = 0; F->i < subst_nparts(F->v); F->i++) { MCALL(mpush_subst(subst_part(F->v, F->i), F->lv, F->s)); F->x[F->i] = mret; }
+    if (F->v->k == V_GLUE) { MCALL(mpush_vglue(F->x[0], F->x[1], F->x[2])); { Val *g = mret; if (g->k == V_GLUE) g->lvl = F->v->lvl; MRET(g); } }
+    if (F->v->k == V_NEU) { MCALL(mpush_head_op(F->v->h, F->x)); F->head = mret; MBECOME(subst_args_step); }
     { Val *v = F->v, **x = F->x;
       switch (v->k) {
       case V_PATHP: { Val *r = mkval(V_PATHP); r->a = x[0]; r->b = x[1]; r->c = x[2]; MRET(r); }
       case V_PARTIAL: { Val *r = mkval(V_PARTIAL); r->a = x[0]; r->b = x[1]; MRET(r); }
       case V_SUB: { Val *r = mkval(V_SUB); r->a = x[0]; r->b = x[1]; r->c = x[2]; MRET(r); }
       case V_INS: { Val *r = mkval(V_INS); r->a = x[0]; MRET(r); }
-      case V_GLUE: { Val *g = vglue(x[0], x[1], x[2]); if (g->k == V_GLUE) g->lvl = v->lvl; MRET(g); }
       case V_GLUEEL: MRET(vglueel(x[0], x[1], x[2]));
-      case V_NEU:
-          if (v->h == H_TRANSP) F->head = vtransp(x[0], x[1], x[2]);
-          else if (v->h == H_HCOMP) F->head = vhcomp(x[0], x[1], x[2], x[3]);
-          else if (v->h == H_OUTS) F->head = vouts(x[0], x[1], x[2], x[3]);
-          else F->head = vunglue(x[0], x[1], x[2], x[3]);
-          MBECOME(subst_args_step);
       default: MRET(v);
       } }
     MFINISH
@@ -1779,7 +1900,6 @@ static void vsys_map_step(size_t off) {
     MFINISH
 }
 #undef F
-static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data) { mpush_vsys_map(sys, fn, data); return mrun(); }
 
 /* a system at a face: the first branch that holds there, restricted to it */
 typedef struct { MHdr h; Val *sys; const Face *f; } VsysAtF;
@@ -1797,6 +1917,12 @@ static void vsys_at_step(size_t off) {
 }
 #undef F
 Val *vsys_at(Val *sys, const Face *f) { mpush_vsys_at(sys, f); return mrun(); }
+/* vsys_at on no face: the branch that holds everywhere (a lookup: nothing to restrict) */
+static Val *vsys_total(Val *sys) {
+    if (sys->k != V_SYS) return sys;
+    for (int i = 0; i < sys->nbr; i++) if (iv_is_one(sys->br[i].phi->iv)) return sys->br[i].v;
+    return NULL;
+}
 
 /* cubical subtypes: outS (inS x) = x, and outS s = u when phi holds */
 typedef struct { MHdr h; Val *A, *phi, *u, *s; } VoutsF;
@@ -1805,7 +1931,7 @@ static void mpush_vouts(Val *A, Val *phi, Val *u, Val *s) { VoutsF *f = mpush(si
 #define F ((VoutsF *)(mst.p + off))
 static void vouts_step(size_t off) {
     MSTART
-    if (iv_is_one(F->phi->iv)) { Val *t = vsys_at(F->u, NULL); if (t) MRET(t); }
+    if (iv_is_one(F->phi->iv)) { Val *t = vsys_total(F->u); if (t) MRET(t); }
     MFORCE(F->s);   /* through a rigid definition application (the H_DEF plan): outS s with s := inS a is a, not a normal form (M20 F4 found it) */
     if (F->s->k == V_INS) MRET(F->s->a);
     { Val *v = mkval(V_NEU); v->h = H_OUTS; v->a = F->A; v->b = F->phi; v->c = F->u; v->dom = F->s; MRET(v); }
@@ -1840,7 +1966,6 @@ static void elim_hcomp_step(size_t off) {
     MFINISH
 }
 #undef F
-static Val *elim_hcomp(int data, VList *args) { mpush_elim_hcomp(data, *args); return mrun(); }
 
 /* the natives on numbers (natfn) */
 typedef struct { MHdr h; NatNative *nn; Val *arg, *a, *b; } NatfnF;
@@ -2012,7 +2137,7 @@ static void native_step_step(size_t off) {
     if (F->nt->code == N_SUBST) { Val *v = NC(0); int lv = F->nt->i1; IVal iv = F->arg->iv; MTAIL(mpush_subst(v, lv, iv)); }   /* λi. v[F := i] */
     if (F->nt->code == N_GLUE_T) {        /* λi. fst (Te_i), total on its face */
         MCALL(mpush_subst(NC(0), F->nt->i1, F->arg->iv));
-        { Val *Te = vsys_at(mret, NULL);
+        { Val *Te = vsys_total(mret);
           if (!Te) die("internal: Glue: the glued type is used outside its face");
           MTAIL(mpush_vproj(Te, 1)); }
     }
@@ -2348,7 +2473,7 @@ static void vhcomp_step(size_t off) {
     MSTART
     if (iv_is_one(F->phi->iv)) {
         MCALL(mpush_vapp(F->u, ione(), 0)); F->res = mret; MFORCE(F->res);
-        { Val *t = vsys_at(F->res, NULL); if (!t) die("internal: total system without a total branch"); MRET(t); }
+        { Val *t = vsys_total(F->res); if (!t) die("internal: total system without a total branch"); MRET(t); }
     }
     MFORCE(F->A); MFORCE(F->u0);
     if (F->A->k == V_NEU && F->A->h == H_META) die("hcomp at a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
@@ -2383,7 +2508,8 @@ static void vhcomp_step(size_t off) {
         { Caps *c = xalloc(sizeof *c); *c = (Caps){ 0, { F->u } }; c->l = F->A->lvl;
           Val **phis = xalloc(sizeof(Val *)); phis[0] = F->phi;
           MCALL(mpush_vsys_faces(1, phis, hcompU_body, c)); }
-        { Val *g = vglue(F->u0, F->phi, mret); if (g->k == V_GLUE) g->lvl = F->A->lvl; MRET(g); }
+        MCALL(mpush_vglue(F->u0, F->phi, mret));
+        { Val *g = mret; if (g->k == V_GLUE) g->lvl = F->A->lvl; MRET(g); }
     }
     if (F->A->k != V_DATA) MRET(neu_hcomp(F->A, F->phi, F->u, F->u0));
     F->D = data_at(F->A->n, F->A->lvl);
@@ -2436,13 +2562,13 @@ static void mpush_builtin_at(const char *name, LVal L) {
 typedef struct { MHdr h; Val *A, *phi, *Te; } VglueF;
 static void vglue_step(size_t off) {
     VglueF *f = (VglueF *)(mst.p + off);
-    if (iv_is_one(f->phi->iv)) { Val *t = vsys_at(f->Te, NULL); if (t) { mpop(off); mpush_vproj(t, 1); return; } }
+    if (iv_is_one(f->phi->iv)) { Val *t = vsys_total(f->Te); if (t) { mpop(off); mpush_vproj(t, 1); return; } }
     Val *v = mkval(V_GLUE); v->a = f->A; v->b = f->phi; v->c = f->Te; mret = v; mpop(off);
 }
 static void mpush_vglue(Val *A, Val *phi, Val *Te) { VglueF *f = mpush(sizeof *f, vglue_step); f->A = A; f->phi = phi; f->Te = Te; }
 Val *vglue(Val *A, Val *phi, Val *Te) { mpush_vglue(A, phi, Te); return mrun(); }
 Val *vglueel(Val *ts, Val *a, Val *G) {
-    if (G->k != V_GLUE) { Val *t = vsys_at(ts, NULL); if (!t) die("internal: glue on a total face without a total element"); return t; }
+    if (G->k != V_GLUE) { Val *t = vsys_total(ts); if (!t) die("internal: glue on a total face without a total element"); return t; }
     Val *v = mkval(V_GLUEEL); v->a = ts; v->b = a; v->c = G; return v;
 }
 
@@ -2454,7 +2580,7 @@ static void mpush_vunglue(Val *A, Val *phi, Val *Te, Val *b) { VunglueF *f = mpu
 static void vunglue_step(size_t off) {
     MSTART
     if (iv_is_one(F->phi->iv)) {
-        Val *t = vsys_at(F->Te, NULL);
+        Val *t = vsys_total(F->Te);
         if (t) {
             MCALL(mpush_vproj(t, 2)); MCALL(mpush_vproj(mret, 1));
             { Val *e = mret, *b = F->b; MTAIL(mpush_vapp(e, b, 0)); }
@@ -2506,7 +2632,7 @@ static void glue_tr_body_step(size_t off) {
     if (F->k == 0) { MR(1, ((TrSides *)F->data)->ungl); { Val *g = X(1), *i = X(0); MTAIL(mpush_vapp(g, i, 0)); } }
     MR(1, ((TrSides *)F->data)->Teg);
     MCALL(mpush_subst(X(1), trsides_var(F->data), X(0)->iv));
-    X(2) = vsys_at(mret, NULL);
+    X(2) = vsys_total(mret);
     if (!X(2)) die("internal: Glue transport: the glued type is not total on its face");
     MCALL(mpush_vproj(X(2), 2)); MCALL(mpush_vproj(mret, 1)); X(3) = mret;   /* equiv_fun */
     MR(4, ((TrSides *)F->data)->tf);
@@ -2527,7 +2653,7 @@ static void pe_body_step(size_t off) {
 static void glue_fiber_body_step(size_t off) {
     MSTART
     MR(0, ((FibData *)F->data)->Te1);
-    X(0) = vsys_at(X(0), NULL);
+    X(0) = vsys_total(X(0));
     if (!X(0)) die("internal: Glue transport: the glued type is not total at i1 on its face");
     MCALL(mpush_vproj(X(0), 1)); X(1) = mret;                  /* T1 */
     MCALL(mpush_vproj(X(0), 2)); X(2) = mret;                  /* w */
@@ -2555,7 +2681,7 @@ static void glue_a1p_body_step(size_t off) {
     MSTART
     if (F->k == 1) { Val *a1 = ((A1pData *)F->data)->a1; const Face *f = F->f; MTAIL(mpush_restrict(a1, f)); }
     MR(0, ((A1pData *)F->data)->alphas); MR(1, ((A1pData *)F->data)->ts); MR(2, ((A1pData *)F->data)->Te1);
-    X(0) = vsys_at(X(0), NULL); X(1) = vsys_at(X(1), NULL); X(2) = vsys_at(X(2), NULL);
+    X(0) = vsys_total(X(0)); X(1) = vsys_total(X(1)); X(2) = vsys_total(X(2));
     if (!X(0) || !X(1) || !X(2)) die("internal: Glue transport: partial fibre not total on its face");
     MCALL(mpush_vproj(X(2), 2)); MCALL(mpush_vproj(mret, 1)); MCALL(mpush_vapp(mret, X(1), 0)); X(3) = mret;   /* x */
     MR(4, ((A1pData *)F->data)->j); MR(5, ((A1pData *)F->data)->a1);
@@ -2566,7 +2692,7 @@ static void glue_a1p_body_step(size_t off) {
 static void glue_hf_body_step(size_t off) {
     MSTART
     MR(0, ((HfData *)F->data)->Te);
-    X(0) = vsys_at(X(0), NULL); if (!X(0)) die("internal: Glue hcomp: the glued type is not total on its face");
+    X(0) = vsys_total(X(0)); if (!X(0)) die("internal: Glue hcomp: the glued type is not total on its face");
     MCALL(mpush_vproj(X(0), 1)); X(1) = mret;
     MR(2, ((HfData *)F->data)->psi); MR(3, ((HfData *)F->data)->u); MR(4, ((HfData *)F->data)->u0);
     X(5) = vnative(N_FILL, 1, 0, 0, 4, X(1), X(2), X(3), X(4));
@@ -2583,10 +2709,10 @@ static void glue_hc_body_step(size_t off) {
         { Val *A = X(1), *phi = X(2), *Te = X(3), *b = mret; MTAIL(mpush_vunglue(A, phi, Te, b)); }
     }
     MR(1, ((HcData *)F->data)->Te);
-    X(1) = vsys_at(X(1), NULL); if (!X(1)) die("internal: Glue hcomp: the glued type is not total on its face");
+    X(1) = vsys_total(X(1)); if (!X(1)) die("internal: Glue hcomp: the glued type is not total on its face");
     MR(2, ((HcData *)F->data)->tfs);
     MCALL(mpush_vapp(X(2), X(0), 0));
-    X(3) = vsys_at(mret, NULL); if (!X(3)) die("internal: Glue hcomp: filler not total on its face");
+    X(3) = vsys_total(mret); if (!X(3)) die("internal: Glue hcomp: filler not total on its face");
     MCALL(mpush_vproj(X(1), 2)); MCALL(mpush_vproj(mret, 1));
     { Val *e = mret, *t = X(3); MTAIL(mpush_vapp(e, t, 0)); }
     MFINISH

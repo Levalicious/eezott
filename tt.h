@@ -162,6 +162,17 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2); /* vars in [cut1,cu
 int term_eq(Term *a, Term *b);
 void term_print(FILE *f, Term *t, const char **names, int depth);
 int term_mentions_var(Term *t, int idx);
+/* iterative walks over terms (eval.c): no walk recurses on the C stack */
+typedef struct TWDecide TWDecide;
+typedef Term *(*TWPost)(Term *t, Term **rs, int n, void *ctx);
+struct TWDecide { Term *r; Term **ks; int nk; TWPost post; };
+enum { TW_NODE, TW_DONE, TW_SPINE };   /* a node rebuilt from its walked children / the result r / the terms ks walked, post's term walked in its place */
+typedef int (*TWPre)(Term *t, int d, void *ctx, TWDecide *out);
+typedef Term *(*TWBuild)(Term *t, Term **kids, void *ctx);
+typedef int (*TAnyPre)(Term *t, int d, void *ctx);   /* 1 found, 0 look inside, -1 nothing inside */
+Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx);
+int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx);
+int term_nkids(Term *t, int all); Term *term_kid(Term *t, int i); int term_kid_binds(Term *t, int i);
 
 /* ---------------- interval values ---------------- */
 
