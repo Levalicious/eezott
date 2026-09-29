@@ -92,7 +92,6 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    char base; stack_base = &base;   /* the stack guard's reference frame (eval.c) */
     int check_only = 0, agda = 0, ctt = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
     const char *preludes[32]; int npreludes = 0;
     for (int i = 1; i < argc; i++) {

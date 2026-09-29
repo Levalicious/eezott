@@ -68,8 +68,6 @@ char *xstrdup(const char *s);
 char *xsprintf(const char *fmt, ...);
 void die(const char *fmt, ...);
 void die_resource(const char *fmt, ...);   /* resource abort: 'resource limit: ...', exit 70 */
-extern char *stack_base;                    /* main's frame: the structural walks measure their recursion against the stack limit */
-void stack_guard(const char *what);         /* a resource abort when the caller is within a margin of the C stack's soft limit */
 
 /* ---------------- surface syntax ---------------- */
 

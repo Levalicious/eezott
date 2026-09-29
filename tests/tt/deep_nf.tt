@@ -1,0 +1,5 @@
+-- forcing, quoting and printing a normal form are explicit machines, not C recursion: double 100000, by a method
+-- that puts two suc around its hypothesis, is a constructor chain 200000 deep, walked whole (the recursive walkers
+-- aborted on the C stack's limit)
+def double (n : Nat) : Nat := elim Nat (\_ -> Nat) zero (\_ ih -> suc (suc ih)) n
+def main : Nat := double 100000
