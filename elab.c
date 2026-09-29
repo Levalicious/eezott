@@ -756,7 +756,7 @@ static void resolve_step(size_t off) {
 /* a head applied along a spine of arguments */
 static void app_spine_step(size_t off) {
     MSTART
-    F->hty = force(F->hty);
+    { __typeof__(F->hty) st_ = force(F->hty); F->hty = st_; }
     for (F->i = 0; F->i < F->n; F->i++) {
         { Ctx *c = F->c; STerm *ai = F->args[F->i]; Val *hty = force(F->hty); Term *head = F->head;
           while (hty->k == V_PI && hty->imp && !ai->imp) {   /* an implicit argument not written: a meta */
@@ -771,7 +771,7 @@ static void app_spine_step(size_t off) {
                   int id = meta_new(dom, c->n, c->names, c->tys, ai->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
                   dnums = rrealloc(dnums, (ndnums + 1) * sizeof(Deferred));
                   dnums[ndnums].term = ai; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
-                  F->head = mk_app(head, m, hty->irr); F->hty = inst(&hty->clo, eval(c->env, m));
+                  { __typeof__(F->head) st_ = mk_app(head, m, hty->irr); F->head = st_; } { __typeof__(F->hty) st_ = inst(&hty->clo, eval(c->env, m)); F->hty = st_; }
                   continue;
               }
           }
@@ -779,8 +779,8 @@ static void app_spine_step(size_t off) {
         if (F->hty->k == V_PATHP) {
             MCALL(mpush_check(F->c, F->args[F->i], vinterval()));
             { Term *r = MTERM(); Ctx *c = F->c; Val *hty = F->hty;
-              F->head = mk_term(T_PAPP, F->head, r, quote(c->n, hty->b), quote(c->n, hty->c));
-              F->hty = vapp(hty->a, eval(c->env, r), 0); }
+              { __typeof__(F->head) st_ = mk_term(T_PAPP, F->head, r, quote(c->n, hty->b), quote(c->n, hty->c)); F->head = st_; }
+              { __typeof__(F->hty) st_ = vapp(hty->a, eval(c->env, r), 0); F->hty = st_; } }
             continue;
         }
         if (F->hty->irr & 2) { F->c->irrpos++; F->c->irrlen++; }   /* the argument of an irrelevant binder */
@@ -788,7 +788,7 @@ static void app_spine_step(size_t off) {
         if (F->hty->irr & 2) { F->c->irrpos--; F->c->irrlen--; }
         { Term *a = MTERM();
           F->head = mk_app(F->head, a, F->hty->irr);
-          F->hty = inst(&F->hty->clo, eval(F->c->env, a)); }
+          { __typeof__(F->hty) st_ = inst(&F->hty->clo, eval(F->c->env, a)); F->hty = st_; } }
     }
     eret_ty = F->hty; MRETT(F->head);
     MFINISH
@@ -816,7 +816,7 @@ static void infer_app_step(size_t off) {
             MCALL(mpush_sort(C_, A_(0), 1)); F->la = eret_lvl;
             F->line = mk_lam("_", shift(MTERM(), 0, 1), 0); F->line->isi = 1;
         }
-        F->lv = eval(C_->env, F->line);
+        { __typeof__(F->lv) st_ = eval(C_->env, F->line); F->lv = st_; }
         MCALL(mpush_check(C_, A_(1), vapp(F->lv, vi(iv_zero()), 0))); F->a = MTERM();
         MCALL(mpush_check(C_, A_(2), vapp(F->lv, vi(iv_one()), 0))); F->b = MTERM();
         { STerm **a = F->args + 3; int n = F->n - 3; Ctx *c = C_; Term *t = mk_term(T_PATHP, F->line, F->a, F->b, NULL); Val *u = vu_l(F->la);
@@ -832,8 +832,8 @@ static void infer_app_step(size_t off) {
     if (F->hs->k == S_TRANSP) {
         need_args(F->hs, F->n, 3, "transp");
         MCALL(mpush_check_line(C_, A_(0))); F->line = MTERM(); F->la = eret_lvl;
-        F->lv = eval(C_->env, F->line);
-        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        { __typeof__(F->lv) st_ = eval(C_->env, F->line); F->lv = st_; }
+        MCALL(mpush_check(C_, A_(1), vinterval())); { __typeof__(F->phi) st_ = MTERM(); F->phi = st_; } { __typeof__(F->pv) st_ = eval(C_->env, F->phi); F->pv = st_; }
         MCALL(mpush_check(C_, A_(2), vapp(F->lv, vi(iv_zero()), 0))); F->u = MTERM();
         {   /* the line must be constant wherever phi holds */
             Ctx *c = C_; Val *lv = F->lv;
@@ -849,14 +849,14 @@ static void infer_app_step(size_t off) {
     }
     if (F->hs->k == S_HCOMP) {
         need_args(F->hs, F->n, 4, "hcomp");
-        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->Av = force(eval(C_->env, F->t));
-        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        MCALL(mpush_sort(C_, A_(0), 1)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } { __typeof__(F->Av) st_ = force(eval(C_->env, F->t)); F->Av = st_; }
+        MCALL(mpush_check(C_, A_(1), vinterval())); { __typeof__(F->phi) st_ = MTERM(); F->phi = st_; } { __typeof__(F->pv) st_ = eval(C_->env, F->phi); F->pv = st_; }
         {   /* u : (i : I) -> Partial phi A */
             Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
             uty->clo.env = C_->env; uty->clo.t = mk_term(T_PARTIAL, shift(F->phi, 0, 1), shift(F->t, 0, 1), NULL, NULL);
             F->v = uty; }
-        MCALL(mpush_check(C_, A_(2), F->v)); F->u = MTERM(); F->uv = eval(C_->env, F->u);
-        MCALL(mpush_check(C_, A_(3), F->Av)); F->a = MTERM(); F->u0v = eval(C_->env, F->a);
+        MCALL(mpush_check(C_, A_(2), F->v)); { __typeof__(F->u) st_ = MTERM(); F->u = st_; } { __typeof__(F->uv) st_ = eval(C_->env, F->u); F->uv = st_; }
+        MCALL(mpush_check(C_, A_(3), F->Av)); { __typeof__(F->a) st_ = MTERM(); F->a = st_; } { __typeof__(F->u0v) st_ = eval(C_->env, F->a); F->u0v = st_; }
         {   /* the base must agree with the sides at i0 wherever phi holds */
             Ctx *c = C_; Face *fs; int nf = faces_of(F->pv, &fs);
             for (int i = 0; i < nf; i++) {
@@ -874,13 +874,13 @@ static void infer_app_step(size_t off) {
            Elaborated to its definition in terms of hcomp and transp (Cohen-Huber-Mortberg):
              hcomp (A i1) phi (\i -> [ phi -> transp (\j -> A (i \/ j)) i (u i) ]) (transp A i0 u0)   */
         need_args(F->hs, F->n, 4, "comp");
-        MCALL(mpush_check_line(C_, A_(0))); F->line = MTERM(); F->lv = eval(C_->env, F->line);
-        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        MCALL(mpush_check_line(C_, A_(0))); { __typeof__(F->line) st_ = MTERM(); F->line = st_; } { __typeof__(F->lv) st_ = eval(C_->env, F->line); F->lv = st_; }
+        MCALL(mpush_check(C_, A_(1), vinterval())); { __typeof__(F->phi) st_ = MTERM(); F->phi = st_; } { __typeof__(F->pv) st_ = eval(C_->env, F->phi); F->pv = st_; }
         {   Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
             uty->clo.env = C_->env; uty->clo.t = mk_term(T_PARTIAL, shift(F->phi, 0, 1), mk_app(shift(F->line, 0, 1), mk_var(0), 0), NULL, NULL);
             F->v = uty; }
-        MCALL(mpush_check(C_, A_(2), F->v)); F->u = MTERM(); F->uv = eval(C_->env, F->u);
-        MCALL(mpush_check(C_, A_(3), vapp(F->lv, vi(iv_zero()), 0))); F->a = MTERM(); F->u0v = eval(C_->env, F->a);
+        MCALL(mpush_check(C_, A_(2), F->v)); { __typeof__(F->u) st_ = MTERM(); F->u = st_; } { __typeof__(F->uv) st_ = eval(C_->env, F->u); F->uv = st_; }
+        MCALL(mpush_check(C_, A_(3), vapp(F->lv, vi(iv_zero()), 0))); { __typeof__(F->a) st_ = MTERM(); F->a = st_; } { __typeof__(F->u0v) st_ = eval(C_->env, F->a); F->u0v = st_; }
         {   Ctx *c = C_; Term *line = F->line, *phi = F->phi, *u = F->u, *u0 = F->a; Val *lv = F->lv;
             Face *fs; int nf = faces_of(F->pv, &fs);
             for (int i = 0; i < nf; i++) {
@@ -905,8 +905,8 @@ static void infer_app_step(size_t off) {
     }
     if (F->hs->k == S_SUB) {   /* Sub A phi u : U,  u : Partial phi A */
         need_args(F->hs, F->n, 3, "Sub");
-        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
-        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        MCALL(mpush_sort(C_, A_(0), 1)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } F->la = eret_lvl; { __typeof__(F->Av) st_ = force(eval(C_->env, F->t)); F->Av = st_; }
+        MCALL(mpush_check(C_, A_(1), vinterval())); { __typeof__(F->phi) st_ = MTERM(); F->phi = st_; } { __typeof__(F->pv) st_ = eval(C_->env, F->phi); F->pv = st_; }
         { Val *pty = mkval(V_PARTIAL); pty->a = F->pv; pty->b = F->Av; F->v = pty; }
         MCALL(mpush_check(C_, A_(2), F->v));
         { STerm **a = F->args + 3; int n = F->n - 3; Ctx *c = C_; Term *t = mk_term(T_SUB, F->t, F->phi, MTERM(), NULL); Val *u = vupre_l(F->la);
@@ -914,7 +914,7 @@ static void infer_app_step(size_t off) {
     }
     if (F->hs->k == S_SIGMA) {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
         need_args(F->hs, F->n, 2, "Sigma");
-        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
+        MCALL(mpush_sort(C_, A_(0), 1)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } F->la = eret_lvl; { __typeof__(F->Av) st_ = force(eval(C_->env, F->t)); F->Av = st_; }
         if (A_(1)->k == S_LAM) {
             ctx_bind(C_, A_(1)->binders[0].name, F->Av);
             MCALL(mpush_sort(C_, A_(1)->a, 1)); F->b = MTERM(); F->lb = eret_lvl;
@@ -950,8 +950,8 @@ static void infer_app_step(size_t off) {
     }
     if (F->hs->k == S_GLUE) {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
         need_args(F->hs, F->n, 3, "Glue");
-        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
-        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        MCALL(mpush_sort(C_, A_(0), 1)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } F->la = eret_lvl; { __typeof__(F->Av) st_ = force(eval(C_->env, F->t)); F->Av = st_; }
+        MCALL(mpush_check(C_, A_(1), vinterval())); { __typeof__(F->phi) st_ = MTERM(); F->phi = st_; } { __typeof__(F->pv) st_ = eval(C_->env, F->phi); F->pv = st_; }
         {   int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", F->hs->line);
             Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu_l(F->la);
             sig->clo.env = env_push(C_->env, F->Av);   /* under [.., A]: Equiv^lvl T A with T the bound variable */
@@ -1002,10 +1002,10 @@ static void infer_elim_step(size_t off) {
         F->DV = data_at(F->d, F->dl);
         F->pe = NULL; F->pvv = xalloc((F->np + 1) * sizeof(Val *)); F->pt = xalloc((F->np + 1) * sizeof(Term *)); F->ai = 0; }
     for (F->i = 0; F->i < F->np; F->i++) {   /* the parameters are implicit: written {p}, or metas */
-        F->v = eval(F->pe, F->DV->ptys[F->i]);
+        { __typeof__(F->v) st_ = eval(F->pe, F->DV->ptys[F->i]); F->v = st_; }
         if (F->ai < F->n && F->args[F->ai]->imp) { F->ai++; MCALL(mpush_check(F->c, F->args[F->ai - 1], F->v)); F->pt[F->i] = MTERM(); }
-        else F->pt[F->i] = fresh_meta(F->c, F->v, F->hs->line);
-        F->pvv[F->i] = eval(F->c->env, F->pt[F->i]); F->pe = env_push(F->pe, F->pvv[F->i]);
+        else { __typeof__(F->pt[F->i]) st_ = fresh_meta(F->c, F->v, F->hs->line); F->pt[F->i] = st_; }
+        { __typeof__(F->pvv[F->i]) st_ = eval(F->c->env, F->pt[F->i]); F->pvv[F->i] = st_; } { __typeof__(F->pe) st_ = env_push(F->pe, F->pvv[F->i]); F->pe = st_; }
     }
     if (F->n < F->ai + 1) die("line %d: elim %s needs a motive", F->hs->line, F->D->name);
     /* motive: peel its lambdas against the expected binders (indices, then the target),
@@ -1044,7 +1044,7 @@ static void infer_elim_step(size_t off) {
         (void)fib;
         for (int i = 0; i < nb; i++) ctx_pop(c); }
     #undef TARGET_TYPE
-    F->t = elim_type(F->d, F->la, 0, F->dl);   /* the eliminator's type (res_irr 0) */
+    { __typeof__(F->t) st_ = elim_type(F->d, F->la, 0, F->dl); F->t = st_; }   /* the eliminator's type (res_irr 0) */
     {   /* the indices and the target determine the parameters (metas), but they come last: check them first, for their
            constraints; the spine is then checked in order (their terms are taken from that pass) */
         int K = block_ncons(F->d), nbk = F->D->nblock, m = F->D->nidx;
@@ -1053,7 +1053,7 @@ static void infer_elim_step(size_t off) {
     if (F->j >= 0) {
         for (F->j = 0; F->j < F->m0; F->j++) {
             MCALL(mpush_check(F->c, F->args[F->ai + F->nf + F->j], eval(F->ie, F->DV->itys[F->j])));
-            F->iv[F->j] = eval(F->c->env, MTERM()); F->ie = env_push(F->ie, F->iv[F->j]);
+            { __typeof__(F->iv[F->j]) st_ = eval(F->c->env, MTERM()); F->iv[F->j] = st_; } { __typeof__(F->ie) st_ = env_push(F->ie, F->iv[F->j]); F->ie = st_; }
         }
         {   Val *tt = mkval(V_DATA); tt->n = F->d; tt->lvl = F->dl;
             for (int i = 0; i < F->np; i++) vl_push(&tt->args, F->pvv[i], 1);
@@ -1078,7 +1078,7 @@ static void system_step(size_t off) {
     for (F->i = 0; F->i < F->s->nbr; F->i++) {
         MCALL(mpush_check(F->c, F->s->br[F->i].face, vinterval()));
         F->t->br[F->i].face = MTERM();
-        F->psi[F->i] = eval(F->c->env, F->t->br[F->i].face);
+        { __typeof__(F->psi[F->i]) st_ = eval(F->c->env, F->t->br[F->i].face); F->psi[F->i] = st_; }
         F->v = vi(iv_or(F->v->iv, F->psi[F->i]->iv));
     }
     if (!iv_eq(F->v->iv, F->ty->iv)) die("line %d: the system's faces cover %s, but its type demands %s", F->s->line, show(F->c, F->v), show(F->c, F->ty));
@@ -1087,8 +1087,8 @@ static void system_step(size_t off) {
         if (F->nf == 0) die("line %d: the face %s of a system branch is never satisfied", F->s->br[F->i].face->line, show(F->c, F->psi[F->i]));
         F->t->br[F->i].body = NULL;
         for (F->j = 0; F->j < F->nf; F->j++) {
-            F->rc = xalloc(sizeof(Ctx)); *F->rc = ctx_restrict(F->c, &F->fs[F->j]);   /* on the heap: the frame may move */
-            F->x = F->tyat(&F->fs[F->j], F->data);
+            { Ctx r_ = ctx_restrict(F->c, &F->fs[F->j]); Ctx *p_ = xalloc(sizeof(Ctx)); *p_ = r_; F->rc = p_; }   /* on the heap: the frame may move */
+            { Val *x_ = F->tyat(&F->fs[F->j], F->data); F->x = x_; }   /* the type at the face may run the machine: stored after */
             MCALL(mpush_check(F->rc, F->s->br[F->i].body, F->x));
             if (!F->t->br[F->i].body) F->t->br[F->i].body = MTERM();
         }
@@ -1182,7 +1182,7 @@ static void infer_step(size_t off) {
     }
     if (F->s->k == S_LET) {
         MCALL(mpush_sort(F->c, F->s->a, 0)); F->a = MTERM();   /* a let may bind a line or a partial element */
-        F->v = eval(F->c->env, F->a);
+        { __typeof__(F->v) st_ = eval(F->c->env, F->a); F->v = st_; }
         MCALL(mpush_check(F->c, F->s->b, F->v)); F->b = MTERM();
         ctx_push(F->c, F->s->name, F->v, eval(F->c->env, F->b));
         MCALL(mpush_infer(F->c, F->s->c)); F->t = MTERM(); F->x = eret_ty;
@@ -1195,7 +1195,7 @@ static void infer_step(size_t off) {
 
 static void check_step(size_t off) {
     MSTART
-    F->ty = force(F->ty);
+    { __typeof__(F->ty) st_ = force(F->ty); F->ty = st_; }
     if (F->ty->k == V_DATA && datas[F->ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
         F->c->irrpos++; F->c->irrlen++;
         MCALL(epush(check1_step, F->c, F->s, F->ty));
@@ -1253,7 +1253,7 @@ static void check1_step(size_t off) {
     }
     if (F->s->k == S_LET) {
         MCALL(mpush_sort(F->c, F->s->a, 0)); F->a = MTERM();
-        F->v = eval(F->c->env, F->a);
+        { __typeof__(F->v) st_ = eval(F->c->env, F->a); F->v = st_; }
         MCALL(mpush_check(F->c, F->s->b, F->v)); F->b = MTERM();
         ctx_push(F->c, F->s->name, F->v, eval(F->c->env, F->b));
         MCALL(mpush_check(F->c, F->s->c, F->ty));
@@ -1277,7 +1277,7 @@ static void check1_step(size_t off) {
         if (F->ty->k != V_GLUE) die("line %d: glue checked against %s, expected a Glue type", F->s->line, show(F->c, F->ty));
         if (F->s->a->b->k != S_SYS) die("line %d: the first argument of glue must be a system", F->s->a->b->line);
         MCALL(mpush_system_at(F->c, F->s->a->b, F->ty->b, glue_type_at, F->ty->c)); F->tst = MTERM();
-        F->tsv = eval(F->c->env, F->tst);
+        { __typeof__(F->tsv) st_ = eval(F->c->env, F->tst); F->tsv = st_; }
         MCALL(mpush_check(F->c, F->s->b, F->ty->a)); F->a = MTERM();
         {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty;
             Val *av = eval(c->env, F->a);
@@ -1305,7 +1305,7 @@ static void check1_step(size_t off) {
         if (F->ty->k != V_PARTIAL) die("line %d: a system must be checked against a Partial type, not %s", F->s->line, show(F->c, F->ty));
         { Ctx *c = F->c; STerm *s = F->s; Val *phi = F->ty->a, *A = F->ty->b; MTAIL(mpush_system_at(c, s, phi, partial_type_at, A)); }
     }
-    MCALL(mpush_infer(F->c, F->s)); F->t = MTERM(); F->got = force(eret_ty);
+    MCALL(mpush_infer(F->c, F->s)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } { __typeof__(F->got) st_ = force(eret_ty); F->got = st_; }
     {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty, *got = F->got; Term *t = F->t;
         while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied */
             Term *m = fresh_meta(c, got->dom, s->line);

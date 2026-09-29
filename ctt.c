@@ -409,7 +409,7 @@ static void lam_step(size_t off) {
     if (F->prec > 0) fputc('(', out);
     fputs("\\", out); F->d = F->depth; F->a = F->t; F->b = F->ty;
     while (F->a->k == T_LAM && !F->a->isi) {
-        F->ex = expose(F->b, F->d);
+        { __typeof__(F->ex) st_ = expose(F->b, F->d); F->ex = st_; }
         if (!F->ex || F->ex->k != T_PI) { unsupported("a lambda whose type the printer cannot see"); const char *nm = bind(F->d, F->a->name); fprintf(out, " (%s : ?)", nm); binder_set(F->d, nm, NULL, 0); F->d++; F->a = F->a->a; F->b = NULL; continue; }
         if ((F->a->irr | F->ex->irr) & 2) nirr++;
         F->nm = bind(F->d, F->a->name);
@@ -511,11 +511,11 @@ static void app_step(size_t off) {
         if (F->prec > 2 || (F->prec > 3 && F->n == 6)) fputc('(', out);
         if (F->n > 6) fputc('(', out);
         fputs("idJ", out);
-        F->hty = head_type(F->hh, F->depth);
+        { __typeof__(F->hty) st_ = head_type(F->hh, F->depth); F->hty = st_; }
         for (F->i = 0; F->i < F->n; F->i++) {
             fputc(' ', out);
             MCALL(mpush_tp(F->args[F->i], F->depth, 4, F->hty && F->hty->k == T_PI ? F->hty->a : NULL));
-            F->hty = pi_apply(F->hty, F->args[F->i], F->depth);
+            { __typeof__(F->hty) st_ = pi_apply(F->hty, F->args[F->i], F->depth); F->hty = st_; }
             if (F->i == 5 && F->n > 6) fputc(')', out);
         }
         if (F->prec > 2 || (F->prec > 3 && F->n == 6)) fputc(')', out);
@@ -531,11 +531,11 @@ static void app_step(size_t off) {
     if (F->paren) fputc('(', out);
     if (F->nint) { fputc('<', out); for (int q = 0; q < F->nint; q++) { ibinder_open(F->depth + q, xsprintf("i%d", q)); fprintf(out, "%s%s", q ? " " : "", names[F->depth + q]); } fputs("> ", out); }
     if (F->neta) {   /* \ (a : A) .. -> c args.. a ..: the binder types from the head's type at the given arguments */
-        F->b = head_type(F->hh, F->depth);
-        for (int i = 0; i < F->n; i++) F->b = pi_apply(F->b, F->args[i], F->depth);
+        { __typeof__(F->b) st_ = head_type(F->hh, F->depth); F->b = st_; }
+        for (int i = 0; i < F->n; i++) { __typeof__(F->b) st_ = pi_apply(F->b, F->args[i], F->depth); F->b = st_; }
         fputs("\\", out);
         for (F->c = 0; F->c < F->neta; F->c++) {
-            F->ex = expose(F->b, F->depth + F->c);
+            { __typeof__(F->ex) st_ = expose(F->b, F->depth + F->c); F->ex = st_; }
             if (!F->ex || F->ex->k != T_PI) { unsupported("the type of a constructor's missing argument"); break; }
             F->nm = bind(F->depth + F->c, F->ex->name);
             fprintf(out, " (%s : ", F->nm); MCALL(mpush_tp(F->ex->a, F->depth + F->c, 0, NULL)); fputc(')', out);
@@ -544,7 +544,7 @@ static void app_step(size_t off) {
         fputs(" -> ", out);
     }
     if (F->m) { F->t = shift(F->t, 0, F->m); F->n = spine(F->t, &F->args); F->hh = spine_head(F->t); }   /* the given arguments, under the new binders */
-    F->hty = head_type(F->hh, F->d2);
+    { __typeof__(F->hty) st_ = head_type(F->hh, F->d2); F->hty = st_; }
     if (F->hh->k == T_CON) {
         Con *C = &cons[F->hh->n];
         if (C->nint) {   /* a path constructor: c{D p..} a.. @ i.. */
@@ -559,7 +559,7 @@ static void app_step(size_t off) {
             F->a = ex && ex->k == T_PI ? ex->a : NULL;   /* the domain */
             F->c = ex && ex->k == T_PI && (ex->isi || ex->a->k == T_INTERVAL);
             if (ex && ex->k == T_PI && (ex->irr & 2)) nirr++; }
-        if (F->hh->k == T_CON && (F->i < F->np)) { F->hty = pi_apply(F->hty, F->args[F->i], F->d2); continue; }   /* a constructor's parameters: cubicaltt infers them (or they went into the braces) */
+        if (F->hh->k == T_CON && (F->i < F->np)) { { __typeof__(F->hty) st_ = pi_apply(F->hty, F->args[F->i], F->d2); F->hty = st_; } continue; }   /* a constructor's parameters: cubicaltt infers them (or they went into the braces) */
         if (F->c) { fputs(" @ ", out); MCALL(mpush_tp(F->args[F->i], F->d2, 5, NULL)); }
         else if (is_cube_method_arg(F->hh, F->i)) {   /* typed by the method's nested-PathP form: its element binders, then the interval lambdas along the PathP lines */
             F->b = strip_ins(F->args[F->i]); fputc(' ', out);
@@ -567,7 +567,7 @@ static void app_step(size_t off) {
             else { unsupported("a cube method not of the form \\is -> inS t"); MCALL(mpush_tp(F->args[F->i], F->d2, 4, NULL)); }
         }
         else { fputc(' ', out); MCALL(mpush_tp(F->args[F->i], F->d2, 4, F->a)); }
-        F->hty = pi_apply(F->hty, F->args[F->i], F->d2);
+        { __typeof__(F->hty) st_ = pi_apply(F->hty, F->args[F->i], F->d2); F->hty = st_; }
     }
     for (int q = 0; q < F->neta; q++) fprintf(out, " %s", names[F->depth + q]);
     for (int q = 0; q < F->nint; q++) fprintf(out, " @ %s", names[F->depth + q]);
