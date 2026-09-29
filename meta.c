@@ -83,29 +83,8 @@ Term *meta_term(int id, int ctxn) {
     return t;
 }
 int metas_version;   /* see tt.h: the memo on a rigid definition application is valid only at the version it was taken at */
-Val *fmeta(Val *v) {
-    while (v->k == V_NEU && v->h == H_META && tmetas[v->n].sol) {
-        Val *r = tmetas[v->n].sol;
-        for (int i = 0; i < v->args.n; i++) r = vapply_arg(r, &v->args.a[i]);
-        v = r;
-    }
-    return v;
-}
-
 int force_depth;
-static Val *force_go(Val *v);
-Val *force(Val *v) { force_depth++; Val *r = force_go(v); force_depth--; return r; }
-static Val *force_go(Val *v) {
-    v = fmeta(v);
-    for (;;) {
-        /* a rigid definition application unfolds; one that unfolds to itself (a native's guard neutral: a power no limb
-           list holds) is as canonical as it gets */
-        if (v->k == V_NEU && v->h == H_DEF) { Val *u = fmeta(unfold_def(v)); if (u == v) return v; v = u; continue; }
-        /* a deferred elimination reduces; a stuck one comes back as itself, its flag dropped */
-        if (v->k == V_NEU && v->h == H_ELIM && v->defer) { Val *u = fmeta(elim_force(v)); if (u == v) return v; v = u; continue; }
-        return v;
-    }
-}
+/* fmeta and force are the machine's (eval.c) */
 MMark meta_mark(void) { MMark m = { nundo, nposts }; return m; }
 void meta_rollback(MMark m) {
     while (nundo > m.u) { int id = undo[--nundo]; tmetas[id].sol = NULL; tmetas[id].solt = NULL; }

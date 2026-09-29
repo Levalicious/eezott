@@ -116,23 +116,7 @@ static LMemoList *memo_for(LMemoList **arr, int *n, int id) {
     if (id >= *n) { int m = id + 16; LMemoList *na = xalloc(m * sizeof(LMemoList)); for (int i = 0; i < *n; i++) na[i] = (*arr)[i]; *arr = na; *n = m; }
     return &(*arr)[id];
 }
-Val *def_at(int id, LVal L) {
-    Def *d = &defs[id]; int n;
-    if (!d->poly) return d->vval;
-    if (!lv_is_const(L, &n)) {
-        static LMemoList *dm; static int ndm;
-        LMemoList *ml = memo_for(&dm, &ndm, id); Val *r = lmemo_get(ml, L);
-        if (!r) { r = eval(NULL, subst_hidden(d->val, L)); lmemo_put(ml, L, r); }
-        return r;
-    }
-    if (n >= d->nat) {
-        int m = n + 4; Val **nv = xalloc(m * sizeof(Val *)), **nt = xalloc(m * sizeof(Val *));
-        for (int i = 0; i < d->nat; i++) { nv[i] = d->vval_at[i]; nt[i] = d->vty_at[i]; }
-        d->vval_at = nv; d->vty_at = nt; d->nat = m;
-    }
-    if (!d->vval_at[n]) d->vval_at[n] = eval(NULL, subst_hidden(d->val, L));
-    return d->vval_at[n];
-}
+/* def_at is the machine's (below) */
 Val *def_ty_at(int id, LVal L) {
     Def *d = &defs[id]; int n;
     if (!d->poly) return d->vty;
@@ -709,19 +693,6 @@ static Val *hcompU_body(int k, const Face *f, void *data);
 static Val *builtin_at(const char *name, LVal L);
 static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
-Val *inst(Clo *c, Val *v) {
-    /* One-entry application memo (the memoization pass): a closure applied to the same value again is the same value,
-       and branch bodies do apply the same closure to the same value repeatedly - baddGo's column uses its induction
-       hypothesis three times, and each application re-ran the whole recursive fold, which made the fold's cost
-       3^columns (Finding_Eezott_EvalNoSharing_2026_09_14). The metas version guards it: a meta solved in between can
-       resume a reduction that the first application took as neutral. */
-    if (c->ires && c->iarg == v && (c->imv == metas_version || c->istable)) return c->ires;
-    int save = meta_blocked; meta_blocked = 0;
-    Val *r = c->fn ? c->fn(c->data, v) : eval(env_push(c->env, v), c->t);
-    c->iarg = v; c->ires = r; c->imv = metas_version; c->istable = !meta_blocked;
-    meta_blocked |= save;
-    return r;
-}
 static Val *nfn(void *data, Val *arg) { return native_apply(data, arg); }
 static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
     Native *nt = xalloc(sizeof *nt); nt->code = code; nt->i1 = i1; nt->i2 = i2; nt->i3 = i3;
@@ -821,40 +792,9 @@ static Val *elim_apply_list(int data, VList *args);
 
 /* ---- induction hypotheses (native closure N_IH) ----
    cap = base (params, motive, methods), tele (params, previous args), ys, aj; i1=data i2=con i3=j; ys count = cap.n - nb - nt - 1 */
-static Val *ih_apply(Native *c, Val *y) {
-    int nb = datas[c->i1].nparams + datas[c->i1].nblock + block_ncons(c->i1);
-    Con *C = con_at(c->i2, c->l); int j = c->i3; int nt = datas[c->i1].nparams + j;
-    ConArg *ca = &C->args[j];
-    Native *d = xalloc(sizeof *d); *d = *c; d->cap = vl_copy(&c->cap);
-    /* insert y before the trailing aj */
-    Arg aj = d->cap.a[d->cap.n - 1]; d->cap.n--; vl_push(&d->cap, y, 0); vl_push_arg(&d->cap, aj);
-    int ny = d->cap.n - nb - nt - 1;
-    if (ny < ca->npi) { Val *v = mkval(V_LAM); v->clo.fn = nfn; v->clo.data = d; v->name = "y"; return v; }
-    Env *e = NULL; for (int i = 0; i < nt; i++) e = env_push(e, d->cap.a[nb + i].v);
-    for (int i = 0; i < ny; i++) e = env_push(e, d->cap.a[nb + nt + i].v);
-    VList args = {0};
-    for (int i = 0; i < nb; i++) vl_push(&args, d->cap.a[i].v, prefix_irr(c->i1, i));
-    for (int i = 0; i < ca->nidx; i++) vl_push(&args, eval(e, ca->idx[i]), 1);
-    Val *t = d->cap.a[d->cap.n - 1].v; for (int i = 0; i < ny; i++) t = vapp(t, d->cap.a[nb + nt + i].v, 0);
-    vl_push(&args, t, 0);
-    return elim_apply_list(c->i1, &args);
-}
+static Val *ih_apply(Native *c, Val *y);
+static Val *motive_applied(int data, VList *pre, Val **idx);
 
-/* the motive of member `data` applied to the indices and, where an index ranges over a member, to its image: that member's
-   elimination of it with the same prefix (M11b) */
-static Val *motive_applied(int data, VList *pre, Val **idx) {
-    Data *D = &datas[data]; int np = D->nparams, nb = D->nblock, K = block_ncons(data);
-    Val *P = pre->a[np + D->bpos].v;
-    for (int j = 0; j < D->nidx; j++) {
-        P = vapp(P, idx[j], 1);
-        if (D->idxrec[j] >= 0) {
-            VList a2 = {0}; for (int i = 0; i < np + nb + K; i++) vl_push(&a2, pre->a[i].v, prefix_irr(data, i));
-            vl_push(&a2, idx[j], 0);
-            P = vapp(P, elim_apply_list(D->idxrec[j], &a2), 0);
-        }
-    }
-    return P;
-}
 /* iota: the eliminator's full spine ends in a constructor */
 static int elim_data_cur;
 static Val *elim_of_branch(Val *b, void *data);
@@ -886,117 +826,6 @@ static void term_heads(FILE *f, Term *t, int d) {
    limits instead - the checker's own elimination, work proportional to the value, as Lean's and Agda's (S2). */
 static int elim_num_depth;
 static struct { int data; char lit[16]; } elim_trace[64];   /* the nesting chain's first 64 levels, for the tripwire's diagnostic */
-static Val *elim_reduce_go(int data, VList *args);
-static Val *elim_reduce(int data, VList *args) {
-    Val *target = force(args->a[args->n - 1].v);
-    if (target->k != V_NUM) return elim_reduce_go(data, args);
-    int bits = bn_bitlen(target->num);
-    /* a machine-sized literal walked past 64 levels, or ANY literal nested past 4096: the second rule is the
-       backstop for walks on literals below the word bounds, which the first rule cannot see (closed computations
-       nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous). The nesting is
-       the eliminations' or the forces': a step whose method returns a rigid native over its hypothesis (mul 3 ih)
-       walks when the native forces it, each step inside the last native's force, and elim_reduce itself returns
-       every time - so the forces are counted too (S2) */
-    int nest = elim_num_depth > force_depth ? elim_num_depth : force_depth;
-    if ((bits > 40 && nest > 64) || nest > 4096) {
-        char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
-        if (strlen(dec) > 40) { dec[40] = 0; }
-        if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the nesting chain's outermost levels, then the eliminator's methods */
-            for (int i = 0; i < 3 && i < elim_num_depth; i++) fprintf(stderr, "  level %d: elim %s on %s\n", i, datas[elim_trace[i].data].name, elim_trace[i].lit);
-            fprintf(stderr, "  last native fallback: code %d, arg1 = %s; arg2 = %s\n", last_fallback_code, last_fallback[0], last_fallback[1]);
-            Data *D = &datas[data]; int np = D->nparams, nb = D->nblock;
-            for (int i = np + nb; i < args->n - 1; i++) {
-                Val *m = args->a[i].v;
-                fprintf(stderr, "  method %d: ", i - np - nb);
-                if (m->k == V_LAM && m->clo.t) term_heads(stderr, m->clo.t, 0); else fprintf(stderr, "(kind %d)", m->k);
-                fputc('\n', stderr);
-            }
-        }
-        resource_die("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
-                     datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
-    }
-    if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
-    elim_num_depth++;
-    Val *r = elim_reduce_go(data, args);
-    elim_num_depth--;
-    return r;
-}
-static Val *elim_reduce_go(int data, VList *args) {
-    Data *D = data_at(data, elim_lvl); elim_data_cur = data;
-    int np = D->nparams, nb = D->nblock, K = block_ncons(data);
-    Val *target = force(args->a[args->n - 1].v);   /* a rigid definition application unfolds for the elimination */
-    if (target->k == V_NUM) target = num_view(target);   /* a literal eliminates as one constructor */
-    if (target->k != V_CON) { meta_blocked = 1; return NULL; }
-    Con *c = con_at(target->n, target->lvl);
-    if (c->data != data || target->args.n != np + c->nargs + c->nint) { meta_blocked = 1; return NULL; }
-    Val *res = args->a[np + nb + c->bord].v;
-    for (int j = 0; j < c->nargs; j++) res = vapp(res, target->args.a[np + j].v, c->args[j].irr);
-    for (int j = 0; j < c->nargs; j++) {
-        if (c->args[j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. idx (p k) */
-            Native *ih = xalloc(sizeof *ih); ih->code = N_ELIM_PATH_IH; ih->i1 = c->args[j].rec;
-            for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, prefix_irr(data, i));
-            Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, target->args.a[i].v);
-            for (int q = 0; q < c->args[j].nidx; q++) vl_push(&ih->cap, eval(e, c->args[j].idx[q]), 1);
-            vl_push(&ih->cap, target->args.a[np + j].v, 0);
-            vl_push(&ih->cap, eval(e, c->args[j].px), 0); vl_push(&ih->cap, eval(e, c->args[j].py), 0);
-            Val *ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "k"; ihv->isi = 1;
-            res = vapp(res, ihv, 0);
-            continue;
-        }
-        if (!c->args[j].isrec) continue;
-        /* a method that does not mention its induction hypothesis does not get one at all: a case analysis on a literal
-           (isZero, pred, if01 ..) then never builds the recursive elimination (M16a). One that does gets it deferred:
-           elim_apply_list ends in a saturated elimination, which vapp leaves unreduced until something forces it. */
-        if (c->args[j].npi == 0 && res->k == V_LAM && !res->clo.fn && !term_mentions_var(res->clo.t, 0)) { res = vapp(res, target->args.a[np + j].v, 0); continue; }
-        Native *ih = xalloc(sizeof *ih); ih->code = N_IH; ih->i1 = c->args[j].rec; ih->i2 = target->n; ih->i3 = j; ih->l = elim_lvl;
-        for (int i = 0; i < np + nb + K; i++) vl_push(&ih->cap, args->a[i].v, 0);
-        for (int i = 0; i < np; i++) vl_push(&ih->cap, target->args.a[i].v, 0);
-        for (int i = 0; i < j; i++) vl_push(&ih->cap, target->args.a[np + i].v, 0);
-        vl_push(&ih->cap, target->args.a[np + j].v, 0);
-        Val *ihv;
-        if (c->args[j].npi == 0) {
-            Env *e = NULL; for (int i = 0; i < np + j; i++) e = env_push(e, ih->cap.a[np + nb + K + i].v);
-            VList a2 = {0};
-            for (int i = 0; i < np + nb + K; i++) vl_push(&a2, args->a[i].v, prefix_irr(data, i));
-            for (int i = 0; i < c->args[j].nidx; i++) vl_push(&a2, eval(e, c->args[j].idx[i]), 1);
-            vl_push(&a2, target->args.a[np + j].v, 0);
-            ihv = elim_apply_list(c->args[j].rec, &a2);
-        } else { ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = ih; ihv->name = "y"; }
-        res = vapp(res, ihv, 0);
-    }
-    if (c->nint > 0) {   /* a path constructor: the method is a cube with the prescribed boundary */
-        Env *env = NULL;
-        for (int i = 0; i < target->args.n; i++) env = env_push(env, target->args.a[i].v);
-        if (c->pathmethod) {   /* PathP (i. P (c a i)) (elim .. b0) (elim .. b1) */
-            Val *r = target->args.a[np + c->nargs].v;
-            Val *ends[2];
-            for (int end = 0; end < 2; end++) {
-                Env *e0 = NULL;
-                for (int i = 0; i < np + c->nargs; i++) e0 = env_push(e0, target->args.a[i].v);
-                e0 = env_push(e0, vi(end ? iv_one() : iv_zero()));
-                Val *b = eval(e0, c->boundary);
-                if (b->k == V_SYS) die("internal: boundary of %s not total at an endpoint", c->name);
-                VList a2 = vl_copy(args); a2.n = np + nb + K + D->nidx;   /* the boundary lives at the target's indices */
-                vl_push(&a2, b, 0);
-                ends[end] = elim_apply_list(data, &a2);
-            }
-            return vpapp(res, r, ends[0], ends[1]);
-        }
-        /* (is : I) -> Sub (P (c a is)) phi [faces -> elim .. boundary] */
-        for (int q = 0; q < c->nint; q++) res = vapp(res, target->args.a[np + c->nargs + q].v, 0);
-        if (!c->boundary) return res;
-        Val *bsys = eval(env, c->boundary);
-        VList base = vl_copy(args); base.n = np + nb + K + D->nidx;
-        Val *img = vsys_map(bsys, elim_of_branch, &base);
-        IVal phi = iv_zero();
-        if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) phi = iv_or(phi, bsys->br[i].phi->iv); } else phi = iv_one();
-        Val **iv = xalloc((D->nidx + 1) * sizeof(Val *));
-        for (int j = 0; j < D->nidx; j++) iv[j] = args->a[np + nb + K + j].v;
-        Val *P = motive_applied(data, args, iv);
-        return vouts(vapp(P, target, 0), vi(phi), img, res);
-    }
-    return res;
-}
 static Val *elim_of_branch(Val *b, void *data) { VList a2 = vl_copy((VList *)data); vl_push(&a2, b, 0); return elim_apply_list(elim_data_cur, &a2); }
 
 /* the eliminator through a formal composition (a normal form on indexed families, and on HITs later):
@@ -1018,40 +847,6 @@ static Val *elim_hcomp(int data, VList *args) {
     Val *line = mkval(V_LAM); line->clo.fn = nfn; line->clo.data = nt; line->isi = 1; line->name = "k";
     return vcomp(line, t->b, vnative(N_ELIM_SIDES, 0, 0, 0, 2, E, t->c), vapp(E, t->dom, 0));
 }
-static Val *elim_apply_list(int data, VList *args) {
-    Val *e = mkval(V_NEU); e->h = H_ELIM; e->n = data; e->lvl = elim_lvl;
-    Val *r = e;
-    for (int i = 0; i < args->n; i++) r = vapp(r, args->a[i].v, args->a[i].irr);
-    return r;
-}
-/* A saturated elimination is reduced on demand, as a rigid definition application is unfolded on demand: the value is
-   the shared cell and its reduction is kept in it (unf), guarded as unfold_def's memo is. So an induction hypothesis
-   is computed only where the method forces it, the branches of a decision only where the decision selects them, and
-   a fold over a literal walks only as far as something forces (S2: what the chunk rule approximated by refusing).
-   A stuck elimination (its target not canonical) comes back as itself with the flag dropped: the neutral it is. */
-Val *elim_force(Val *v) {
-    if (!v->defer) return v;
-    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
-    Data *D = &datas[v->n];
-    int arity = D->nparams + D->nblock + block_ncons(v->n) + D->nidx + 1;
-    int save = meta_blocked; meta_blocked = 0;
-    Val *r;
-    if (v->args.n > arity) {   /* an application of the elimination's result: the parent's reduction, then this entry */
-        Val *p = v->par;
-        r = elim_force(p);
-        if (r == p) { v->defer = 0; meta_blocked |= save; return v; }
-        r = vapply_arg(r, &v->args.a[v->args.n - 1]);
-    } else {
-        elim_lvl = v->lvl;
-        r = elim_reduce(v->n, &v->args);
-        if (!r) r = elim_hcomp(v->n, &v->args);
-        if (!r) { v->defer = 0; meta_blocked |= save; return v; }
-    }
-    v->unf = r; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
-    meta_blocked |= save;
-    return r;
-}
-
 /* ---- systems (partial elements) ---- */
 static Val *vsys(VBranch *br, int n) {
     for (int i = 0; i < n; i++) if (iv_is_one(br[i].phi->iv)) return br[i].v;   /* a total branch: the element itself */
@@ -1091,267 +886,913 @@ void unfold_counts_report(void) {
     for (int k = 0; k < 12; k++) { int best = -1; for (int i = 0; i < ndefs; i++) if (unf_count[i] > 0 && (best < 0 || unf_count[i] > unf_count[best])) best = i;
         if (best < 0) break; fprintf(stderr, "    %8ld  %s\n", unf_count[best], defs[best].name); unf_count[best] = -unf_count[best]; }
 }
-/* a rigid definition application to its value: the definition applied to its spine */
-Val *unfold_def(Val *v) {
-    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = rcalloc(65536, sizeof(long)); } }
-    /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
-       the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
-       hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
-       whole body (cost compounding with nesting depth; Finding_Eezott_EvalNoSharing_2026_09_14). Guarded by the spine
-       length (neu_app lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
-    if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) return v->unf;
-    int save = meta_blocked; meta_blocked = 0;
-    if (unf_count) unf_count[v->n]++;   /* diagnostic: body evaluations per definition (EEZOTT_UNFOLD_COUNTS) */
-    Val *f;
-    if (v->par && v->par->k == V_NEU && v->par->h == H_DEF && v->par->n == v->n && v->par->args.n + 1 == v->args.n) {
-        /* incremental along the spine: the parent's unfolding (memoised there), then the one entry this neutral adds.
-           Without this every projection or application written on a rigid definition re-evaluated its whole body. */
-        f = unfold_def(v->par);
-        f = vapply_arg(f, &v->args.a[v->args.n - 1]);
-    } else {
-        f = def_at(v->n, v->lvl);
-        for (int i = 0; i < v->args.n; i++) f = vapply_arg(f, &v->args.a[i]);
-    }
-    v->unf = f; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked;
-    meta_blocked |= save;
-    return f;
+
+/* ---- evaluation ---- */
+static IVal face_iv(const Face *f);
+/* ---- the machine (S3) ----
+   Evaluation is an explicit machine, not C recursion (Order_Lev_EezottIterative): every activation of a function in
+   the evaluator's knot is a frame on one heap stack, its locals that outlive a call kept in the frame, and a driver
+   loop runs the top frame's step. A step either returns a value (its frame popped, the value in mret, the frame below
+   resumed at the point it left) or pushes a callee and returns to the driver. So an evaluation's depth is bounded by
+   memory alone. The C entry points (eval, vapp, inst, ...) push a frame and run the driver until it returns: callers
+   not yet on the machine nest a driver run, nothing else does.
+   A step never holds a pointer to its frame across anything that may push (the stack may move): F re-derives it from
+   the frame's offset each time. The resume points are case labels of the frame's pc (Duff's device); a step whose
+   case would have one inside another switch hands its frame over to a step of its own (MBECOME). */
+typedef struct { void (*step)(size_t); int pc; size_t prev; } MHdr;
+static Stack mst = { NULL, 0, 0, 1 };
+static size_t mtop = (size_t)-1;
+static Val *mret;
+static void *mpush(size_t size, void (*step)(size_t)) {
+    size = (size + 15) & ~(size_t)15;
+    size_t off = (mst.n + 15) & ~(size_t)15;
+    stack_reserve(&mst, off + size);
+    mst.n = off + size;
+    MHdr *h = (MHdr *)(mst.p + off);
+    memset(h, 0, size);
+    h->step = step; h->prev = mtop;
+    mtop = off;
+    return h;
+}
+static void mpop(size_t off) { mtop = ((MHdr *)(mst.p + off))->prev; mst.n = off; }
+/* run the frame just pushed, and all it calls, to its value */
+static Val *mrun(void) {
+    size_t below = ((MHdr *)(mst.p + mtop))->prev;
+    while (mtop != below) { size_t off = mtop; ((MHdr *)(mst.p + off))->step(off); }
+    return mret;
+}
+#define MSTART switch (F->h.pc) { case 0:;
+#define MFINISH } return;
+#define MCALL(push) MCALL_((push), __COUNTER__ + 1)   /* a resume point: a number unique in the file, never 0 */
+#define MCALL_(push, n) do { F->h.pc = (n); push; return; case (n):; } while (0)
+#define MRET(v) do { Val *mr_ = (v); mret = mr_; mpop(off); return; } while (0)
+#define MTAIL(push) do { mpop(off); push; return; } while (0)   /* the callee's value is this frame's: its caller resumes */
+#define MBECOME(st) do { F->h.step = (st); F->h.pc = 0; return; } while (0)
+static int meta_solved_head(Val *v) { return v->k == V_NEU && v->h == H_META && tmetas[v->n].sol; }
+static int force_needed(Val *v) { return meta_solved_head(v) || (v->k == V_NEU && (v->h == H_DEF || (v->h == H_ELIM && v->defer))); }
+static void mpush_fmeta(Val *v);
+static void mpush_force(Val *v);
+static void mpush_unfold_def(Val *v);
+static void mpush_elim_force(Val *v);
+/* a field resolved through solved metas, or forced, on the machine (field is an F-> lvalue) */
+#define MFMETA(field) do { if (meta_solved_head(field)) { MCALL(mpush_fmeta(field)); field = mret; } } while (0)
+#define MFORCE(field) do { if (force_needed(field)) { MCALL(mpush_force(field)); field = mret; } } while (0)
+
+static void mpush_eval(Env *env, Term *t);
+static void mpush_vapp(Val *f, Val *a, int irr);
+static void mpush_inst(Clo *c, Val *v);
+static void mpush_vpapp(Val *p, Val *r, Val *x, Val *y);
+static void mpush_vproj(Val *p, int which);
+static void mpush_pair_snd(Val *p);
+static void mpush_ih_apply(Native *c, Val *y);
+static void mpush_subst_env(Env *e, Env **dst, int lv, IVal s);
+static void mpush_apply_arg(Val *f, Arg *a) {
+    if (a->proj) mpush_vproj(f, a->proj);
+    else if (a->papp) mpush_vpapp(f, a->v, a->x, a->y);
+    else mpush_vapp(f, a->v, a->irr);
 }
 
-Val *vapp(Val *f, Val *a, int irr) {
-    Arg ar = {0}; ar.v = a; ar.irr = irr;
-    f = fmeta(f);   /* a definition application stays rigid here; force() unfolds it where a canonical form is needed */
-    switch (f->k) {
-    case V_LAM: return inst(&f->clo, a);
-    case V_NEU:
-        if (f->h == H_ELIM) {
-            Val *v = neu_app(f, ar);
-            Data *D = &datas[f->n];
-            int arity = D->nparams + D->nblock + block_ncons(f->n) + D->nidx + 1;
-            if (v->args.n == arity) v->defer = 1;   /* saturated: reduced on demand (elim_force), call by need */
-            return v;
-        }
-        return neu_app(f, ar);
-    case V_DATA: return neu_app(f, ar);
-    case V_CON: {
+/* inst: a closure applied. One-entry application memo (the memoization pass): a closure applied to the same value
+   again is the same value, and branch bodies do apply the same closure to the same value repeatedly - baddGo's column
+   uses its induction hypothesis three times, and each application re-ran the whole recursive fold, which made the
+   fold's cost 3^columns (Finding_Eezott_EvalNoSharing_2026_09_14). The metas version guards it: a meta solved in
+   between can resume a reduction that the first application took as neutral. */
+typedef struct { MHdr h; Clo *c; Val *v; int save; } InstF;
+static void inst_step(size_t off);
+static void mpush_inst(Clo *c, Val *v) { InstF *f = mpush(sizeof *f, inst_step); f->c = c; f->v = v; }
+#define F ((InstF *)(mst.p + off))
+static void inst_step(size_t off) {
+    MSTART
+    { Clo *c = F->c;
+      if (c->ires && c->iarg == F->v && (c->imv == metas_version || c->istable)) MRET(c->ires); }
+    F->save = meta_blocked; meta_blocked = 0;
+    if (F->c->fn == nfn && ((Native *)F->c->data)->code == N_IH && !((Native *)F->c->data)->mon) {
+        MCALL(mpush_ih_apply(F->c->data, F->v));   /* an induction hypothesis on the machine (the memo is native_apply's: first use) */
+    } else if (F->c->fn) mret = F->c->fn(F->c->data, F->v);
+    else MCALL(mpush_eval(env_push(F->c->env, F->v), F->c->t));
+    { Clo *c = F->c; Val *r = mret;
+      c->iarg = F->v; c->ires = r; c->imv = metas_version; c->istable = !meta_blocked;
+      meta_blocked |= F->save;
+      MRET(r); }
+    MFINISH
+}
+#undef F
+Val *inst(Clo *c, Val *v) { mpush_inst(c, v); return mrun(); }
+
+/* ---- application ---- */
+typedef struct { MHdr h; Val *f, *a; int irr, i; Val *v, *av; VBranch *br; } VappF;
+static void vapp_step(size_t off);
+static void mpush_vapp(Val *f, Val *a, int irr) { VappF *x = mpush(sizeof *x, vapp_step); x->f = f; x->a = a; x->irr = irr; }
+#define F ((VappF *)(mst.p + off))
+static void vapp_step(size_t off) {
+    MSTART
+    MFMETA(F->f);   /* a definition application stays rigid here; force() unfolds it where a canonical form is needed */
+    { Val *f = F->f; Arg ar = {0}; ar.v = F->a; ar.irr = F->irr;
+      if (f->k == V_LAM) MTAIL(mpush_inst(&f->clo, ar.v));
+      if (f->k == V_NEU) {
+          if (f->h == H_ELIM) {
+              Val *v = neu_app(f, ar);
+              Data *D = &datas[f->n];
+              int arity = D->nparams + D->nblock + block_ncons(f->n) + D->nidx + 1;
+              if (v->args.n == arity) v->defer = 1;   /* saturated: reduced on demand (elim_force), call by need */
+              MRET(v);
+          }
+          MRET(neu_app(f, ar));
+      }
+      if (f->k == V_DATA) MRET(neu_app(f, ar));
+      if (f->k != V_CON && f->k != V_SYS) die("internal: application of a non-function value (kind %d)", f->k); }
+    if (F->f->k == V_CON) {
         /* suc of a literal is the literal above - when the argument already is one. It is not forced here: under
            call by need the argument of suc is an induction hypothesis more often than not, and forcing it walked
            the literal the elimination was deferred on (Fix_Eezott_VappConForcedItsArgument, S2). */
-        Val *av = fmeta(a);
-        while (av->k == V_NEU && av->h == H_DEF) { Val *u = fmeta(unfold_def(av)); if (u == av) break; av = u; }   /* through definitions (memoised), not through deferred eliminations */
-        if (av->k == V_NUM && f->args.n == 0 && cons[f->n].data == av->n) {
-            int zi, si;
-            if (peano_shape(av->n, &zi, &si) && f->n == si) return vnum(av->n, av->lvl, bn_succ(av->num));
+        F->av = F->a; MFMETA(F->av);
+        while (F->av->k == V_NEU && F->av->h == H_DEF) {   /* through definitions (memoised), not through deferred eliminations */
+            MCALL(mpush_unfold_def(F->av)); F->v = mret; MFMETA(F->v);
+            if (F->v == F->av) break;
+            F->av = F->v;
         }
-        Val *v = neu_app(f, ar);
-        Con *C = con_at(f->n, f->lvl); int np = datas[C->data].nparams;
-        if (C->nint > 0 && v->args.n == np + C->nargs + C->nint) {   /* a path constructor on a face of its boundary is the boundary */
-            Env *env = NULL;
-            for (int i = 0; i < v->args.n; i++) env = env_push(env, v->args.a[i].v);
-            Val *b = C->boundary ? eval(env, C->boundary) : NULL;
-            if (b && b->k != V_SYS) return b;
+        { Val *av = F->av; Val *f = F->f;
+          if (av->k == V_NUM && f->args.n == 0 && cons[f->n].data == av->n) {
+              int zi, si;
+              if (peano_shape(av->n, &zi, &si) && f->n == si) MRET(vnum(av->n, av->lvl, bn_succ(av->num)));
+          }
+          Arg ar = {0}; ar.v = F->a; ar.irr = F->irr;
+          F->v = neu_app(f, ar); }
+        { Con *C = con_at(F->f->n, F->f->lvl); int np = datas[C->data].nparams; Val *v = F->v;
+          if (!(C->nint > 0 && v->args.n == np + C->nargs + C->nint) || !C->boundary) MRET(v);   /* a path constructor on a face of its boundary is the boundary */
+          Env *env = NULL;
+          for (int i = 0; i < v->args.n; i++) env = env_push(env, v->args.a[i].v);
+          MCALL(mpush_eval(env, C->boundary)); }
+        { Val *b = mret; if (b && b->k != V_SYS) MRET(b); MRET(F->v); }
+    }
+    /* a partial function applied pointwise */
+    F->br = xalloc((F->f->nbr + 1) * sizeof(VBranch));
+    for (F->i = 0; F->i < F->f->nbr; F->i++) {
+        F->br[F->i].phi = F->f->br[F->i].phi;
+        MCALL(mpush_vapp(F->f->br[F->i].v, F->a, F->irr));
+        F->br[F->i].v = mret;
+    }
+    MRET(vsys(F->br, F->f->nbr));
+    MFINISH
+}
+#undef F
+Val *vapp(Val *f, Val *a, int irr) { mpush_vapp(f, a, irr); return mrun(); }
+
+typedef struct { MHdr h; Val *p, *r, *x, *y; int i; VBranch *br; } VpappF;
+static void vpapp_step(size_t off);
+static void mpush_vpapp(Val *p, Val *r, Val *x, Val *y) { VpappF *f = mpush(sizeof *f, vpapp_step); f->p = p; f->r = r; f->x = x; f->y = y; }
+#define F ((VpappF *)(mst.p + off))
+static void vpapp_step(size_t off) {
+    MSTART
+    if (F->r->k != V_I) die("internal: path applied to a non-interval");
+    MFORCE(F->p);
+    if (iv_is_zero(F->r->iv)) MRET(F->x);
+    if (iv_is_one(F->r->iv)) MRET(F->y);
+    if (F->p->k == V_LAM) MTAIL(mpush_inst(&F->p->clo, F->r));
+    if (F->p->k == V_SYS) {
+        F->br = xalloc((F->p->nbr + 1) * sizeof(VBranch));
+        for (F->i = 0; F->i < F->p->nbr; F->i++) {
+            F->br[F->i].phi = F->p->br[F->i].phi;
+            MCALL(mpush_vpapp(F->p->br[F->i].v, F->r, F->x, F->y));
+            F->br[F->i].v = mret;
         }
-        return v;
+        MRET(vsys(F->br, F->p->nbr));
     }
-    case V_SYS: { /* a partial function applied pointwise */
-        VBranch *br = xalloc((f->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < f->nbr; i++) { br[i].phi = f->br[i].phi; br[i].v = vapp(f->br[i].v, a, irr); }
-        return vsys(br, f->nbr);
-    }
-    default: die("internal: application of a non-function value (kind %d)", f->k);
-    }
-    return NULL;
+    { Val *p = F->p; Arg ar = {0}; ar.v = F->r; ar.papp = 1; ar.x = F->x; ar.y = F->y;
+      meta_blocked = 1;
+      if (p->k == V_NEU || p->k == V_DATA || p->k == V_CON) MRET(neu_app(p, ar));
+      die("internal: path application to a non-path value"); }
+    MFINISH
 }
-Val *vpapp(Val *p, Val *r, Val *x, Val *y) {
-    if (r->k != V_I) die("internal: path applied to a non-interval");
-    p = force(p);
-    if (iv_is_zero(r->iv)) return x;
-    if (iv_is_one(r->iv)) return y;
-    if (p->k == V_LAM) return inst(&p->clo, r);
-    if (p->k == V_SYS) {
-        VBranch *br = xalloc((p->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < p->nbr; i++) { br[i].phi = p->br[i].phi; br[i].v = vpapp(p->br[i].v, r, x, y); }
-        return vsys(br, p->nbr);
-    }
-    Arg ar = {0}; ar.v = r; ar.papp = 1; ar.x = x; ar.y = y;
-    meta_blocked = 1;
-    if (p->k == V_NEU || p->k == V_DATA || p->k == V_CON) return neu_app(p, ar);
-    die("internal: path application to a non-path value");
-    return NULL;
+#undef F
+Val *vpapp(Val *p, Val *r, Val *x, Val *y) { mpush_vpapp(p, r, x, y); return mrun(); }
+
+typedef struct { MHdr h; Val *p; } PairSndF;
+static void pair_snd_step(size_t off);
+static void mpush_pair_snd(Val *p) { PairSndF *f = mpush(sizeof *f, pair_snd_step); f->p = p; }
+#define F ((PairSndF *)(mst.p + off))
+static void pair_snd_step(size_t off) {
+    MSTART
+    if (F->p->b) MRET(F->p->b);
+    if (F->p->clo.fn) mret = F->p->clo.fn(F->p->clo.data, NULL);
+    else MCALL(mpush_eval(F->p->clo.env, F->p->clo.t));
+    F->p->b = mret;
+    MRET(F->p->b);
+    MFINISH
 }
-Val *pair_snd(Val *p) {
-    if (!p->b) p->b = p->clo.fn ? p->clo.fn(p->clo.data, NULL) : eval(p->clo.env, p->clo.t);
-    return p->b;
-}
-Val *vproj(Val *p, int which) {
+#undef F
+Val *pair_snd(Val *p) { mpush_pair_snd(p); return mrun(); }
+
+typedef struct { MHdr h; Val *p; int which, i; VBranch *br; } VprojF;
+static void vproj_step(size_t off);
+static void mpush_vproj(Val *p, int which) { VprojF *f = mpush(sizeof *f, vproj_step); f->p = p; f->which = which; }
+#define F ((VprojF *)(mst.p + off))
+static void vproj_step(size_t off) {
+    MSTART
     /* A projection of a rigid definition application stays rigid (the H_DEF plan, one step further): the spine takes a
        proj entry, exactly as fst x on a variable does, conversion compares such spines by congruence, and force()
        unfolds through the projection where a canonical pair is needed (unfold_def replays proj entries). Forcing here
        instead evaluated the definition's whole body for every projection written in a TYPE - two copies of a 64-level
        loop, compared closure by closure (Bug_Eezott_ProjectionForcesDef_ExponentialConv). */
-    { Val *r = fmeta(p); if (r->k == V_NEU && r->h == H_DEF) { Arg ar = {0}; ar.proj = which; return neu_app(r, ar); } }
-    p = force(p);
-    if (p->k == V_PAIR) return which == 1 ? p->a : pair_snd(p);
-    if (p->k == V_SYS) {
-        VBranch *br = xalloc((p->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < p->nbr; i++) { br[i].phi = p->br[i].phi; br[i].v = vproj(p->br[i].v, which); }
-        return vsys(br, p->nbr);
+    MFMETA(F->p);
+    { Val *r = F->p; if (r->k == V_NEU && r->h == H_DEF) { Arg ar = {0}; ar.proj = F->which; MRET(neu_app(r, ar)); } }
+    MFORCE(F->p);
+    if (F->p->k == V_PAIR) { if (F->which == 1) MRET(F->p->a); MTAIL(mpush_pair_snd(F->p)); }
+    if (F->p->k == V_SYS) {
+        F->br = xalloc((F->p->nbr + 1) * sizeof(VBranch));
+        for (F->i = 0; F->i < F->p->nbr; F->i++) {
+            F->br[F->i].phi = F->p->br[F->i].phi;
+            MCALL(mpush_vproj(F->p->br[F->i].v, F->which));
+            F->br[F->i].v = mret;
+        }
+        MRET(vsys(F->br, F->p->nbr));
     }
-    Arg ar = {0}; ar.proj = which;
-    meta_blocked = 1;
-    if (p->k == V_NEU) return neu_app(p, ar);
-    die("internal: projection from a non-pair value");
-    return NULL;
+    { Arg ar = {0}; ar.proj = F->which;
+      meta_blocked = 1;
+      if (F->p->k == V_NEU) MRET(neu_app(F->p, ar));
+      die("internal: projection from a non-pair value"); }
+    MFINISH
 }
-static Val *apply_arg(Val *f, Arg *a) { return a->proj ? vproj(f, a->proj) : a->papp ? vpapp(f, a->v, a->x, a->y) : vapp(f, a->v, a->irr); }
+#undef F
+Val *vproj(Val *p, int which) { mpush_vproj(p, which); return mrun(); }
+static Val *apply_arg(Val *f, Arg *a) { mpush_apply_arg(f, a); return mrun(); }
 Val *vapply_arg(Val *f, Arg *a) { return apply_arg(f, a); }
 
-/* ---- evaluation ---- */
-static Env *subst_env(Env *e, int lv, IVal s);
-static IVal face_iv(const Face *f);
-Val *eval(Env *env, Term *t) {
+/* ---- evaluation ----
+   The term's own kinds: the ones that need no evaluation of subterms are values at once; the others hand the frame to
+   a step of their kind (MBECOME), which evaluates the subterms left to right into v[] and then combines them. */
+typedef struct { MHdr h; Env *env; Term *t; Val *v[4]; int i, j, k, n, cap, nf; VBranch *br; Face *fs; Env **cell; } EvalF;
+static void eval_step(size_t off);
+static void eval_sub_step(size_t off);
+static void eval_let_step(size_t off);
+static void eval_sys_step(size_t off);
+static void eval_pair_step(size_t off);
+static void mpush_eval(Env *env, Term *t) { EvalF *f = mpush(sizeof *f, eval_step); f->env = env; f->t = t; }
+#define F ((EvalF *)(mst.p + off))
+/* how many subterms a kind evaluates before combining (a, b, c, d in order); 0: not one of these kinds */
+static int eval_nsub(Term *t) {
     switch (t->k) {
-    case T_VAR: return env_get(env, t->n);
-    case T_U: { LVal l = t->a ? eval_level(env, t->a) : lv_const(t->n); return t->pre ? vupre_l(l) : vu_l(l); }
-    case T_LEVEL: return vlevel();
-    case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: return vl(eval_level(env, t));
-    case T_PI: { Val *v = mkval(V_PI); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->dom = eval(env, t->a); v->clo.env = env; v->clo.t = t->b; return v; }
-    case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->clo.env = env; v->clo.t = t->a; return v; }
-    case T_APP: return vapp(eval(env, t->a), eval(env, t->b), t->irr);
-    case T_LET: return eval(env_push(env, eval(env, t->b)), t->c);
+    case T_PI: case T_SIGMA: case T_INS: case T_FST: case T_SND: case T_INEG: return 1;
+    case T_APP: case T_IAND: case T_IOR: case T_PARTIAL: return 2;
+    case T_PATHP: case T_TRANSP: case T_SUB: case T_GLUE: case T_GLUEEL: return 3;
+    case T_PAPP: case T_HCOMP: case T_OUTS: return 4;
+    case T_UNGLUE: return 4;
+    default: return 0;
+    }
+}
+static Term *eval_sub(Term *t, int i) {
+    if (t->k == T_UNGLUE) { Term *o[4] = { t->b, t->c, t->d, t->a }; return o[i]; }   /* vunglue's argument order */
+    Term *o[4] = { t->a, t->b, t->c, t->d }; return o[i];
+}
+static void eval_step(size_t off) {
+    Term *t = F->t; Env *env = F->env;
+    switch (t->k) {
+    case T_VAR: MRET(env_get(env, t->n));
+    case T_U: { LVal l = t->a ? eval_level(env, t->a) : lv_const(t->n); MRET(t->pre ? vupre_l(l) : vu_l(l)); }
+    case T_LEVEL: MRET(vlevel());
+    case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: MRET(vl(eval_level(env, t)));
+    case T_LAM: { Val *v = mkval(V_LAM); v->name = t->name; v->irr = t->irr; v->isi = t->isi; v->imp = t->imp; v->clo.env = env; v->clo.t = t->a; MRET(v); }
     case T_DEF: {   /* rigid: a definition application (H_DEF), unfolded where a canonical form is needed */
-        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v;
+        Val *v = mkval(V_NEU); v->h = H_DEF; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v);
     }
-    case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
-    case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
-    case T_NUM: return vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num);
-    case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); return v; }
-    case T_LVAL: return vl(t->lvl);
-    case T_META: { Meta *m = &tmetas[t->n]; if (m->sol) return m->sol; Val *v = mkval(V_NEU); v->h = H_META; v->n = t->n; return v; }
-    case T_INTERVAL: return vinterval();
-    case T_I0: return vi(iv_zero());
-    case T_I1: return vi(iv_one());
-    case T_IAND: return vi(iv_and(eval(env, t->a)->iv, eval(env, t->b)->iv));
-    case T_IOR: return vi(iv_or(eval(env, t->a)->iv, eval(env, t->b)->iv));
-    case T_INEG: return vi(iv_neg(eval(env, t->a)->iv));
-    case T_PATHP: { Val *v = mkval(V_PATHP); v->a = eval(env, t->a); v->b = eval(env, t->b); v->c = eval(env, t->c); return v; }
-    case T_PAPP: return vpapp(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
-    case T_PARTIAL: { Val *v = mkval(V_PARTIAL); v->a = eval(env, t->a); v->b = eval(env, t->b); return v; }
-    case T_SYS: {   /* each branch is evaluated under the restriction to its face (per conjunct): a branch is only meaningful there */
-        int cap = 4, n = 0; VBranch *br = xalloc(cap * sizeof(VBranch));
-        for (int i = 0; i < t->nbr; i++) {
-            Val *phi = eval(env, t->br[i].face);
-            Face *fs; int nf = iv_faces(phi->iv, &fs);
-            for (int j = 0; j < nf; j++) {
-                if (n == cap) { cap *= 2; VBranch *b2 = xalloc(cap * sizeof(VBranch)); memcpy(b2, br, n * sizeof(VBranch)); br = b2; }
-                Env *env_f = env;
-                for (int k = 0; k < fs[j].n; k++) env_f = subst_env(env_f, fs[j].var[k], fs[j].val[k] ? iv_one() : iv_zero());
-                br[n].phi = vi(face_iv(&fs[j])); br[n].v = eval(env_f, t->br[i].body); n++;
-            }
-        }
-        return vsys(br, n);
+    case T_DATA: { Val *v = mkval(V_DATA); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
+    case T_CON: { Val *v = mkval(V_CON); v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
+    case T_NUM: MRET(vnum(t->n, t->a ? eval_level(env, t->a) : lv_const(0), t->num));
+    case T_ELIM: { Val *v = mkval(V_NEU); v->h = H_ELIM; v->n = t->n; v->lvl = t->a ? eval_level(env, t->a) : lv_const(0); MRET(v); }
+    case T_LVAL: MRET(vl(t->lvl));
+    case T_META: { Meta *m = &tmetas[t->n]; if (m->sol) MRET(m->sol); Val *v = mkval(V_NEU); v->h = H_META; v->n = t->n; MRET(v); }
+    case T_INTERVAL: MRET(vinterval());
+    case T_I0: MRET(vi(iv_zero()));
+    case T_I1: MRET(vi(iv_one()));
+    case T_IRR: MRET(mkval(V_IRR));
+    case T_LET: MBECOME(eval_let_step);
+    case T_SYS: MBECOME(eval_sys_step);
+    case T_PAIR: MBECOME(eval_pair_step);
+    default:
+        if (eval_nsub(t)) { F->n = eval_nsub(t); MBECOME(eval_sub_step); }
+        MRET(NULL);
     }
-    case T_TRANSP: return vtransp(eval(env, t->a), eval(env, t->b), eval(env, t->c));
-    case T_HCOMP: return vhcomp(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
-    case T_SUB: { Val *v = mkval(V_SUB); v->a = eval(env, t->a); v->b = eval(env, t->b); v->c = eval(env, t->c); return v; }
-    case T_SIGMA: { Val *v = mkval(V_SIGMA); v->name = t->name; v->irr = t->irr; v->dom = eval(env, t->a); v->clo.env = env; v->clo.t = t->b; return v; }
-    case T_PAIR: {
-        Val *v = mkval(V_PAIR); v->irr = t->irr; v->n = t->n; v->a = eval(env, t->a);
-        if (t->irr) { v->b = NULL; v->clo.env = env; v->clo.t = t->b; }   /* lazy: forced by snd only */
-        else v->b = eval(env, t->b);
-        return v;
-    }
-    case T_IRR: return mkval(V_IRR);
-    case T_FST: return vproj(eval(env, t->a), 1);
-    case T_SND: return vproj(eval(env, t->a), 2);
-    case T_GLUE: { Val *g = vglue(eval(env, t->a), eval(env, t->b), eval(env, t->c)); if (g->k == V_GLUE) g->lvl = t->d ? eval_level(env, t->d) : lv_const(t->n); return g; }
-    case T_GLUEEL: return vglueel(eval(env, t->a), eval(env, t->b), eval(env, t->c));
-    case T_UNGLUE: return vunglue(eval(env, t->b), eval(env, t->c), eval(env, t->d), eval(env, t->a));
-    case T_INS: { Val *v = mkval(V_INS); v->a = eval(env, t->a); return v; }
-    case T_OUTS: return vouts(eval(env, t->a), eval(env, t->b), eval(env, t->c), eval(env, t->d));
-    }
-    return NULL;
 }
+static void eval_sub_step(size_t off) {
+    MSTART
+    for (F->i = 0; F->i < F->n; F->i++) {
+        MCALL(mpush_eval(F->env, eval_sub(F->t, F->i)));
+        F->v[F->i] = mret;
+    }
+    { Term *t = F->t; Val **v = F->v; Env *env = F->env;
+      switch (t->k) {
+      case T_PI: { Val *r = mkval(V_PI); r->name = t->name; r->irr = t->irr; r->isi = t->isi; r->imp = t->imp; r->dom = v[0]; r->clo.env = env; r->clo.t = t->b; MRET(r); }
+      case T_SIGMA: { Val *r = mkval(V_SIGMA); r->name = t->name; r->irr = t->irr; r->dom = v[0]; r->clo.env = env; r->clo.t = t->b; MRET(r); }
+      case T_INS: { Val *r = mkval(V_INS); r->a = v[0]; MRET(r); }
+      case T_INEG: MRET(vi(iv_neg(v[0]->iv)));
+      case T_IAND: MRET(vi(iv_and(v[0]->iv, v[1]->iv)));
+      case T_IOR: MRET(vi(iv_or(v[0]->iv, v[1]->iv)));
+      case T_PATHP: { Val *r = mkval(V_PATHP); r->a = v[0]; r->b = v[1]; r->c = v[2]; MRET(r); }
+      case T_PARTIAL: { Val *r = mkval(V_PARTIAL); r->a = v[0]; r->b = v[1]; MRET(r); }
+      case T_SUB: { Val *r = mkval(V_SUB); r->a = v[0]; r->b = v[1]; r->c = v[2]; MRET(r); }
+      case T_TRANSP: MRET(vtransp(v[0], v[1], v[2]));
+      case T_HCOMP: MRET(vhcomp(v[0], v[1], v[2], v[3]));
+      case T_GLUE: { Val *g = vglue(v[0], v[1], v[2]); if (g->k == V_GLUE) g->lvl = t->d ? eval_level(env, t->d) : lv_const(t->n); MRET(g); }
+      case T_GLUEEL: MRET(vglueel(v[0], v[1], v[2]));
+      case T_UNGLUE: MRET(vunglue(v[0], v[1], v[2], v[3]));
+      case T_OUTS: MRET(vouts(v[0], v[1], v[2], v[3]));
+      case T_APP: { Val *f = v[0], *a = v[1]; int irr = t->irr; MTAIL(mpush_vapp(f, a, irr)); }
+      case T_PAPP: { Val *p = v[0], *r = v[1], *x = v[2], *y = v[3]; MTAIL(mpush_vpapp(p, r, x, y)); }
+      case T_FST: { Val *p = v[0]; MTAIL(mpush_vproj(p, 1)); }
+      case T_SND: { Val *p = v[0]; MTAIL(mpush_vproj(p, 2)); }
+      default: MRET(NULL);
+      } }
+    MFINISH
+}
+static void eval_let_step(size_t off) {
+    MSTART
+    MCALL(mpush_eval(F->env, F->t->b));
+    { Env *e = env_push(F->env, mret); Term *body = F->t->c; MTAIL(mpush_eval(e, body)); }
+    MFINISH
+}
+static void eval_pair_step(size_t off) {
+    MSTART
+    F->v[0] = mkval(V_PAIR); F->v[0]->irr = F->t->irr; F->v[0]->n = F->t->n;
+    MCALL(mpush_eval(F->env, F->t->a));
+    F->v[0]->a = mret;
+    if (F->t->irr) { F->v[0]->b = NULL; F->v[0]->clo.env = F->env; F->v[0]->clo.t = F->t->b; MRET(F->v[0]); }   /* lazy: forced by snd only */
+    MCALL(mpush_eval(F->env, F->t->b));
+    F->v[0]->b = mret;
+    MRET(F->v[0]);
+    MFINISH
+}
+/* a system: each branch is evaluated under the restriction to its face (per conjunct): a branch is only meaningful there */
+static void eval_sys_step(size_t off) {
+    MSTART
+    F->cap = 4; F->n = 0; F->br = xalloc(F->cap * sizeof(VBranch));
+    for (F->i = 0; F->i < F->t->nbr; F->i++) {
+        MCALL(mpush_eval(F->env, F->t->br[F->i].face));
+        F->nf = iv_faces(mret->iv, &F->fs);
+        for (F->j = 0; F->j < F->nf; F->j++) {
+            if (F->n == F->cap) { F->cap *= 2; VBranch *b2 = xalloc(F->cap * sizeof(VBranch)); memcpy(b2, F->br, F->n * sizeof(VBranch)); F->br = b2; }
+            F->cell = xalloc(sizeof *F->cell); *F->cell = F->env;
+            for (F->k = 0; F->k < F->fs[F->j].n; F->k++)
+                MCALL(mpush_subst_env(*F->cell, F->cell, F->fs[F->j].var[F->k], F->fs[F->j].val[F->k] ? iv_one() : iv_zero()));
+            F->br[F->n].phi = vi(face_iv(&F->fs[F->j]));
+            MCALL(mpush_eval(*F->cell, F->t->br[F->i].body));
+            F->br[F->n].v = mret; F->n++;
+        }
+    }
+    MRET(vsys(F->br, F->n));
+    MFINISH
+}
+#undef F
+Val *eval(Env *env, Term *t) { mpush_eval(env, t); return mrun(); }
 
-/* ---- restriction to a face ---- */
-static Env *subst_env(Env *e, int lv, IVal s) {
-    if (!e) return NULL;
-    Env *n = xalloc(sizeof *n); n->v = subst_val(e->v, lv, s); n->next = subst_env(e->next, lv, s); return n;
+/* ---- metas, forcing, unfolding (the machine's) ---- */
+typedef struct { MHdr h; Val *v, *r; int i; } FmetaF;
+static void fmeta_step(size_t off);
+static void mpush_fmeta(Val *v) { FmetaF *f = mpush(sizeof *f, fmeta_step); f->v = v; }
+#define F ((FmetaF *)(mst.p + off))
+static void fmeta_step(size_t off) {
+    MSTART
+    while (meta_solved_head(F->v)) {
+        F->r = tmetas[F->v->n].sol;
+        for (F->i = 0; F->i < F->v->args.n; F->i++) { MCALL(mpush_apply_arg(F->r, &F->v->args.a[F->i])); F->r = mret; }
+        F->v = F->r;
+    }
+    MRET(F->v);
+    MFINISH
 }
-/* closures built by the Kan rules with plain structs of values: the struct is a Val* array of known length */
-static void *caps_subst(void *data, int n, int lv, IVal s) {
-    Caps *c = data, *r = xalloc(sizeof *r); *r = *c;
-    for (int i = 0; i < n; i++) r->v[i] = subst_val(c->v[i], lv, s);
-    return r;
-}
-static void subst_clo(Clo *dst, const Clo *src, int lv, IVal s) {
-    *dst = *src;
-    dst->iarg = NULL; dst->ires = NULL; dst->imv = 0;   /* the substitution changes what the closure computes */
-    if (src->fn) {
-        if (src->fn == natfn) {
-            NatNative *nn = src->data, *m = xalloc(sizeof *m); *m = *nn;
-            m->fallback = subst_val(nn->fallback, lv, s); if (nn->arg1) m->arg1 = subst_val(nn->arg1, lv, s);
-            dst->data = m; return;
+#undef F
+Val *fmeta(Val *v) { if (!meta_solved_head(v)) return v; mpush_fmeta(v); return mrun(); }
+/* a field resolved through solved metas, on the machine (field is an F-> lvalue) */
+
+/* force: the canonical value - metas resolved, definition applications unfolded, deferred eliminations reduced. The
+   literal tripwire counts the forces active (force_depth): a frame's, as it was a C call's. */
+typedef struct { MHdr h; Val *v, *u; } ForceF;
+static void force_step(size_t off);
+static void mpush_force(Val *v) { ForceF *f = mpush(sizeof *f, force_step); f->v = v; }
+#define F ((ForceF *)(mst.p + off))
+static void force_step(size_t off) {
+    MSTART
+    force_depth++;
+    MFMETA(F->v);
+    for (;;) {
+        /* a rigid definition application unfolds; one that unfolds to itself (a native's guard neutral: a power no limb
+           list holds) is as canonical as it gets */
+        if (F->v->k == V_NEU && F->v->h == H_DEF) {
+            MCALL(mpush_unfold_def(F->v)); F->u = mret; MFMETA(F->u);
+            if (F->u == F->v) break;
+            F->v = F->u; continue;
         }
-        if (src->fn != nfn) { dst->data = caps_subst(src->data, ((Caps *)src->data)->n, lv, s); return; }
-        Native *nt = src->data, *nn = xalloc(sizeof *nn); *nn = *nt; nn->cap = (VList){0};
-        for (int i = 0; i < nt->cap.n; i++) vl_push(&nn->cap, subst_val(nt->cap.a[i].v, lv, s), nt->cap.a[i].irr);
-        dst->data = nn;
-    } else dst->env = subst_env(src->env, lv, s);
+        /* a deferred elimination reduces; a stuck one comes back as itself, its flag dropped */
+        if (F->v->k == V_NEU && F->v->h == H_ELIM && F->v->defer) {
+            MCALL(mpush_elim_force(F->v)); F->u = mret; MFMETA(F->u);
+            if (F->u == F->v) break;
+            F->v = F->u; continue;
+        }
+        break;
+    }
+    force_depth--;
+    MRET(F->v);
+    MFINISH
 }
-Val *restrict_val(Val *v, const Face *f) {
-    if (!f) return v;
-    for (int i = 0; i < f->n; i++) v = subst_val(v, f->var[i], f->val[i] ? iv_one() : iv_zero());
-    return v;
+#undef F
+Val *force(Val *v) { if (!force_needed(v)) return v; mpush_force(v); return mrun(); }
+
+/* def_at: a global's value at a level (a polymorphic definition's body instantiated once per level) */
+typedef struct { MHdr h; int id, n; LVal L; LMemoList *ml; } DefAtF;
+static void def_at_step(size_t off);
+static void mpush_def_at(int id, LVal L) { DefAtF *f = mpush(sizeof *f, def_at_step); f->id = id; f->L = L; }
+static LMemoList *def_memo; static int ndef_memo;
+#define F ((DefAtF *)(mst.p + off))
+static void def_at_step(size_t off) {
+    MSTART
+    { Def *d = &defs[F->id]; int n;
+      if (!d->poly) MRET(d->vval);
+      if (!lv_is_const(F->L, &n)) {
+          F->ml = memo_for(&def_memo, &ndef_memo, F->id); Val *r = lmemo_get(F->ml, F->L);
+          if (r) MRET(r);
+          F->n = -1;
+      } else {
+          F->n = n;
+          if (n >= d->nat) {
+              int m = n + 4; Val **nv = xalloc(m * sizeof(Val *)), **nt = xalloc(m * sizeof(Val *));
+              for (int i = 0; i < d->nat; i++) { nv[i] = d->vval_at[i]; nt[i] = d->vty_at[i]; }
+              d->vval_at = nv; d->vty_at = nt; d->nat = m;
+          }
+          if (d->vval_at[n]) MRET(d->vval_at[n]);
+      } }
+    MCALL(mpush_eval(NULL, subst_hidden(defs[F->id].val, F->L)));
+    if (F->n < 0) { lmemo_put(F->ml, F->L, mret); MRET(mret); }
+    defs[F->id].vval_at[F->n] = mret;
+    MRET(mret);
+    MFINISH
 }
-Val *subst_val(Val *v, int lv, IVal s) {
+#undef F
+Val *def_at(int id, LVal L) { mpush_def_at(id, L); return mrun(); }
+
+/* a rigid definition application to its value: the definition applied to its spine. The unfolding is a pure
+   function of the value (definition id, level, spine), so it is computed once and kept in the value itself: a
+   rigidity-preserving application is the shared cell, and every later force of the same spine hits it. This is the
+   memoization pass - without it each re-application of a nested definition's spine redoes the whole body (cost
+   compounding with nesting depth; Finding_Eezott_EvalNoSharing_2026_09_14). Guarded by the spine length (neu_app
+   lengthens spines) and the metas version (a solved meta can unstick what the memo took as neutral). */
+typedef struct { MHdr h; Val *v, *f; int save, i; } UnfoldF;
+static void unfold_def_step(size_t off);
+static void mpush_unfold_def(Val *v) { UnfoldF *f = mpush(sizeof *f, unfold_def_step); f->v = v; }
+#define F ((UnfoldF *)(mst.p + off))
+static void unfold_def_step(size_t off) {
+    MSTART
+    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = rcalloc(65536, sizeof(long)); } }
+    { Val *v = F->v; if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) MRET(v->unf); }
+    F->save = meta_blocked; meta_blocked = 0;
+    if (unf_count) unf_count[F->v->n]++;   /* diagnostic: body evaluations per definition (EEZOTT_UNFOLD_COUNTS) */
+    if (F->v->par && F->v->par->k == V_NEU && F->v->par->h == H_DEF && F->v->par->n == F->v->n && F->v->par->args.n + 1 == F->v->args.n) {
+        /* incremental along the spine: the parent's unfolding (memoised there), then the one entry this neutral adds.
+           Without this every projection or application written on a rigid definition re-evaluated its whole body. */
+        MCALL(mpush_unfold_def(F->v->par)); F->f = mret;
+        MCALL(mpush_apply_arg(F->f, &F->v->args.a[F->v->args.n - 1])); F->f = mret;
+    } else {
+        MCALL(mpush_def_at(F->v->n, F->v->lvl)); F->f = mret;
+        for (F->i = 0; F->i < F->v->args.n; F->i++) { MCALL(mpush_apply_arg(F->f, &F->v->args.a[F->i])); F->f = mret; }
+    }
+    { Val *v = F->v; v->unf = F->f; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked; }
+    meta_blocked |= F->save;
+    MRET(F->f);
+    MFINISH
+}
+#undef F
+Val *unfold_def(Val *v) { mpush_unfold_def(v); return mrun(); }
+
+/* ---- eliminations (the machine's) ---- */
+static void mpush_elim_reduce(int data, VList *args);
+static void mpush_elim_apply_list(int data, VList args);
+/* A saturated elimination is reduced on demand, as a rigid definition application is unfolded on demand: the value is
+   the shared cell and its reduction is kept in it (unf), guarded as unfold_def's memo is. So an induction hypothesis
+   is computed only where the method forces it, the branches of a decision only where the decision selects them, and
+   a fold over a literal walks only as far as something forces (S2: what the chunk rule approximated by refusing).
+   A stuck elimination (its target not canonical) comes back as itself with the flag dropped: the neutral it is. */
+typedef struct { MHdr h; Val *v, *r; int save; } EforceF;
+static void elim_force_step(size_t off);
+static void mpush_elim_force(Val *v) { EforceF *f = mpush(sizeof *f, elim_force_step); f->v = v; }
+#define F ((EforceF *)(mst.p + off))
+static void elim_force_step(size_t off) {
+    MSTART
+    { Val *v = F->v;
+      if (!v->defer) MRET(v);
+      if (v->unf && v->unf_n == v->args.n && (v->unf_mv == metas_version || v->unf_stable)) MRET(v->unf); }
+    F->save = meta_blocked; meta_blocked = 0;
+    { Data *D = &datas[F->v->n];
+      int arity = D->nparams + D->nblock + block_ncons(F->v->n) + D->nidx + 1;
+      if (F->v->args.n > arity) goto applied; }
+    elim_lvl = F->v->lvl;
+    MCALL(mpush_elim_reduce(F->v->n, &F->v->args)); F->r = mret;
+    if (!F->r) F->r = elim_hcomp(F->v->n, &F->v->args);
+    if (!F->r) { F->v->defer = 0; meta_blocked |= F->save; MRET(F->v); }
+    goto done;
+applied:   /* an application of the elimination's result: the parent's reduction, then this entry */
+    MCALL(mpush_elim_force(F->v->par)); F->r = mret;
+    if (F->r == F->v->par) { F->v->defer = 0; meta_blocked |= F->save; MRET(F->v); }
+    MCALL(mpush_apply_arg(F->r, &F->v->args.a[F->v->args.n - 1])); F->r = mret;
+done:
+    { Val *v = F->v; v->unf = F->r; v->unf_n = v->args.n; v->unf_mv = metas_version; v->unf_stable = !meta_blocked; }
+    meta_blocked |= F->save;
+    MRET(F->r);
+    MFINISH
+}
+#undef F
+Val *elim_force(Val *v) { if (!v->defer) return v; mpush_elim_force(v); return mrun(); }
+
+typedef struct { MHdr h; int data, i; VList args; Val *r; } EapplyF;
+static void elim_apply_list_step(size_t off);
+static void mpush_elim_apply_list(int data, VList args) { EapplyF *f = mpush(sizeof *f, elim_apply_list_step); f->data = data; f->args = args; }
+#define F ((EapplyF *)(mst.p + off))
+static void elim_apply_list_step(size_t off) {
+    MSTART
+    F->r = mkval(V_NEU); F->r->h = H_ELIM; F->r->n = F->data; F->r->lvl = elim_lvl;
+    for (F->i = 0; F->i < F->args.n; F->i++) { MCALL(mpush_vapp(F->r, F->args.a[F->i].v, F->args.a[F->i].irr)); F->r = mret; }
+    MRET(F->r);
+    MFINISH
+}
+#undef F
+static Val *elim_apply_list(int data, VList *args) { mpush_elim_apply_list(data, *args); return mrun(); }
+
+/* the motive of member `data` applied to the indices and, where an index ranges over a member, to its image: that member's
+   elimination of it with the same prefix (M11b) */
+typedef struct { MHdr h; int data, j; VList pre; Val **idx; Val *P; } MotiveF;
+static void motive_applied_step(size_t off);
+static void mpush_motive_applied(int data, VList pre, Val **idx) { MotiveF *f = mpush(sizeof *f, motive_applied_step); f->data = data; f->pre = pre; f->idx = idx; }
+#define F ((MotiveF *)(mst.p + off))
+static void motive_applied_step(size_t off) {
+    MSTART
+    { Data *D = &datas[F->data]; F->P = F->pre.a[D->nparams + D->bpos].v; }
+    for (F->j = 0; F->j < datas[F->data].nidx; F->j++) {
+        MCALL(mpush_vapp(F->P, F->idx[F->j], 1)); F->P = mret;
+        if (datas[F->data].idxrec[F->j] >= 0) {
+            { Data *D = &datas[F->data]; int np = D->nparams, nb = D->nblock, K = block_ncons(F->data);
+              VList a2 = {0}; for (int i = 0; i < np + nb + K; i++) vl_push(&a2, F->pre.a[i].v, prefix_irr(F->data, i));
+              vl_push(&a2, F->idx[F->j], 0);
+              MCALL(mpush_elim_apply_list(D->idxrec[F->j], a2)); }
+            MCALL(mpush_vapp(F->P, mret, 0)); F->P = mret;
+        }
+    }
+    MRET(F->P);
+    MFINISH
+}
+#undef F
+static Val *motive_applied(int data, VList *pre, Val **idx) { mpush_motive_applied(data, *pre, idx); return mrun(); }
+
+/* The literal-elimination tripwire (see below) and iota. */
+typedef struct { MHdr h; int data; VList *args; Val *target; } EreduceF;
+typedef struct { MHdr h; int data; VList *args; Data *D; int np, nb, K, j, q, end; Val *target; Con *c; Val *res;
+                 Native *ih; Env *e; VList a2; Val *ends[2]; Val *bsys, *img, *P; } ErgoF;
+static void elim_reduce_step(size_t off);
+static void elim_reduce_go_step(size_t off);
+static void mpush_elim_reduce(int data, VList *args) { EreduceF *f = mpush(sizeof *f, elim_reduce_step); f->data = data; f->args = args; }
+static void mpush_elim_reduce_go(int data, VList *args) { ErgoF *f = mpush(sizeof *f, elim_reduce_go_step); f->data = data; f->args = args; }
+#define F ((EreduceF *)(mst.p + off))
+static void elim_reduce_step(size_t off) {
+    MSTART
+    F->target = F->args->a[F->args->n - 1].v;
+    MFORCE(F->target);
+    if (F->target->k != V_NUM) MTAIL(mpush_elim_reduce_go(F->data, F->args));
+    { Val *target = F->target; int data = F->data; VList *args = F->args;
+      int bits = bn_bitlen(target->num);
+      /* a machine-sized literal walked past 64 levels, or ANY literal nested past 4096: the second rule is the
+         backstop for walks on literals below the word bounds, which the first rule cannot see (closed computations
+         nest legitimately - the power's bit loop is 64 levels per limb - so the floor is generous). The nesting is
+         the eliminations' or the forces': a step whose method returns a rigid native over its hypothesis (mul 3 ih)
+         walks when the native forces it, each step inside the last native's force, and elim_reduce itself returns
+         every time - so the forces are counted too (S2). Both counts are frames on the machine now, as they were C
+         calls. */
+      int nest = elim_num_depth > force_depth ? elim_num_depth : force_depth;
+      if ((bits > 40 && nest > 64) || nest > 4096) {
+          char *dec = bn_to_dec(target->num);   /* name the literal itself: the bits alone do not say which bound was walked */
+          if (strlen(dec) > 40) { dec[40] = 0; }
+          if (getenv("EEZOTT_TRIPWIRE_METHODS")) {   /* the nesting chain's outermost levels, then the eliminator's methods */
+              for (int i = 0; i < 3 && i < elim_num_depth; i++) fprintf(stderr, "  level %d: elim %s on %s\n", i, datas[elim_trace[i].data].name, elim_trace[i].lit);
+              fprintf(stderr, "  last native fallback: code %d, arg1 = %s; arg2 = %s\n", last_fallback_code, last_fallback[0], last_fallback[1]);
+              Data *D = &datas[data]; int np = D->nparams, nb = D->nblock;
+              for (int i = np + nb; i < args->n - 1; i++) {
+                  Val *m = args->a[i].v;
+                  fprintf(stderr, "  method %d: ", i - np - nb);
+                  if (m->k == V_LAM && m->clo.t) term_heads(stderr, m->clo.t, 0); else fprintf(stderr, "(kind %d)", m->k);
+                  fputc('\n', stderr);
+              }
+          }
+          resource_die("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
+                       datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
+      }
+      if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); } }
+    elim_num_depth++;
+    MCALL(mpush_elim_reduce_go(F->data, F->args));
+    elim_num_depth--;
+    MRET(mret);
+    MFINISH
+}
+#undef F
+
+#define F ((ErgoF *)(mst.p + off))
+static void elim_reduce_go_step(size_t off) {
+    MSTART
+    F->D = data_at(F->data, elim_lvl); elim_data_cur = F->data;
+    F->np = F->D->nparams; F->nb = F->D->nblock; F->K = block_ncons(F->data);
+    F->target = F->args->a[F->args->n - 1].v;
+    MFORCE(F->target);   /* a rigid definition application unfolds for the elimination */
+    if (F->target->k == V_NUM) F->target = num_view(F->target);   /* a literal eliminates as one constructor */
+    if (F->target->k != V_CON) { meta_blocked = 1; MRET(NULL); }
+    F->c = con_at(F->target->n, F->target->lvl);
+    if (F->c->data != F->data || F->target->args.n != F->np + F->c->nargs + F->c->nint) { meta_blocked = 1; MRET(NULL); }
+    F->res = F->args->a[F->np + F->nb + F->c->bord].v;
+    for (F->j = 0; F->j < F->c->nargs; F->j++) { MCALL(mpush_vapp(F->res, F->target->args.a[F->np + F->j].v, F->c->args[F->j].irr)); F->res = mret; }
+    for (F->j = 0; F->j < F->c->nargs; F->j++) {
+        if (F->c->args[F->j].isrecpath) {   /* the induction hypothesis over a path argument is the dependent path  k. elim .. idx (p k) */
+            F->ih = xalloc(sizeof *F->ih); F->ih->code = N_ELIM_PATH_IH; F->ih->i1 = F->c->args[F->j].rec;
+            for (int i = 0; i < F->np + F->nb + F->K; i++) vl_push(&F->ih->cap, F->args->a[i].v, prefix_irr(F->data, i));
+            F->e = NULL; for (int i = 0; i < F->np + F->j; i++) F->e = env_push(F->e, F->target->args.a[i].v);
+            for (F->q = 0; F->q < F->c->args[F->j].nidx; F->q++) { MCALL(mpush_eval(F->e, F->c->args[F->j].idx[F->q])); vl_push(&F->ih->cap, mret, 1); }
+            vl_push(&F->ih->cap, F->target->args.a[F->np + F->j].v, 0);
+            MCALL(mpush_eval(F->e, F->c->args[F->j].px)); vl_push(&F->ih->cap, mret, 0);
+            MCALL(mpush_eval(F->e, F->c->args[F->j].py)); vl_push(&F->ih->cap, mret, 0);
+            { Val *ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = F->ih; ihv->name = "k"; ihv->isi = 1;
+              MCALL(mpush_vapp(F->res, ihv, 0)); }
+            F->res = mret;
+            continue;
+        }
+        if (!F->c->args[F->j].isrec) continue;
+        /* a method that does not mention its induction hypothesis does not get one at all: a case analysis on a literal
+           (isZero, pred, if01 ..) then never builds the recursive elimination (M16a). One that does gets it deferred:
+           elim_apply_list ends in a saturated elimination, which vapp leaves unreduced until something forces it. */
+        if (F->c->args[F->j].npi == 0 && F->res->k == V_LAM && !F->res->clo.fn && !term_mentions_var(F->res->clo.t, 0)) {
+            MCALL(mpush_vapp(F->res, F->target->args.a[F->np + F->j].v, 0)); F->res = mret; continue;
+        }
+        F->ih = xalloc(sizeof *F->ih); F->ih->code = N_IH; F->ih->i1 = F->c->args[F->j].rec; F->ih->i2 = F->target->n; F->ih->i3 = F->j; F->ih->l = elim_lvl;
+        for (int i = 0; i < F->np + F->nb + F->K; i++) vl_push(&F->ih->cap, F->args->a[i].v, 0);
+        for (int i = 0; i < F->np; i++) vl_push(&F->ih->cap, F->target->args.a[i].v, 0);
+        for (int i = 0; i < F->j; i++) vl_push(&F->ih->cap, F->target->args.a[F->np + i].v, 0);
+        vl_push(&F->ih->cap, F->target->args.a[F->np + F->j].v, 0);
+        if (F->c->args[F->j].npi == 0) {
+            F->e = NULL; for (int i = 0; i < F->np + F->j; i++) F->e = env_push(F->e, F->ih->cap.a[F->np + F->nb + F->K + i].v);
+            F->a2 = (VList){0};
+            for (int i = 0; i < F->np + F->nb + F->K; i++) vl_push(&F->a2, F->args->a[i].v, prefix_irr(F->data, i));
+            for (F->q = 0; F->q < F->c->args[F->j].nidx; F->q++) { MCALL(mpush_eval(F->e, F->c->args[F->j].idx[F->q])); vl_push(&F->a2, mret, 1); }
+            vl_push(&F->a2, F->target->args.a[F->np + F->j].v, 0);
+            MCALL(mpush_elim_apply_list(F->c->args[F->j].rec, F->a2));
+        } else { Val *ihv = mkval(V_LAM); ihv->clo.fn = nfn; ihv->clo.data = F->ih; ihv->name = "y"; mret = ihv; }
+        MCALL(mpush_vapp(F->res, mret, 0)); F->res = mret;
+    }
+    if (F->c->nint == 0) MRET(F->res);
+    /* a path constructor: the method is a cube with the prescribed boundary */
+    if (F->c->pathmethod) {   /* PathP (i. P (c a i)) (elim .. b0) (elim .. b1) */
+        for (F->end = 0; F->end < 2; F->end++) {
+            { Env *e0 = NULL;
+              for (int i = 0; i < F->np + F->c->nargs; i++) e0 = env_push(e0, F->target->args.a[i].v);
+              e0 = env_push(e0, vi(F->end ? iv_one() : iv_zero()));
+              MCALL(mpush_eval(e0, F->c->boundary)); }
+            { Val *b = mret;
+              if (b->k == V_SYS) die("internal: boundary of %s not total at an endpoint", F->c->name);
+              VList a2 = vl_copy(F->args); a2.n = F->np + F->nb + F->K + F->D->nidx;   /* the boundary lives at the target's indices */
+              vl_push(&a2, b, 0);
+              MCALL(mpush_elim_apply_list(F->data, a2)); }
+            F->ends[F->end] = mret;
+        }
+        { Val *res = F->res, *r = F->target->args.a[F->np + F->c->nargs].v, *e0 = F->ends[0], *e1 = F->ends[1];
+          MTAIL(mpush_vpapp(res, r, e0, e1)); }
+    }
+    /* (is : I) -> Sub (P (c a is)) phi [faces -> elim .. boundary] */
+    for (F->q = 0; F->q < F->c->nint; F->q++) { MCALL(mpush_vapp(F->res, F->target->args.a[F->np + F->c->nargs + F->q].v, 0)); F->res = mret; }
+    if (!F->c->boundary) MRET(F->res);
+    { Env *env = NULL;
+      for (int i = 0; i < F->target->args.n; i++) env = env_push(env, F->target->args.a[i].v);
+      MCALL(mpush_eval(env, F->c->boundary)); }
+    F->bsys = mret;
+    { VList base = vl_copy(F->args); base.n = F->np + F->nb + F->K + F->D->nidx;
+      VList *bp = xalloc(sizeof *bp); *bp = base;
+      F->img = vsys_map(F->bsys, elim_of_branch, bp); }
+    { Val **iv = xalloc((F->D->nidx + 1) * sizeof(Val *));
+      for (int j = 0; j < F->D->nidx; j++) iv[j] = F->args->a[F->np + F->nb + F->K + j].v;
+      MCALL(mpush_motive_applied(F->data, *F->args, iv)); }
+    F->P = mret;
+    MCALL(mpush_vapp(F->P, F->target, 0));
+    { IVal phi = iv_zero();
+      if (F->bsys->k == V_SYS) { for (int i = 0; i < F->bsys->nbr; i++) phi = iv_or(phi, F->bsys->br[i].phi->iv); } else phi = iv_one();
+      MRET(vouts(mret, vi(phi), F->img, F->res)); }
+    MFINISH
+}
+#undef F
+
+/* ---- induction hypotheses (native closure N_IH) ----
+   cap = base (params, motive, methods), tele (params, previous args), ys, aj; i1=data i2=con i3=j; ys count = cap.n - nb - nt - 1 */
+typedef struct { MHdr h; Native *c, *d; int nb, nt, ny, i; Env *e; VList args; Val *t; } IhF;
+static void ih_apply_step(size_t off);
+static void mpush_ih_apply(Native *c, Val *y) {
+    IhF *f = mpush(sizeof *f, ih_apply_step); f->c = c;
+    Native *d = xalloc(sizeof *d); *d = *c; d->cap = vl_copy(&c->cap);
+    /* insert y before the trailing aj */
+    Arg aj = d->cap.a[d->cap.n - 1]; d->cap.n--; vl_push(&d->cap, y, 0); vl_push_arg(&d->cap, aj);
+    f->d = d;
+}
+#define F ((IhF *)(mst.p + off))
+static void ih_apply_step(size_t off) {
+    MSTART
+    F->nb = datas[F->c->i1].nparams + datas[F->c->i1].nblock + block_ncons(F->c->i1);
+    F->nt = datas[F->c->i1].nparams + F->c->i3;
+    F->ny = F->d->cap.n - F->nb - F->nt - 1;
+    { ConArg *ca = &con_at(F->c->i2, F->c->l)->args[F->c->i3];
+      if (F->ny < ca->npi) { Val *v = mkval(V_LAM); v->clo.fn = nfn; v->clo.data = F->d; v->name = "y"; MRET(v); } }
+    F->e = NULL; for (int i = 0; i < F->nt; i++) F->e = env_push(F->e, F->d->cap.a[F->nb + i].v);
+    for (int i = 0; i < F->ny; i++) F->e = env_push(F->e, F->d->cap.a[F->nb + F->nt + i].v);
+    F->args = (VList){0};
+    for (int i = 0; i < F->nb; i++) vl_push(&F->args, F->d->cap.a[i].v, prefix_irr(F->c->i1, i));
+    for (F->i = 0; F->i < con_at(F->c->i2, F->c->l)->args[F->c->i3].nidx; F->i++) {
+        MCALL(mpush_eval(F->e, con_at(F->c->i2, F->c->l)->args[F->c->i3].idx[F->i]));
+        vl_push(&F->args, mret, 1);
+    }
+    F->t = F->d->cap.a[F->d->cap.n - 1].v;
+    for (F->i = 0; F->i < F->ny; F->i++) { MCALL(mpush_vapp(F->t, F->d->cap.a[F->nb + F->nt + F->i].v, 0)); F->t = mret; }
+    vl_push(&F->args, F->t, 0);
+    { int data = F->c->i1; VList a = F->args; MTAIL(mpush_elim_apply_list(data, a)); }
+    MFINISH
+}
+#undef F
+static Val *ih_apply(Native *c, Val *y) { mpush_ih_apply(c, y); return mrun(); }
+
+/* ---- restriction to a face (the machine's) ----
+   A value with an interval variable substituted, rebuilt bottom up by frames: its parts in the order the recursion
+   took them, closures' captured values and environments included (an environment is rebuilt entry by entry, in
+   order). A closure or environment frame writes into a destination on the heap (the new value's own field), never
+   into the machine's stack. */
+static void mpush_subst(Val *v, int lv, IVal s);
+typedef struct { MHdr h; Env *e, **dst; int lv; IVal s; } SubstEnvF;
+static void subst_env_step(size_t off);
+static void mpush_subst_env(Env *e, Env **dst, int lv, IVal s) { SubstEnvF *f = mpush(sizeof *f, subst_env_step); f->e = e; f->dst = dst; f->lv = lv; f->s = s; }
+#define F ((SubstEnvF *)(mst.p + off))
+static void subst_env_step(size_t off) {
+    MSTART
+    *F->dst = NULL;
+    while (F->e) {
+        { Env *n = xalloc(sizeof *n); *F->dst = n; F->dst = &n->next; n->next = NULL; }
+        MCALL(mpush_subst(F->e->v, F->lv, F->s));
+        { Env *n = (Env *)((char *)F->dst - offsetof(Env, next)); n->v = mret; }
+        F->e = F->e->next;
+    }
+    MRET(NULL);
+    MFINISH
+}
+#undef F
+
+typedef struct { MHdr h; Clo *dst; const Clo *src; int lv; IVal s; int i, n; void *data; } SubstCloF;
+static void subst_clo_step(size_t off);
+static void mpush_subst_clo(Clo *dst, const Clo *src, int lv, IVal s) { SubstCloF *f = mpush(sizeof *f, subst_clo_step); f->dst = dst; f->src = src; f->lv = lv; f->s = s; }
+#define F ((SubstCloF *)(mst.p + off))
+static void subst_clo_step(size_t off) {
+    MSTART
+    *F->dst = *F->src;
+    F->dst->iarg = NULL; F->dst->ires = NULL; F->dst->imv = 0;   /* the substitution changes what the closure computes */
+    if (!F->src->fn) { MCALL(mpush_subst_env(F->src->env, &F->dst->env, F->lv, F->s)); MRET(NULL); }
+    if (F->src->fn == natfn) {
+        { NatNative *nn = F->src->data, *m = xalloc(sizeof *m); *m = *nn; F->data = m; }
+        MCALL(mpush_subst(((NatNative *)F->src->data)->fallback, F->lv, F->s)); ((NatNative *)F->data)->fallback = mret;
+        if (((NatNative *)F->src->data)->arg1) { MCALL(mpush_subst(((NatNative *)F->src->data)->arg1, F->lv, F->s)); ((NatNative *)F->data)->arg1 = mret; }
+        F->dst->data = F->data; MRET(NULL);
+    }
+    if (F->src->fn != nfn) {   /* closures built by the Kan rules with plain structs of values: a Val* array of known length */
+        { Caps *c = F->src->data, *r = xalloc(sizeof *r); *r = *c; F->data = r; F->n = c->n; }
+        for (F->i = 0; F->i < F->n; F->i++) { MCALL(mpush_subst(((Caps *)F->src->data)->v[F->i], F->lv, F->s)); ((Caps *)F->data)->v[F->i] = mret; }
+        F->dst->data = F->data; MRET(NULL);
+    }
+    { Native *nt = F->src->data, *nn = xalloc(sizeof *nn); *nn = *nt; nn->cap = (VList){0}; F->data = nn; }
+    for (F->i = 0; F->i < ((Native *)F->src->data)->cap.n; F->i++) {
+        MCALL(mpush_subst(((Native *)F->src->data)->cap.a[F->i].v, F->lv, F->s));
+        vl_push(&((Native *)F->data)->cap, mret, ((Native *)F->src->data)->cap.a[F->i].irr);
+    }
+    F->dst->data = F->data;
+    MRET(NULL);
+    MFINISH
+}
+#undef F
+
+typedef struct { MHdr h; Val *v, *r, *head; int lv; IVal s; int i; Val *x[4]; VBranch *br; Arg a; } SubstF;
+static void subst_step(size_t off);
+static void subst_clo_kind_step(size_t off);
+static void subst_parts_step(size_t off);
+static void subst_sys_step(size_t off);
+static void subst_args_step(size_t off);
+static void mpush_subst(Val *v, int lv, IVal s) { SubstF *f = mpush(sizeof *f, subst_step); f->v = v; f->lv = lv; f->s = s; }
+#define F ((SubstF *)(mst.p + off))
+/* the parts a kind substitutes before rebuilding (a, b, c, then dom), and whether it has any */
+static int subst_nparts(Val *v) {
     switch (v->k) {
-    case V_U: case V_INTERVAL: case V_L: case V_LEVEL: return v;
-    case V_I: return vi(iv_subst(v->iv, lv, s));
-    case V_LAM: { Val *r = mkval(V_LAM); *r = *v; subst_clo(&r->clo, &v->clo, lv, s); return r; }
-    case V_PI: { Val *r = mkval(V_PI); *r = *v; r->dom = subst_val(v->dom, lv, s); subst_clo(&r->clo, &v->clo, lv, s); return r; }
-    case V_PATHP: { Val *r = mkval(V_PATHP); r->a = subst_val(v->a, lv, s); r->b = subst_val(v->b, lv, s); r->c = subst_val(v->c, lv, s); return r; }
-    case V_PARTIAL: { Val *r = mkval(V_PARTIAL); r->a = subst_val(v->a, lv, s); r->b = subst_val(v->b, lv, s); return r; }
-    case V_SUB: { Val *r = mkval(V_SUB); r->a = subst_val(v->a, lv, s); r->b = subst_val(v->b, lv, s); r->c = subst_val(v->c, lv, s); return r; }
-    case V_INS: { Val *r = mkval(V_INS); r->a = subst_val(v->a, lv, s); return r; }
-    case V_SIGMA: { Val *r = mkval(V_SIGMA); *r = *v; r->dom = subst_val(v->dom, lv, s); subst_clo(&r->clo, &v->clo, lv, s); return r; }
-    case V_PAIR: {
-        Val *r = mkval(V_PAIR); r->irr = v->irr; r->n = v->n; r->a = subst_val(v->a, lv, s);
-        if (v->b) r->b = subst_val(v->b, lv, s); else { r->b = NULL; subst_clo(&r->clo, &v->clo, lv, s); }
-        return r;
+    case V_PATHP: case V_SUB: case V_GLUE: case V_GLUEEL: return 3;
+    case V_PARTIAL: return 2;
+    case V_INS: return 1;
+    case V_NEU: return v->h == H_TRANSP ? 3 : (v->h == H_HCOMP || v->h == H_OUTS || v->h == H_UNGLUE) ? 4 : 0;
+    default: return 0;
     }
-    case V_IRR: return v;
-    case V_SYS: {
-        VBranch *br = xalloc((v->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < v->nbr; i++) { br[i].phi = subst_val(v->br[i].phi, lv, s); br[i].v = subst_val(v->br[i].v, lv, s); }
-        return vsys(br, v->nbr);
-    }
-    case V_NUM: return v;   /* closed */
-    case V_DATA: case V_CON: {
-        Val *r = mkval(v->k); r->n = v->n; r->lvl = v->lvl; r->args = (VList){0};
-        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } a.irr = 0; if (v->k == V_CON) r = vapp(r, a.v, 0); else vl_push_arg(&r->args, a); }
-        return r;
-    }
-    case V_GLUE: { Val *g = vglue(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s)); if (g->k == V_GLUE) g->lvl = v->lvl; return g; }
-    case V_GLUEEL: return vglueel(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s));
-    case V_NEU: {
-        Val *head;
+}
+static Val *subst_part(Val *v, int i) { Val *o[4] = { v->a, v->b, v->c, v->dom }; return o[i]; }
+static void subst_step(size_t off) {
+    Val *v = F->v;
+    switch (v->k) {
+    case V_U: case V_INTERVAL: case V_L: case V_LEVEL: case V_IRR: case V_NUM: MRET(v);   /* a number is closed */
+    case V_I: MRET(vi(iv_subst(v->iv, F->lv, F->s)));
+    case V_LAM: case V_PI: case V_SIGMA: case V_PAIR: MBECOME(subst_clo_kind_step);
+    case V_SYS: MBECOME(subst_sys_step);
+    case V_DATA: case V_CON: MBECOME(subst_args_step);
+    case V_NEU:
         switch (v->h) {
-        case H_VAR: head = vvar(v->n); break;
-        case H_ELIM: head = mkval(V_NEU); head->h = H_ELIM; head->n = v->n; head->lvl = v->lvl; break;
-        case H_TRANSP: head = vtransp(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s)); break;
-        case H_HCOMP: head = vhcomp(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
-        case H_OUTS: head = vouts(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
-        case H_UNGLUE: head = vunglue(subst_val(v->a, lv, s), subst_val(v->b, lv, s), subst_val(v->c, lv, s), subst_val(v->dom, lv, s)); break;
-        case H_META: { Val *fv = force(v); if (fv != v) return subst_val(fv, lv, s); head = mkval(V_NEU); head->h = H_META; head->n = v->n; break; }
-        case H_DEF: head = mkval(V_NEU); head->h = H_DEF; head->n = v->n; head->lvl = v->lvl; break;
+        case H_VAR: F->head = vvar(v->n); MBECOME(subst_args_step);
+        case H_ELIM: F->head = mkval(V_NEU); F->head->h = H_ELIM; F->head->n = v->n; F->head->lvl = v->lvl; MBECOME(subst_args_step);
+        case H_DEF: F->head = mkval(V_NEU); F->head->h = H_DEF; F->head->n = v->n; F->head->lvl = v->lvl; MBECOME(subst_args_step);
+        case H_META: MBECOME(subst_args_step);
+        case H_TRANSP: case H_HCOMP: case H_OUTS: case H_UNGLUE: MBECOME(subst_parts_step);
         default: die("internal: unknown neutral head");
         }
-        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (a.v) a.v = subst_val(a.v, lv, s); if (a.papp) { a.x = subst_val(a.x, lv, s); a.y = subst_val(a.y, lv, s); } head = apply_arg(head, &a); }
-        return head;
+    default: MBECOME(subst_parts_step);
     }
-    }
-    return v;
 }
+static void subst_clo_kind_step(size_t off) {
+    MSTART
+    F->r = mkval(F->v->k);
+    if (F->v->k == V_PAIR) { F->r->irr = F->v->irr; F->r->n = F->v->n; } else *F->r = *F->v;
+    if (F->v->k == V_PI || F->v->k == V_SIGMA) { MCALL(mpush_subst(F->v->dom, F->lv, F->s)); F->r->dom = mret; }
+    if (F->v->k == V_PAIR) {
+        MCALL(mpush_subst(F->v->a, F->lv, F->s)); F->r->a = mret;
+        if (F->v->b) { MCALL(mpush_subst(F->v->b, F->lv, F->s)); F->r->b = mret; MRET(F->r); }
+        F->r->b = NULL;
+    }
+    MCALL(mpush_subst_clo(&F->r->clo, &F->v->clo, F->lv, F->s));
+    MRET(F->r);
+    MFINISH
+}
+static void subst_parts_step(size_t off) {
+    MSTART
+    for (F->i = 0; F->i < subst_nparts(F->v); F->i++) { MCALL(mpush_subst(subst_part(F->v, F->i), F->lv, F->s)); F->x[F->i] = mret; }
+    { Val *v = F->v, **x = F->x;
+      switch (v->k) {
+      case V_PATHP: { Val *r = mkval(V_PATHP); r->a = x[0]; r->b = x[1]; r->c = x[2]; MRET(r); }
+      case V_PARTIAL: { Val *r = mkval(V_PARTIAL); r->a = x[0]; r->b = x[1]; MRET(r); }
+      case V_SUB: { Val *r = mkval(V_SUB); r->a = x[0]; r->b = x[1]; r->c = x[2]; MRET(r); }
+      case V_INS: { Val *r = mkval(V_INS); r->a = x[0]; MRET(r); }
+      case V_GLUE: { Val *g = vglue(x[0], x[1], x[2]); if (g->k == V_GLUE) g->lvl = v->lvl; MRET(g); }
+      case V_GLUEEL: MRET(vglueel(x[0], x[1], x[2]));
+      case V_NEU:
+          if (v->h == H_TRANSP) F->head = vtransp(x[0], x[1], x[2]);
+          else if (v->h == H_HCOMP) F->head = vhcomp(x[0], x[1], x[2], x[3]);
+          else if (v->h == H_OUTS) F->head = vouts(x[0], x[1], x[2], x[3]);
+          else F->head = vunglue(x[0], x[1], x[2], x[3]);
+          MBECOME(subst_args_step);
+      default: MRET(v);
+      } }
+    MFINISH
+}
+static void subst_sys_step(size_t off) {
+    MSTART
+    F->br = xalloc((F->v->nbr + 1) * sizeof(VBranch));
+    for (F->i = 0; F->i < F->v->nbr; F->i++) {
+        MCALL(mpush_subst(F->v->br[F->i].phi, F->lv, F->s)); F->br[F->i].phi = mret;
+        MCALL(mpush_subst(F->v->br[F->i].v, F->lv, F->s)); F->br[F->i].v = mret;
+    }
+    MRET(vsys(F->br, F->v->nbr));
+    MFINISH
+}
+/* a spine: each argument substituted, then applied to the head built so far (a data type or constructor keeps its
+   arguments as a list; a meta is resolved first, and substituted in its solution if it has one) */
+static void subst_args_step(size_t off) {
+    MSTART
+    if (F->v->k == V_NEU && F->v->h == H_META) {
+        F->r = F->v; MFORCE(F->r);
+        if (F->r != F->v) { Val *fv = F->r; int lv = F->lv; IVal s = F->s; MTAIL(mpush_subst(fv, lv, s)); }
+        F->head = mkval(V_NEU); F->head->h = H_META; F->head->n = F->v->n;
+    }
+    if (F->v->k == V_DATA || F->v->k == V_CON) { F->head = mkval(F->v->k); F->head->n = F->v->n; F->head->lvl = F->v->lvl; F->head->args = (VList){0}; }
+    for (F->i = 0; F->i < F->v->args.n; F->i++) {
+        F->a = F->v->args.a[F->i];
+        if (F->a.v) { MCALL(mpush_subst(F->a.v, F->lv, F->s)); F->a.v = mret; }
+        if (F->a.papp) { MCALL(mpush_subst(F->a.x, F->lv, F->s)); F->a.x = mret; MCALL(mpush_subst(F->a.y, F->lv, F->s)); F->a.y = mret; }
+        if (F->v->k == V_DATA) { F->a.irr = 0; vl_push_arg(&F->head->args, F->a); continue; }
+        if (F->v->k == V_CON) { F->a.irr = 0; MCALL(mpush_vapp(F->head, F->a.v, 0)); F->head = mret; continue; }
+        { Arg *ap = xalloc(sizeof *ap); *ap = F->a; MCALL(mpush_apply_arg(F->head, ap)); }
+        F->head = mret;
+    }
+    MRET(F->head);
+    MFINISH
+}
+#undef F
+Val *subst_val(Val *v, int lv, IVal s) { mpush_subst(v, lv, s); return mrun(); }
+
+typedef struct { MHdr h; Val *v; const Face *f; int i; } RestrictF;
+static void restrict_step(size_t off);
+static void mpush_restrict(Val *v, const Face *f) { RestrictF *x = mpush(sizeof *x, restrict_step); x->v = v; x->f = f; }
+#define F ((RestrictF *)(mst.p + off))
+static void restrict_step(size_t off) {
+    MSTART
+    if (F->f) for (F->i = 0; F->i < F->f->n; F->i++) {
+        MCALL(mpush_subst(F->v, F->f->var[F->i], F->f->val[F->i] ? iv_one() : iv_zero()));
+        F->v = mret;
+    }
+    MRET(F->v);
+    MFINISH
+}
+#undef F
+Val *restrict_val(Val *v, const Face *f) { if (!f) return v; mpush_restrict(v, f); return mrun(); }
 
 /* ---- Kan operations ---- */
 static Val *neu_transp(Val *line, Val *phi, Val *u0) { Val *v = mkval(V_NEU); v->h = H_TRANSP; v->a = line; v->b = phi; v->c = u0; return v; }
