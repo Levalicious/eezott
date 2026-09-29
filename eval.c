@@ -255,23 +255,18 @@ int block_ncons(int d) { Data *D = &datas[d]; int K = 0; for (int i = 0; i < D->
 static int prefix_irr(int d, int i) { Data *D = &datas[d]; if (i < D->nparams) return 1; i -= D->nparams; if (i < D->nblock) { Data *M = &datas[D->block + i]; return !(M->hit || M->nidx > 0); } return 0; }
 Term *mk_term(TKind k, Term *a, Term *b, Term *c, Term *d) { Term *t = mk(k); t->a = a; t->b = b; t->c = c; t->d = d; return t; }
 
-/* the node construction of shift2 and subst_term (subst_term also keeps isi on the other formers) */
-static Term *shsub_build(Term *t, Term **k, int keep_isi) {
-    Term *r;
-    switch (t->k) {
-    case T_PI:  r = mk_pi(t->name, k[0], k[1], t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_LAM: r = mk_lam(t->name, k[0], t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_SIGMA: r = mk_term(T_SIGMA, k[0], k[1], NULL, NULL); r->name = t->name; return r;
-    case T_APP: if (!keep_isi) return mk_app(k[0], k[1], t->irr); break;
-    case T_LET: return mk_let(t->name, k[0], k[1], k[2], t->irr);
-    case T_SYS:
-        r = mk(T_SYS); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+/* a node rebuilt around new children: every field of the node kept (a binder's irrelevance, a pretype's mark, a Sigma's
+   irrelevant component, implicitness), only its children - the walked slots, or a system's faces and bodies - replaced */
+Term *term_rebuild(Term *t, Term **k) {
+    Term *r = mk(t->k); *r = *t;
+    if (t->k == T_SYS) {
+        r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
         for (int i = 0; i < t->nbr; i++) { r->br[i].face = k[2 * i]; r->br[i].body = k[2 * i + 1]; }
         return r;
-    default: break;
     }
-    r = mk_term(t->k, k[0], k[1], k[2], k[3]);
-    r->n = t->n; r->irr = t->irr; r->name = t->name; if (keep_isi) r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
+    int n = term_nkids(t, 0);
+    r->a = k[0]; if (n > 1) r->b = k[1]; if (n > 2) r->c = k[2]; if (n > 3) r->d = k[3];
+    return r;
 }
 static int shsub_leaf(Term *t) {
     switch (t->k) { case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return 1; default: return 0; }
@@ -286,7 +281,7 @@ static int shift2_pre(Term *t, int d, void *ctx, TWDecide *o) {
     if (shsub_leaf(t)) { o->r = t; return TW_DONE; }
     return TW_NODE;
 }
-static Term *shift2_build(Term *t, Term **k, void *ctx) { (void)ctx; return shsub_build(t, k, 0); }
+static Term *shift2_build(Term *t, Term **k, void *ctx) { (void)ctx; return term_rebuild(t, k); }
 Term *shift2(Term *t, int cut1, int by1, int cut2, int by2) {
     Shift2 s = { cut1, by1, cut2, by2 };
     return term_walk(t, 0, 0, shift2_pre, shift2_build, &s);
@@ -299,7 +294,7 @@ static int subst_term_pre(Term *t, int d, void *ctx, TWDecide *o) {
     if (shsub_leaf(t)) { o->r = t; return TW_DONE; }
     return TW_NODE;
 }
-static Term *subst_term_build(Term *t, Term **k, void *ctx) { (void)ctx; return shsub_build(t, k, 1); }
+static Term *subst_term_build(Term *t, Term **k, void *ctx) { (void)ctx; return term_rebuild(t, k); }
 Term *subst_term(Term *t, int idx, Term *v) {       /* v closed */
     SubstT s = { idx, v };
     return term_walk(t, 0, 0, subst_term_pre, subst_term_build, &s);

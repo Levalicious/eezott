@@ -176,6 +176,7 @@ Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx);
 int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx);
 void term_any_push(Term *t, int d);   /* for a visitor returning 2: push in reverse of the order they are to be visited */
 int term_nkids(Term *t, int all); Term *term_kid(Term *t, int i); int term_kid_binds(Term *t, int i);
+Term *term_rebuild(Term *t, Term **kids);   /* the node with new children, every other field kept */
 
 /* ---------------- interval values ---------------- */
 
