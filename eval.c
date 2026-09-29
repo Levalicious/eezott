@@ -17,6 +17,7 @@
  * Agda reducer (see Programs/Reference/agda).
  */
 #include "tt.h"
+#include "machine.h"
 #include <stdint.h>
 
 Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
@@ -81,7 +82,7 @@ Term *term_kid(Term *t, int i) {
 int term_kid_binds(Term *t, int i) {
     switch (t->k) { case T_PI: case T_SIGMA: return i == 1; case T_LAM: return i == 0; case T_LET: return i == 2; default: return 0; }
 }
-typedef struct { Term *t; int d, i, n, spine; size_t kb; Term **ks; TWPost post; } TWFrame;
+typedef struct { Term *t; int d, i, n, spine, fin; size_t kb; Term **ks; TWPost post; void *aux; } TWFrame;
 static Stack twf = { NULL, 0, 0, sizeof(TWFrame) }, twk = { NULL, 0, 0, sizeof(Term *) };   /* Stacks of the memory layer */
 Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx) {
     size_t fb = twf.n;
@@ -94,7 +95,7 @@ Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx) {
             int k = pre(cur, cd, ctx, &dc);
             if (k == TW_DONE) STACK_PUSH(&twk, Term *, dc.r);
             else {
-                TWFrame fr = { cur, cd, 0, k == TW_SPINE ? dc.nk : term_nkids(cur, all), k == TW_SPINE, twk.n, dc.ks, dc.post };
+                TWFrame fr = { cur, cd, 0, k == TW_SPINE ? dc.nk : term_nkids(cur, all), k == TW_SPINE, dc.fin, twk.n, dc.ks, dc.post, dc.aux };
                 STACK_PUSH(&twf, TWFrame, fr);
             }
         }
@@ -111,7 +112,8 @@ Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx) {
             Term **kids = xalloc((fr.n + 1) * sizeof(Term *));   /* copied out: the callback may walk (and grow the stacks) */
             memcpy(kids, &STACK_AT(&twk, Term *, fr.kb), fr.n * sizeof(Term *));
             twk.n = fr.kb; twf.n--;
-            if (fr.spine) { cur = fr.post(fr.t, kids, fr.n, ctx); cd = fr.d; break; }   /* walked in the node's place */
+            if (fr.spine && !fr.fin) { cur = fr.post(fr.t, kids, fr.n, ctx, fr.aux); cd = fr.d; break; }   /* walked in the node's place */
+            if (fr.spine) { STACK_PUSH(&twk, Term *, fr.post(fr.t, kids, fr.n, ctx, fr.aux)); continue; }
             STACK_PUSH(&twk, Term *, build(fr.t, kids, ctx));
         }
     }
@@ -119,6 +121,7 @@ Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx) {
 /* does any node satisfy the visitor (1: found, 0: look inside, -1: nothing inside)? preorder, as the recursion was */
 typedef struct { Term *t; int d; } TAItem;
 static Stack tast = { NULL, 0, 0, sizeof(TAItem) };
+void term_any_push(Term *t, int d) { TAItem c = { t, d }; STACK_PUSH(&tast, TAItem, c); }
 int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx) {
     size_t base = tast.n;
     TAItem it0 = { t, d }; STACK_PUSH(&tast, TAItem, it0);
@@ -126,8 +129,8 @@ int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx) {
         TAItem it = STACK_POP(&tast, TAItem);
         if (!it.t) continue;
         int r = pre(it.t, it.d, ctx);
-        if (r > 0) { tast.n = base; return 1; }
-        if (r < 0) continue;
+        if (r == 1) { tast.n = base; return 1; }
+        if (r != 0) continue;   /* -1: nothing inside; 2: the visitor pushed the children it looks at */
         for (int i = term_nkids(it.t, all) - 1; i >= 0; i--) { TAItem c = { term_kid(it.t, i), it.d + term_kid_binds(it.t, i) }; STACK_PUSH(&tast, TAItem, c); }
     }
     return 0;
@@ -875,35 +878,10 @@ static IVal face_iv(const Face *f);
    A step never holds a pointer to its frame across anything that may push (the stack may move): F re-derives it from
    the frame's offset each time. The resume points are case labels of the frame's pc (Duff's device); a step whose
    case would have one inside another switch hands its frame over to a step of its own (MBECOME). */
-typedef struct { void (*step)(size_t); int pc; size_t prev; } MHdr;
-static Stack mst = { NULL, 0, 0, 1 };
-static size_t mtop = (size_t)-1;
-static Val *mret;
-static void *mpush(size_t size, void (*step)(size_t)) {
-    size = (size + 15) & ~(size_t)15;
-    size_t off = (mst.n + 15) & ~(size_t)15;
-    stack_reserve(&mst, off + size);
-    mst.n = off + size;
-    MHdr *h = (MHdr *)(mst.p + off);
-    memset(h, 0, size);
-    h->step = step; h->prev = mtop;
-    mtop = off;
-    return h;
-}
-static void mpop(size_t off) { mtop = ((MHdr *)(mst.p + off))->prev; mst.n = off; }
-/* run the frame just pushed, and all it calls, to its value */
-static Val *mrun(void) {
-    size_t below = ((MHdr *)(mst.p + mtop))->prev;
-    while (mtop != below) { size_t off = mtop; ((MHdr *)(mst.p + off))->step(off); }
-    return mret;
-}
-#define MSTART switch (F->h.pc) { case 0:;
-#define MFINISH } return;
-#define MCALL(push) MCALL_((push), __COUNTER__ + 1)   /* a resume point: a number unique in the file, never 0 */
-#define MCALL_(push, n) do { F->h.pc = (n); push; return; case (n):; } while (0)
-#define MRET(v) do { Val *mr_ = (v); mret = mr_; mpop(off); return; } while (0)
-#define MTAIL(push) do { mpop(off); push; return; } while (0)   /* the callee's value is this frame's: its caller resumes */
-#define MBECOME(st) do { F->h.step = (st); F->h.pc = 0; return; } while (0)
+/* the machine's core is shared with the elaborator (machine.h); its state lives here */
+Stack mst = { NULL, 0, 0, 1 };
+size_t mtop = (size_t)-1;
+Val *mret;
 static int meta_solved_head(Val *v) { return v->k == V_NEU && v->h == H_META && tmetas[v->n].sol; }
 static int force_needed(Val *v) { return meta_solved_head(v) || (v->k == V_NEU && (v->h == H_DEF || (v->h == H_ELIM && v->defer))); }
 static void mpush_fmeta(Val *v);

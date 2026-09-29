@@ -75,7 +75,6 @@ static int native_of(int d, int code) {   /* the native of that code on d, or -1
     return -1;
 }
 static Term *literal_via_map(Rep *r, Term *t);
-static void erase_literal(Rep *r, Term *t, int depth);
 static int rep_trace = -1;   /* EEZOTT_REP_TRACE: print each role's and scheme's match */
 static FILE *out;
 static int self_data = -1;      /* while emitting tc_D: references to D are the fixpoint's self */
@@ -159,101 +158,78 @@ static int *def_state, *data_state;   /* 0 unseen, 1 being emitted, 2 emitted */
 /* every definition a term refers to at run time (natives through the representation's operations) is in the wanted state:
    2, emitted, for a closed form about to be emitted; not 1, being emitted, for a theorem's right side about to be visited -
    a closed form inside the representation's own operations would reach them, so there the elimination walks */
-static int term_defs_ok(Term *t, int want) {
-    if (!t) return 1;
+static int defs_bad_pre(Term *t, int d, void *ctx) {
+    int want = *(int *)ctx;
     switch (t->k) {
     case T_DEF:
-        if (defs[t->n].native) { Rep *r = rep_of(native_dom(t->n)); if (r && r->native[defs[t->n].native]) return term_defs_ok(r->native[defs[t->n].native], want); }
-        if (defs[t->n].wordop || defs[t->n].isword) return 1;
-        return want == 2 ? def_state[t->n] == 2 : def_state[t->n] != 1;
-    case T_CON: { Rep *r = rep_of(cons[t->n].data); return r ? term_defs_ok(cons[t->n].nargs == 0 ? r->zero : r->suc, want) : 1; }
-    case T_DATA: { Rep *r = rep_of(t->n); return r ? term_defs_ok(r->R, want) : 1; }
-    case T_ELIM: { Rep *r = rep_of(t->n); return r ? term_defs_ok(r->isz, want) && term_defs_ok(r->pred, want) : 1; }
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (!term_defs_ok(t->br[i].face, want) || !term_defs_ok(t->br[i].body, want)) return 0; return 1;
-    default: return term_defs_ok(t->a, want) && term_defs_ok(t->b, want) && term_defs_ok(t->c, want) && term_defs_ok(t->d, want);
+        if (defs[t->n].native) { Rep *r = rep_of(native_dom(t->n)); if (r && r->native[defs[t->n].native]) { term_any_push(r->native[defs[t->n].native], d); return 2; } }
+        if (defs[t->n].wordop || defs[t->n].isword) return -1;
+        return (want == 2 ? def_state[t->n] == 2 : def_state[t->n] != 1) ? -1 : 1;
+    case T_CON: { Rep *r = rep_of(cons[t->n].data); if (!r) return -1; term_any_push(cons[t->n].nargs == 0 ? r->zero : r->suc, d); return 2; }
+    case T_DATA: { Rep *r = rep_of(t->n); if (!r) return -1; term_any_push(r->R, d); return 2; }
+    case T_ELIM: { Rep *r = rep_of(t->n); if (!r) return -1; term_any_push(r->pred, d); term_any_push(r->isz, d); return 2; }
+    default: return 0;
     }
 }
-static void visit_scheme_rhs(Rep *rep) {   /* the right sides of the scheme theorems in scope, under their binders */
-    for (int i = 0; i < ndefs; i++) {
-        if (!scheme_theorem(defs[i].vty, rep->d)) continue;
-        Val *ty = defs[i].vty; int k = 0;
-        for (;;) { Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; } ty = inst(&t->clo, t->isi ? vivar(k) : vvar(k)); k++; }
-        if (ty->k == V_PATHP) { Term *r = quote(k, ty->c); if (term_defs_ok(r, 1)) visit(r); }
-    }
-}
+static int term_defs_ok(Term *t, int want) { return !term_any(t, 0, 1, defs_bad_pre, &want); }
 /* an elimination on the Nat: emitted (emit) or its references walked for the dependency order (not emit) */
-static int nat_elim_spine(Term *t, int depth, int emit) {
-    Term *node[8]; int n = 0; Term *h = t;
-    while (h->k == T_APP) { if (n < 8) node[n] = h; n++; h = h->a; }
-    if (h->k != T_ELIM || !is_nat(h->n)) return 0;
-    Rep *rep = rep_of(h->n);
-    if (n > 8) die("an elimination on the Nat is applied to more arguments than the erasure can see through");
-    /* the eliminator's own arguments are the innermost four: the motive (irrelevant, so never emitted), the
-       methods in constructor order, and the scrutinee; anything outside them applies the elimination's result */
-    if (n < 4) {   /* partially applied (a point-free definition): eta-expanded - the missing arguments become binders */
-        int k = 4 - n;
-        Term *t2 = shift(t, 0, k);
-        for (int i = k - 1; i >= 0; i--) { Term *v = xalloc(sizeof *v); v->k = T_VAR; v->n = i; Term *ap = xalloc(sizeof *ap); ap->k = T_APP; ap->a = t2; ap->b = v; t2 = ap; }
-        if (emit) for (int i = 0; i < k; i++) fprintf(out, "(v%d -> ", depth + i);
-        int r = nat_elim_spine(t2, depth + k, emit);
-        if (emit) for (int i = 0; i < k; i++) fputc(')', out);
-        return r;
-    }
-    int extra = n - 4;
-    Term *motive = node[n - 1]->b, *mz = node[n - 2]->b, *ms = node[n - 3]->b, *scrut = node[n - 4]->b;
-    (void)motive;
-    Term *meth = ms;
-    if (meth->k == T_DEF) meth = defs[meth->n].val;   /* the checker sees through a definition application; so does the erasure */
-    Term *body = strip_lams(meth, 2);
-    if (!body) die("an elimination's method must be a function of its predecessor and its induction hypothesis");
-    /* The methods live in the context outside the binder v<depth> introduced here and never mention it, so they
-       are erased at that depth (a binder of their own may reuse the name inside its own scope, harmlessly).
-       The empty test is a Bool: true selects its first handler, the zero case. */
-    Term *isz = role_need(rep->isz, "an elimination's zero test"), *pred = role_need(rep->pred, "an elimination's predecessor");
-    if (!emit) {   /* the dependency walk: what the emission below may refer to - the walk's parts, and, for a fold, the right
-                      sides of the theorems in scope (a closed form is built from them and from the elimination's own terms) */
-        visit(isz); visit(pred); visit(mz); visit(ms); visit(scrut);
-        if (term_mentions_var(body, 0)) visit_scheme_rhs(rep);
-        for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) visit(node[i]->b);
+/* an elimination on the Nat: its parts. The eliminator's own arguments are the innermost four: the motive (irrelevant, so
+   never emitted), the methods in constructor order, and the scrutinee; anything outside them applies the elimination's
+   result. Partially applied (a point-free definition), it is eta-expanded: the k missing arguments become binders. */
+typedef struct { int k, depth, n, extra; Term *node[8]; Rep *rep; Term *mz, *ms, *scrut, *body, *isz, *pred; } NatElim;
+static int nat_elim_parts(Term *t, int depth, NatElim *e) {
+    e->k = 0;
+    for (;;) {
+        int n = 0; Term *h = t;
+        while (h->k == T_APP) { if (n < 8) e->node[n] = h; n++; h = h->a; }
+        if (h->k != T_ELIM || !is_nat(h->n)) return 0;
+        e->rep = rep_of(h->n);
+        if (n > 8) die("an elimination on the Nat is applied to more arguments than the erasure can see through");
+        if (n < 4) {
+            int k = 4 - n;
+            Term *t2 = shift(t, 0, k);
+            for (int i = k - 1; i >= 0; i--) { Term *v = xalloc(sizeof *v); v->k = T_VAR; v->n = i; Term *ap = xalloc(sizeof *ap); ap->k = T_APP; ap->a = t2; ap->b = v; t2 = ap; }
+            e->k = k; t = t2; depth += k; continue;
+        }
+        e->n = n; e->depth = depth; e->extra = n - 4;
+        e->mz = e->node[n - 2]->b; e->ms = e->node[n - 3]->b; e->scrut = e->node[n - 4]->b;
+        Term *meth = e->ms;
+        if (meth->k == T_DEF) meth = defs[meth->n].val;   /* the checker sees through a definition application; so does the erasure */
+        e->body = strip_lams(meth, 2);
+        if (!e->body) die("an elimination's method must be a function of its predecessor and its induction hypothesis");
+        /* The methods live in the context outside the binder v<depth> introduced here and never mention it, so they
+           are erased at that depth (a binder of their own may reuse the name inside its own scope, harmlessly).
+           The empty test is a Bool: true selects its first handler, the zero case. */
+        e->isz = role_need(e->rep->isz, "an elimination's zero test"); e->pred = role_need(e->rep->pred, "an elimination's predecessor");
         return 1;
     }
-    Term *closed = NULL;
-    if (term_mentions_var(body, 0)) {   /* a fold: the closed form a theorem licenses, if one does */
-        Term *body2 = canon_step(rep, body);
-        Term *ms2 = body2 == body ? ms : mk_lam("k", mk_lam("ih", body2, 0), 0);
-        Term *e = mk_app(mk_app(mk_app(node[n - 1], mz, node[n - 2]->irr), ms2, node[n - 3]->irr), scrut, node[n - 4]->irr);
-        closed = scheme_closed_form(rep, e, depth);
-        if (closed && !term_defs_ok(closed, 2)) closed = NULL;   /* its parts are not all emitted (a cycle through the representation): the walk */
-    }
-    if (term_mentions_var(body, 0)) {
-        if (closed) erase(closed, depth);
-        else {   /* the walk: fix over the predecessor */
-            fprintf(out, "(fix(self -> v%d -> ", depth); erase(isz, depth); fprintf(out, "(v%d)(", depth); erase(mz, depth);
-            fputs(")(", out); erase(ms, depth); fputc('(', out); erase(pred, depth); fprintf(out, "(v%d))(self(", depth); erase(pred, depth); fprintf(out, "(v%d))))))(", depth);
-            erase(scrut, depth); fputc(')', out);
-        }
-    } else {   /* the case analysis: the predecessor, and a dummy for the induction hypothesis */
-        fprintf(out, "((v%d -> ", depth); erase(isz, depth); fprintf(out, "(v%d)(", depth); erase(mz, depth);
-        fputs(")(", out); erase(ms, depth); fputc('(', out); erase(pred, depth); fprintf(out, "(v%d))(tc_u)))(", depth);
-        erase(scrut, depth); fputs("))", out);
-    }
-    for (int i = extra - 1; i >= 0; i--) if (!node[i]->irr) { fputc('(', out); erase(node[i]->b, depth); fputc(')', out); }
-    return 1;
 }
-static int try_nat_elim(Term *t, int depth) { return nat_elim_spine(t, depth, 1); }
 
 
 /* a face term to the checker's interval algebra, interval variables by their erased index (v<index> = level depth-1-n) */
-static IVal face_ival(Term *t, int depth) {
-    switch (t->k) {
-    case T_VAR: return iv_var(depth - 1 - t->n);
-    case T_I0: return iv_zero();
-    case T_I1: return iv_one();
-    case T_IAND: return iv_and(face_ival(t->a, depth), face_ival(t->b, depth));
-    case T_IOR: return iv_or(face_ival(t->a, depth), face_ival(t->b, depth));
-    case T_INEG: return iv_neg(face_ival(t->a, depth));
-    default: die("internal: a face that is not an interval term"); return iv_zero();
+typedef struct { Term *t; int post; } FIItem;
+static Stack fist = { NULL, 0, 0, sizeof(FIItem) }, fvst = { NULL, 0, 0, sizeof(IVal) };
+static IVal face_ival(Term *t0, int depth) {
+    size_t ib = fist.n;
+    FIItem it0 = { t0, 0 }; STACK_PUSH(&fist, FIItem, it0);
+    while (fist.n > ib) {
+        FIItem it = STACK_POP(&fist, FIItem); Term *t = it.t;
+        if (it.post) {
+            if (t->k == T_INEG) { IVal a = STACK_POP(&fvst, IVal); STACK_PUSH(&fvst, IVal, iv_neg(a)); continue; }
+            IVal b = STACK_POP(&fvst, IVal), a = STACK_POP(&fvst, IVal);
+            STACK_PUSH(&fvst, IVal, t->k == T_IAND ? iv_and(a, b) : iv_or(a, b));
+            continue;
+        }
+        switch (t->k) {
+        case T_VAR: STACK_PUSH(&fvst, IVal, iv_var(depth - 1 - t->n)); break;
+        case T_I0: STACK_PUSH(&fvst, IVal, iv_zero()); break;
+        case T_I1: STACK_PUSH(&fvst, IVal, iv_one()); break;
+        case T_IAND: case T_IOR: { FIItem p = { t, 1 }, b = { t->b, 0 }, a = { t->a, 0 }; STACK_PUSH(&fist, FIItem, p); STACK_PUSH(&fist, FIItem, b); STACK_PUSH(&fist, FIItem, a); break; }
+        case T_INEG: { FIItem p = { t, 1 }, a = { t->a, 0 }; STACK_PUSH(&fist, FIItem, p); STACK_PUSH(&fist, FIItem, a); break; }
+        default: die("internal: a face that is not an interval term");
+        }
     }
+    return STACK_POP(&fvst, IVal);
 }
 static int lit_cmp(const void *x, const void *y) { const ILit *a = x, *b = y; return a->var != b->var ? a->var - b->var : a->neg - b->neg; }
 static int conj_cmp(const void *x, const void *y) {
@@ -285,92 +261,163 @@ static void erase_face(Term *t, int depth) {
     }
     for (int i = 0; i + 1 < v.n; i++) fputc(')', out);
 }
-static void erase(Term *t, int depth) {
+/* ---- erasure as a list of output operations (the memory layer's stack): a string, a term at a depth, a face. A case pushes
+   its pieces in reading order and reverses them, so the first is taken next; nothing recurses on the C stack. ---- */
+enum { EO_STR, EO_TERM, EO_FACE };
+typedef struct { int k; Term *t; int depth; const char *s; } EOp;
+static Stack eost = { NULL, 0, 0, sizeof(EOp) };
+static void ES(const char *s) { EOp o = { EO_STR, NULL, 0, s }; STACK_PUSH(&eost, EOp, o); }
+static void EF(const char *fmt, int v) { ES(xsprintf(fmt, v)); }
+static void ET(Term *t, int depth) { EOp o = { EO_TERM, t, depth, NULL }; STACK_PUSH(&eost, EOp, o); }
+static void EFACE(Term *t, int depth) { EOp o = { EO_FACE, t, depth, NULL }; STACK_PUSH(&eost, EOp, o); }
+static void eo_reverse(size_t from) {
+    for (size_t i = from, j = eost.n; i + 1 < j; i++, j--) { EOp x = STACK_AT(&eost, EOp, i); STACK_AT(&eost, EOp, i) = STACK_AT(&eost, EOp, j - 1); STACK_AT(&eost, EOp, j - 1) = x; }
+}
+static const char *sel_str(int nb, int m) {   /* emit_sel's text */
+    char *b = NULL; size_t z = 0; FILE *f = open_memstream(&b, &z);
+    for (int i = 0; i < nb; i++) fprintf(f, "r%d -> ", i);
+    fprintf(f, "r%d", m); fclose(f);
+    char *r = xstrdup(b); free(b); return r;
+}
+/* an elimination on the Nat, emitted: the closed form a theorem licenses for a fold, else the walk (fix over the
+   predecessor); a case analysis the predecessor and a dummy for the induction hypothesis */
+static void nat_elim_emit(NatElim *e, int depth0) {
+    int D = e->depth, n = e->n; Term **node = e->node; Rep *rep = e->rep;
+    Term *closed = NULL;
+    if (term_mentions_var(e->body, 0)) {   /* a fold: the closed form a theorem licenses, if one does */
+        Term *body2 = canon_step(rep, e->body);
+        Term *ms2 = body2 == e->body ? e->ms : mk_lam("k", mk_lam("ih", body2, 0), 0);
+        Term *ex = mk_app(mk_app(mk_app(node[n - 1], e->mz, node[n - 2]->irr), ms2, node[n - 3]->irr), e->scrut, node[n - 4]->irr);
+        closed = scheme_closed_form(rep, ex, D);
+        if (closed && !term_defs_ok(closed, 2)) closed = NULL;   /* its parts are not all emitted (a cycle through the representation): the walk */
+    }
+    for (int i = 0; i < e->k; i++) EF("(v%d -> ", depth0 + i);
+    if (term_mentions_var(e->body, 0)) {
+        if (closed) ET(closed, D);
+        else {   /* the walk: fix over the predecessor */
+            EF("(fix(self -> v%d -> ", D); ET(e->isz, D); EF("(v%d)(", D); ET(e->mz, D);
+            ES(")("); ET(e->ms, D); ES("("); ET(e->pred, D); EF("(v%d))(self(", D); ET(e->pred, D); EF("(v%d))))))(", D);
+            ET(e->scrut, D); ES(")");
+        }
+    } else {   /* the case analysis: the predecessor, and a dummy for the induction hypothesis */
+        EF("((v%d -> ", D); ET(e->isz, D); EF("(v%d)(", D); ET(e->mz, D);
+        ES(")("); ET(e->ms, D); ES("("); ET(e->pred, D); EF("(v%d))(tc_u)))(", D);
+        ET(e->scrut, D); ES("))");
+    }
+    for (int i = e->extra - 1; i >= 0; i--) if (!node[i]->irr) { ES("("); ET(node[i]->b, D); ES(")"); }
+    for (int i = 0; i < e->k; i++) ES(")");
+}
+static void erase_step(Term *t, int depth) {
+    size_t from = eost.n;
     switch (t->k) {
     case T_META: die("internal: a metavariable reached erasure");
-    case T_VAR: fprintf(out, "v%d", depth - 1 - t->n); break;
+    case T_VAR: EF("v%d", depth - 1 - t->n); break;
     case T_LAM:
-        if (t->irr) { erase(t->a, depth + 1); break; }
-        fprintf(out, "(v%d -> ", depth); erase(t->a, depth + 1); fputc(')', out); break;
-    case T_APP:
-        if (try_nat_elim(t, depth)) break;   /* an elimination on the Nat: the representation's interface */
-        erase(t->a, depth);
-        if (!t->irr) { fputc('(', out); erase(t->b, depth); fputc(')', out); }
+        if (t->irr) { ET(t->a, depth + 1); break; }
+        EF("(v%d -> ", depth); ET(t->a, depth + 1); ES(")"); break;
+    case T_APP: {
+        NatElim e;
+        if (nat_elim_parts(t, depth, &e)) { nat_elim_emit(&e, depth); break; }   /* an elimination on the Nat: the representation's interface */
+        ET(t->a, depth);
+        if (!t->irr) { ES("("); ET(t->b, depth); ES(")"); }
         break;
-    case T_PAPP: erase(t->a, depth); fputc('(', out); erase(t->b, depth); fputc(')', out); break;
+    }
+    case T_PAPP: ET(t->a, depth); ES("("); ET(t->b, depth); ES(")"); break;
     case T_LET:
-        if (t->irr) { erase(t->c, depth + 1); break; }
-        fprintf(out, "((v%d -> ", depth); erase(t->c, depth + 1); fputs(")(", out); erase(t->b, depth); fputs("))", out); break;
+        if (t->irr) { ET(t->c, depth + 1); break; }
+        EF("((v%d -> ", depth); ET(t->c, depth + 1); ES(")("); ET(t->b, depth); ES("))"); break;
     case T_DEF:
         if (defs[t->n].native) {   /* a native is the representation's operation its law names; without a law, its own body */
             Rep *r = rep_of(native_dom(t->n));
-            if (r && r->native[defs[t->n].native]) { erase(r->native[defs[t->n].native], depth); break; }
+            if (r && r->native[defs[t->n].native]) { ET(r->native[defs[t->n].native], depth); break; }
         }
-        if (defs[t->n].wordop) fputs(wordop_name(defs[t->n].wordop), out);   /* a word operation is its run-time primitive */
-        else if (defs[t->n].isword) fputs("tc_u", out);                     /* the word type: a machine word normalizes to itself */
-        else fprintf(out, "tt_%s", defs[t->n].name);
+        if (defs[t->n].wordop) ES(wordop_name(defs[t->n].wordop));   /* a word operation is its run-time primitive */
+        else if (defs[t->n].isword) ES("tc_u");                      /* the word type: a machine word normalizes to itself */
+        else ES(xsprintf("tt_%s", defs[t->n].name));
         break;
     case T_NUM: {
         Rep *r = rep_of(t->n);
-        if (r) { erase_literal(r, t, depth); break; }   /* the representation's digits, or its forward map */
-        erase(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
-    }
-    case T_IRR: fputs("tc_u", out); break;
-    case T_CON:
-        { Rep *r = rep_of(cons[t->n].data);
-          if (r) { erase(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name), depth); break; } }   /* the representation's zero and successor */
-        fprintf(out, "tt_c_%s", cons[t->n].name); break;
-    case T_ELIM:
-        if (is_nat(t->n)) die("an elimination on the Nat is compiled from its whole spine, so it cannot be erased head-first");
-        fprintf(out, "tt_rec_%s", datas[t->n].name); break;
-    case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
-        { Rep *r = rep_of(t->n); if (r) { erase(r->R, depth); break; } }   /* the representation's type is the Nat's code */
-        if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
-            if (datas[t->n].nblock == 1) fputs("self", out);
-            else { fputs("selfs(", out); emit_sel(datas[t->n].nblock, datas[t->n].bpos); fputc(')', out); }
-        } else fprintf(out, "tc_%s", datas[t->n].name);
-        break;
-    case T_U: fputs("tc_univ", out); break;   /* the universe as a type: its hcomp is a Glue (tc_univ); tc_u below is the inert code of what has no run-time content */
-    case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: fputs("tc_u", out); break;
-    case T_PI: fputs("tc_pi(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
-    case T_PATHP: fputs("tc_path(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
-    case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: erase_face(t, depth); break;
-    case T_SYS:   /* a system selects its first branch whose face holds */
-        for (int i = 0; i < t->nbr; i++) { fputs("tt_sel(", out); erase_face(t->br[i].face, depth); fputs(")(", out); erase(t->br[i].body, depth); fputs(")(", out); }
-        fputs("tt_absurd", out);
-        for (int i = 0; i < t->nbr; i++) fputc(')', out);
-        break;
-    case T_HCOMP:
-        if (t->n) { fputs("tt_hcompU(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break; }
-        fputs("tt_hcomp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputc(')', out); break;
-    case T_TRANSP:
-        if (!keep_kan && (t->n || t->b->k == T_I1)) { erase(t->c, depth); break; }     /* a constant line: the identity */
-        fputs("tt_transp(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
-    case T_INS: erase(t->a, depth); break;
-    case T_OUTS: erase(t->d, depth); break;
-    case T_SIGMA:
-        if (t->irr) { erase(t->a, depth); break; }   /* an irrelevant second component: at run time the type is its first (M16a, for every such type) */
-        fputs("tc_sigma(", out); erase(t->a, depth); fprintf(out, ")(v%d -> ", depth); erase(t->b, depth + 1); fputc(')', out); break;
-    case T_PAIR:
-        if (t->n) {   /* at the word type: the machine word */
-            if (t->a->k == T_NUM) { char *s = bn_to_dec(t->a->num); fprintf(out, "%sw", s); free(s); }
-            else { erase(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); }   /* the representation's low word */
+        if (r) {   /* the representation's digits (its machine words, low word first), or its forward map */
+            if (!r->npos) { ET(literal_via_map(r, t), depth); break; }
+            int n = t->num->n;
+            if (n == 0) { ET(r->zero, depth); break; }
+            ET(r->npos, depth); ES("(");
+            for (int i = 0; i + 1 < n; i++) { ET(r->cons, depth); ES(xsprintf("(%lluw)(", (unsigned long long)t->num->limb[i])); }
+            ET(r->top, depth); ES(xsprintf("(%lluw)", (unsigned long long)t->num->limb[n - 1]));
+            for (int i = 0; i + 1 < n; i++) ES(")");
+            ES(")");
             break;
         }
-        if (t->irr) { erase(t->a, depth); break; }   /* an irrelevant second component: the pair is its first */
-        fputs("tt_pair(", out); erase(t->a, depth); fputs(")(", out);
-        if (t->irr) fputs("tc_u", out); else erase(t->b, depth);   /* an irrelevant component has no run-time content */
-        fputc(')', out); break;
+        ET(numeral_term(t->n, t->a, t->num), depth); break;   /* a literal is spelled out in constructors, O(log n) */
+    }
+    case T_IRR: ES("tc_u"); break;
+    case T_CON:
+        { Rep *r = rep_of(cons[t->n].data);
+          if (r) { ET(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name), depth); break; } }   /* the representation's zero and successor */
+        ES(xsprintf("tt_c_%s", cons[t->n].name)); break;
+    case T_ELIM:
+        if (is_nat(t->n)) die("an elimination on the Nat is compiled from its whole spine, so it cannot be erased head-first");
+        ES(xsprintf("tt_rec_%s", datas[t->n].name)); break;
+    case T_DATA:   /* inside a code: the block's own codes are the fixpoint variable (a selector of the tuple for a block of several) */
+        { Rep *r = rep_of(t->n); if (r) { ET(r->R, depth); break; } }   /* the representation's type is the Nat's code */
+        if (self_data >= 0 && datas[t->n].block == datas[self_data].block) {
+            if (datas[t->n].nblock == 1) ES("self");
+            else { ES("selfs("); ES(sel_str(datas[t->n].nblock, datas[t->n].bpos)); ES(")"); }
+        } else ES(xsprintf("tc_%s", datas[t->n].name));
+        break;
+    case T_U: ES("tc_univ"); break;   /* the universe as a type: its hcomp is a Glue (tc_univ); tc_u below is the inert code of what has no run-time content */
+    case T_INTERVAL: case T_PARTIAL: case T_SUB: case T_LEVEL: case T_LZERO: case T_LSUC: case T_LMAX: case T_LMETA: case T_LVAL: ES("tc_u"); break;
+    case T_PI: ES("tc_pi("); ET(t->a, depth); EF(")(v%d -> ", depth); ET(t->b, depth + 1); ES(")"); break;
+    case T_PATHP: ES("tc_path("); ET(t->a, depth); ES(")("); ET(t->b, depth); ES(")("); ET(t->c, depth); ES(")"); break;
+    case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: EFACE(t, depth); break;
+    case T_SYS:   /* a system selects its first branch whose face holds */
+        for (int i = 0; i < t->nbr; i++) { ES("tt_sel("); EFACE(t->br[i].face, depth); ES(")("); ET(t->br[i].body, depth); ES(")("); }
+        ES("tt_absurd");
+        for (int i = 0; i < t->nbr; i++) ES(")");
+        break;
+    case T_HCOMP:
+        if (t->n) { ES("tt_hcompU("); ET(t->b, depth); ES(")("); ET(t->c, depth); ES(")("); ET(t->d, depth); ES(")"); break; }
+        ES("tt_hcomp("); ET(t->a, depth); ES(")("); ET(t->b, depth); ES(")("); ET(t->c, depth); ES(")("); ET(t->d, depth); ES(")"); break;
+    case T_TRANSP:
+        if (!keep_kan && (t->n || t->b->k == T_I1)) { ET(t->c, depth); break; }     /* a constant line: the identity */
+        ES("tt_transp("); ET(t->a, depth); ES(")("); ET(t->b, depth); ES(")("); ET(t->c, depth); ES(")"); break;
+    case T_INS: ET(t->a, depth); break;
+    case T_OUTS: ET(t->d, depth); break;
+    case T_SIGMA:
+        if (t->irr) { ET(t->a, depth); break; }   /* an irrelevant second component: at run time the type is its first (M16a, for every such type) */
+        ES("tc_sigma("); ET(t->a, depth); EF(")(v%d -> ", depth); ET(t->b, depth + 1); ES(")"); break;
+    case T_PAIR:
+        if (t->n) {   /* at the word type: the machine word */
+            if (t->a->k == T_NUM) { char *d = bn_to_dec(t->a->num); ES(xsprintf("%sw", d)); free(d); }
+            else { ET(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word"), depth); ES("("); ET(t->a, depth); ES(")"); }   /* the representation's low word */
+            break;
+        }
+        if (t->irr) { ET(t->a, depth); break; }   /* an irrelevant second component: the pair is its first */
+        ES("tt_pair("); ET(t->a, depth); ES(")(");
+        if (t->irr) ES("tc_u"); else ET(t->b, depth);   /* an irrelevant component has no run-time content */
+        ES(")"); break;
     case T_FST:
-        if (t->n) { erase(role_need(rep_need(word_nat, "a word's value")->single, "a word's value"), depth); fputc('(', out); erase(t->a, depth); fputc(')', out); break; }   /* a word's value: the representation's one-word numeral */
-        if (t->irr) { erase(t->a, depth); break; }
-        fputs("tt_fst(", out); erase(t->a, depth); fputc(')', out); break;
+        if (t->n) { ET(role_need(rep_need(word_nat, "a word's value")->single, "a word's value"), depth); ES("("); ET(t->a, depth); ES(")"); break; }   /* a word's value: the representation's one-word numeral */
+        if (t->irr) { ET(t->a, depth); break; }
+        ES("tt_fst("); ET(t->a, depth); ES(")"); break;
     case T_SND:
-        if (t->n || t->irr) { fputs("tc_u", out); break; }
-        fputs("tt_snd(", out); erase(t->a, depth); fputc(')', out); break;
-    case T_GLUE: fputs("tc_glue(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputs(")(", out); erase(t->c, depth); fputc(')', out); break;
-    case T_GLUEEL: fputs("tt_glue(", out); erase(t->c->b, depth); fputs(")(", out); erase(t->a, depth); fputs(")(", out); erase(t->b, depth); fputc(')', out); break;
-    case T_UNGLUE: fputs("tt_unglue(", out); erase(t->c, depth); fputs(")(", out); erase(t->d, depth); fputs(")(", out); erase(t->a, depth); fputc(')', out); break;
+        if (t->n || t->irr) { ES("tc_u"); break; }
+        ES("tt_snd("); ET(t->a, depth); ES(")"); break;
+    case T_GLUE: ES("tc_glue("); ET(t->a, depth); ES(")("); ET(t->b, depth); ES(")("); ET(t->c, depth); ES(")"); break;
+    case T_GLUEEL: ES("tt_glue("); ET(t->c->b, depth); ES(")("); ET(t->a, depth); ES(")("); ET(t->b, depth); ES(")"); break;
+    case T_UNGLUE: ES("tt_unglue("); ET(t->c, depth); ES(")("); ET(t->d, depth); ES(")("); ET(t->a, depth); ES(")"); break;
+    default: break;
+    }
+    eo_reverse(from);
+}
+static void erase(Term *t, int depth) {
+    size_t base = eost.n;
+    ET(t, depth);
+    while (eost.n > base) {
+        EOp o = STACK_POP(&eost, EOp);
+        if (o.k == EO_STR) fputs(o.s, out);
+        else if (o.k == EO_FACE) erase_face(o.t, o.depth);
+        else erase_step(o.t, o.depth);
     }
 }
 
@@ -680,69 +727,131 @@ static void emit_glue_runtime(void) {
     fputs("tc_glue := a -> phi -> te -> k -> k(tt_transp_glue)(tt_hc_glue)(tt_nf_glue)(a)(phi)(te)\n", out);
 }
 
-static void emit_def(int d) {
-    if (def_state[d] == 2) return;
-    if (def_state[d] == 1) die("internal: the definitions %s reach themselves at run time", defs[d].name);
-    def_state[d] = 1;
-    const char *outer = cur_decl_name; cur_decl_name = defs[d].name;
-    visit(defs[d].val);
-    cur_decl_name = defs[d].name;   /* erasure unfolds redexes, and an inductive lemma at a literal walks it */
-    fprintf(out, "tt_%s := ", defs[d].name); erase(defs[d].val, 0); fputc('\n', out);
-    if (!strcmp(defs[d].name, "equivProof")) emit_glue_runtime();
-    if (!strcmp(defs[d].name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
-        fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(tt_sel(phi)(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
-    def_state[d] = 2; cur_decl_name = outer;
+/* ---- the dependency walk as a work list (the memory layer's stack) ----
+   An item visits a term, starts or finishes a definition (its body walked between: a definition is emitted after what its
+   erasure refers to), starts or finishes a data type's block, or takes the next scheme theorem of a fold's representation
+   (each theorem's right side is checked against what is emitted at its turn, as the recursion checked it). A step pushes
+   its items in visiting order and reverses them; the finishing items run when everything above them has. */
+enum { V_TERM, V_DEF, V_DEFEND, V_BLOCK, V_BLOCKEND, V_SCHEME, V_PRED };
+typedef struct { int k; Term *t; int d; const char *outer; Rep *rep; } VItem;
+static Stack vst = { NULL, 0, 0, sizeof(VItem) };
+static void VT(Term *t) { if (!t) return; VItem it = { V_TERM, t, 0, NULL, NULL }; STACK_PUSH(&vst, VItem, it); }
+static void VK(int k, int d, const char *outer, Rep *rep) { VItem it = { k, NULL, d, outer, rep }; STACK_PUSH(&vst, VItem, it); }
+static void v_reverse(size_t from) {
+    for (size_t i = from, j = vst.n; i + 1 < j; i++, j--) { VItem x = STACK_AT(&vst, VItem, i); STACK_AT(&vst, VItem, i) = STACK_AT(&vst, VItem, j - 1); STACK_AT(&vst, VItem, j - 1) = x; }
 }
-static void emit_block(int d) {
-    Data *B = &datas[datas[d].block]; int b = B - datas, nb = B->nblock;
-    if (data_state[b]) return;   /* emitted, or being emitted: a recursive occurrence refers to the block's own self */
-    data_state[b] = 1;
-    for (int i = 0; i < nb; i++) { visit(B[i].ty); for (int ci = 0; ci < B[i].ncons; ci++) { visit(cons[B[i].cons[ci]].ty); visit(cons[B[i].cons[ci]].boundary); } }   /* a path constructor's boundary is erased with its code */
-    if (nb > 1) {   /* a mutual block, emitted as a whole */
-        for (int i = 0; i < nb; i++) { for (int ci = 0; ci < B[i].ncons; ci++) emit_con(&B[i], ci); if (formal_hcomp(&B[i])) emit_hcomp_con(&B[i]); }
-        emit_block_codes(B);
-        emit_block_recs(B);
-    } else {
-        for (int ci = 0; ci < B->ncons; ci++) emit_con(B, ci);
-        if (formal_hcomp(B)) emit_hcomp_con(B);
-        emit_codes(B);
-        emit_rec(B);
-    }
-    data_state[b] = 2;
-}
-static void visit(Term *t) {
-    if (!t) return;
+static void visit_term(Term *t) {
     switch (t->k) {
     case T_DEF:
         if (defs[t->n].native) {   /* the representation's operation stands for it; without a law, its body */
             Rep *r = rep_of(native_dom(t->n));
-            if (r && r->native[defs[t->n].native]) { visit(r->native[defs[t->n].native]); break; }
+            if (r && r->native[defs[t->n].native]) { VT(r->native[defs[t->n].native]); break; }
         }
         if (defs[t->n].wordop || defs[t->n].isword) break;   /* the primitive stands for it: its body is not emitted */
-        emit_def(t->n);
+        VK(V_DEF, t->n, NULL, NULL);
         break;
     case T_NUM: { Rep *r = rep_of(t->n);
-        if (r) { if (r->npos) { visit(r->zero); visit(r->npos); visit(r->cons); visit(r->top); } else visit(literal_via_map(r, t)); break; }
-        visit(numeral_term(t->n, t->a, t->num)); break; }
-    case T_PAIR: if (t->n && t->a->k != T_NUM) visit(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word")); visit(t->a); if (!t->irr) visit(t->b); break;
-    case T_FST: if (t->n) visit(role_need(rep_need(word_nat, "a word's value")->single, "a word's value")); visit(t->a); break;
-    case T_SIGMA: visit(t->a); if (!t->irr) visit(t->b); break;
-    case T_SND: visit(t->a); break;
-    case T_CON: { Rep *r = rep_of(cons[t->n].data); if (r) { visit(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name)); break; } emit_block(cons[t->n].data); break; }
-    case T_ELIM: { Rep *r = rep_of(t->n); if (r) { visit(role_need(r->isz, "an elimination's zero test")); visit(role_need(r->pred, "an elimination's predecessor")); break; } emit_block(t->n); break; }
-    case T_DATA: { Rep *r = rep_of(t->n); if (r) { visit(r->R); break; } emit_block(t->n); break; }
-    case T_SYS: for (int i = 0; i < t->nbr; i++) { visit(t->br[i].face); visit(t->br[i].body); } break;
-    case T_APP: if (nat_elim_spine(t, 0, 0)) break; visit(t->a); if (!t->irr) visit(t->b); break;   /* a Nat elimination's spine: what its erasure refers to */
-    case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { visit(t->a); visit(t->b); } visit(t->c); break;
-    case T_HCOMP: visit(t->a); visit(t->b); visit(t->c); visit(t->d);
-        if (t->n) for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) emit_def(i);
+        if (r) { if (r->npos) { VT(r->zero); VT(r->npos); VT(r->cons); VT(r->top); } else VT(literal_via_map(r, t)); break; }
+        VT(numeral_term(t->n, t->a, t->num)); break; }
+    case T_PAIR: if (t->n && t->a->k != T_NUM) VT(role_need(rep_need(word_nat, "a word from a value")->low, "a value's low word")); VT(t->a); if (!t->irr) VT(t->b); break;
+    case T_FST: if (t->n) VT(role_need(rep_need(word_nat, "a word's value")->single, "a word's value")); VT(t->a); break;
+    case T_SIGMA: VT(t->a); if (!t->irr) VT(t->b); break;
+    case T_SND: VT(t->a); break;
+    case T_CON: { Rep *r = rep_of(cons[t->n].data); if (r) { VT(role_need(cons[t->n].nargs == 0 ? r->zero : r->suc, cons[t->n].name)); break; } VK(V_BLOCK, cons[t->n].data, NULL, NULL); break; }
+    case T_ELIM: { Rep *r = rep_of(t->n); if (r) { VT(role_need(r->isz, "an elimination's zero test")); VK(V_PRED, 0, NULL, r); break; } VK(V_BLOCK, t->n, NULL, NULL); break; }
+    case T_DATA: { Rep *r = rep_of(t->n); if (r) { VT(r->R); break; } VK(V_BLOCK, t->n, NULL, NULL); break; }
+    case T_SYS: for (int i = 0; i < t->nbr; i++) { VT(t->br[i].face); VT(t->br[i].body); } break;
+    case T_APP: {   /* a Nat elimination's spine: what its erasure refers to - the walk's parts, and, for a fold, the right sides of
+                       the theorems in scope (a closed form is built from them and from the elimination's own terms) */
+        NatElim e;
+        if (nat_elim_parts(t, 0, &e)) {
+            VT(e.isz); VT(e.pred); VT(e.mz); VT(e.ms); VT(e.scrut);
+            if (term_mentions_var(e.body, 0)) VK(V_SCHEME, 0, NULL, e.rep);
+            for (int i = e.extra - 1; i >= 0; i--) if (!e.node[i]->irr) VT(e.node[i]->b);
+            break;
+        }
+        VT(t->a); if (!t->irr) VT(t->b); break;
+    }
+    case T_TRANSP: if (keep_kan || !(t->n || t->b->k == T_I1)) { VT(t->a); VT(t->b); } VT(t->c); break;
+    case T_HCOMP: VT(t->a); VT(t->b); VT(t->c); VT(t->d);
+        if (t->n) for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "transpEquiv") || !strcmp(defs[i].name, "equivProof")) VK(V_DEF, i, NULL, NULL);
         break;
-    case T_GLUE: visit(t->a); visit(t->b); visit(t->c);
-        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof")) emit_def(i);
+    case T_GLUE: VT(t->a); VT(t->b); VT(t->c);
+        for (int i = 0; i < ndefs; i++) if (!strcmp(defs[i].name, "equivProof")) VK(V_DEF, i, NULL, NULL);
         break;
-    default: visit(t->a); visit(t->b); visit(t->c); visit(t->d); break;
+    default: VT(t->a); VT(t->b); VT(t->c); VT(t->d); break;
     }
 }
+static void visit_step(VItem *it) {
+    switch (it->k) {
+    case V_TERM: visit_term(it->t); return;
+    case V_PRED: VT(role_need(it->rep->pred, "an elimination's predecessor")); return;
+    case V_SCHEME: {   /* the right sides of the scheme theorems in scope, under their binders: the next one from d */
+        Rep *rep = it->rep;
+        for (int i = it->d; i < ndefs; i++) {
+            if (!scheme_theorem(defs[i].vty, rep->d)) continue;
+            Val *ty = defs[i].vty; int k = 0;
+            for (;;) { Val *t = fmeta(ty); if (t->k != V_PI) t = force(ty); if (t->k != V_PI) { ty = t; break; } ty = inst(&t->clo, t->isi ? vivar(k) : vvar(k)); k++; }
+            VK(V_SCHEME, i + 1, NULL, rep);   /* under this theorem's right side: taken after it */
+            if (ty->k == V_PATHP) { Term *r = quote(k, ty->c); if (term_defs_ok(r, 1)) VT(r); }
+            return;
+        }
+        return;
+    }
+    case V_DEF: {
+        int d = it->d;
+        if (def_state[d] == 2) return;
+        if (def_state[d] == 1) die("internal: the definitions %s reach themselves at run time", defs[d].name);
+        def_state[d] = 1;
+        const char *outer = cur_decl_name; cur_decl_name = defs[d].name;
+        VT(defs[d].val); VK(V_DEFEND, d, outer, NULL);
+        return;
+    }
+    case V_DEFEND: {
+        int d = it->d;
+        cur_decl_name = defs[d].name;   /* erasure unfolds redexes, and an inductive lemma at a literal walks it */
+        fprintf(out, "tt_%s := ", defs[d].name); erase(defs[d].val, 0); fputc('\n', out);
+        if (!strcmp(defs[d].name, "equivProof")) emit_glue_runtime();
+        if (!strcmp(defs[d].name, "transpEquiv"))   /* hcomp in the universe: the Glue type of the lid glued along transport back down the sides */
+            fputs("tt_hcompU := phi -> u -> u0 -> tc_glue(u0)(phi)(tt_sel(phi)(tt_pair(u(tt_i1))(tt_transpEquiv(i -> u(tt_ineg(i)))))(tt_absurd))\n", out);
+        def_state[d] = 2; cur_decl_name = it->outer;
+        return;
+    }
+    case V_BLOCK: {
+        Data *B = &datas[datas[it->d].block]; int b = B - datas, nb = B->nblock;
+        if (data_state[b]) return;   /* emitted, or being emitted: a recursive occurrence refers to the block's own self */
+        data_state[b] = 1;
+        for (int i = 0; i < nb; i++) { VT(B[i].ty); for (int ci = 0; ci < B[i].ncons; ci++) { VT(cons[B[i].cons[ci]].ty); VT(cons[B[i].cons[ci]].boundary); } }   /* a path constructor's boundary is erased with its code */
+        VK(V_BLOCKEND, b, NULL, NULL);
+        return;
+    }
+    case V_BLOCKEND: {
+        Data *B = &datas[it->d]; int nb = B->nblock;
+        if (nb > 1) {   /* a mutual block, emitted as a whole */
+            for (int i = 0; i < nb; i++) { for (int ci = 0; ci < B[i].ncons; ci++) emit_con(&B[i], ci); if (formal_hcomp(&B[i])) emit_hcomp_con(&B[i]); }
+            emit_block_codes(B);
+            emit_block_recs(B);
+        } else {
+            for (int ci = 0; ci < B->ncons; ci++) emit_con(B, ci);
+            if (formal_hcomp(B)) emit_hcomp_con(B);
+            emit_codes(B);
+            emit_rec(B);
+        }
+        data_state[it->d] = 2;
+        return;
+    }
+    }
+}
+static void visit_loop(size_t base) {
+    while (vst.n > base) {
+        VItem it = STACK_POP(&vst, VItem);
+        size_t from = vst.n;
+        visit_step(&it);
+        if (it.k == V_TERM || it.k == V_DEF || it.k == V_BLOCK) v_reverse(from);
+    }
+}
+static void visit(Term *t) { size_t base = vst.n; VT(t); visit_loop(base); }
+static void emit_def(int d) { size_t base = vst.n; VK(V_DEF, d, NULL, NULL); visit_loop(base); }
 
 /* ---- the representations: the equivalence in scope, and each role by the shape of its law ---- */
 static Term *tvar(int i) { return mk_var(i); }
@@ -910,16 +1019,6 @@ static void find_representations(void) {
 static Term *literal_via_map(Rep *r, Term *t) {
     Val *f = vproj(defs[r->equiv].vval, 1);
     return quote(0, nf_force(vapp(f, vnum(r->d, lv_const(0), t->num), 0)));
-}
-static void erase_literal(Rep *r, Term *t, int depth) {
-    if (!r->npos) { erase(literal_via_map(r, t), depth); return; }
-    int n = t->num->n;
-    if (n == 0) { erase(r->zero, depth); return; }
-    erase(r->npos, depth); fputc('(', out);
-    for (int i = 0; i + 1 < n; i++) { erase(r->cons, depth); fprintf(out, "(%lluw)(", (unsigned long long)t->num->limb[i]); }
-    erase(r->top, depth); fprintf(out, "(%lluw)", (unsigned long long)t->num->limb[n - 1]);
-    for (int i = 0; i + 1 < n; i++) fputc(')', out);
-    fputc(')', out);
 }
 
 void erase_program(FILE *f) {

@@ -15,6 +15,7 @@ OFILES=\
 
 HFILES=\
 	tt.h\
+	machine.h\
 	../libeezo/types.h\
 	../libeezo/bn.h\
 

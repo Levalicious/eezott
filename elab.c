@@ -18,6 +18,7 @@
  * constant on phi, hcomp needs its base to agree with its sides on phi.
  */
 #include "tt.h"
+#include "machine.h"
 
 typedef struct { const char **names; Val **tys; int *irrs; int n, cap; Env *env; int abs; int irrpos, irrlen; } Ctx;
 /* irrs[i]: variable i is irrelevant; irrpos > 0: irrelevant things may be used here (a type, an irrelevant argument or
@@ -77,15 +78,22 @@ static void check_fresh(const char *n, int line) {
     if (find_def(n) >= 0 || find_data(n) >= 0 || find_con(n) >= 0) die("line %d: '%s' is already defined", line, n);
 }
 
+/* the most binders on any path through t (iterative: the memory layer's stack) */
+typedef struct { Term *t; int above; } TBItem;
+static Stack tbst = { NULL, 0, 0, sizeof(TBItem) };
 static int term_binders(Term *t) {
-    if (!t) return 0;
-    int m = 0, x;
-    x = term_binders(t->a); if (x > m) m = x;
-    x = term_binders(t->b); if (x > m) m = x;
-    x = term_binders(t->c); if (x > m) m = x;
-    x = term_binders(t->d); if (x > m) m = x;
-    for (int i = 0; i < t->nbr; i++) { x = term_binders(t->br[i].face); if (x > m) m = x; x = term_binders(t->br[i].body); if (x > m) m = x; }
-    return m + (t->k == T_PI || t->k == T_LAM || t->k == T_LET || t->k == T_SIGMA);   /* a Sigma binds its codomain's variable too */
+    size_t base = tbst.n; int m = 0;
+    TBItem it0 = { t, 0 }; STACK_PUSH(&tbst, TBItem, it0);
+    while (tbst.n > base) {
+        TBItem it = STACK_POP(&tbst, TBItem);
+        if (!it.t) continue;
+        Term *u = it.t; int here = it.above + (u->k == T_PI || u->k == T_LAM || u->k == T_LET || u->k == T_SIGMA);   /* a Sigma binds its codomain's variable too */
+        if (here > m) m = here;
+        Term *ks[4] = { u->a, u->b, u->c, u->d };
+        for (int i = 0; i < 4; i++) { TBItem c = { ks[i], here }; STACK_PUSH(&tbst, TBItem, c); }
+        for (int i = 0; i < u->nbr; i++) { TBItem f = { u->br[i].face, here }, b = { u->br[i].body, here }; STACK_PUSH(&tbst, TBItem, f); STACK_PUSH(&tbst, TBItem, b); }
+    }
+    return m;
 }
 static const char *show(Ctx *c, Val *v) {
     Term *t = quote(c->n, force(v));   /* messages show the canonical value: force unfolds rigid definition applications */
@@ -101,23 +109,33 @@ static void expect_conv(Ctx *c, int line, Val *got, Val *want, const char *what)
     if (!conv(c->n, got, want) && !c->irrlen) die("line %d: %s has type %s, expected %s", line, what, show(c, got), show(c, want));
 }
 
-int is_type_like(int depth, Val *ty) {
-    ty = force(ty);
-    switch (ty->k) {
-    case V_U: case V_LEVEL: return 1;
-    case V_PI: return is_type_like(depth + 1, inst(&ty->clo, ty->isi ? vivar(depth) : vvar(depth)));
-    case V_PATHP: return is_type_like(depth + 1, vapp(ty->a, vivar(depth), 0));
-    case V_PARTIAL: return is_type_like(depth, ty->b);
-    case V_SUB: return is_type_like(depth, ty->a);
-    case V_SIGMA: return is_type_like(depth, ty->dom) && is_type_like(depth + 1, inst(&ty->clo, vvar(depth)));
-    case V_GLUE: return 0;
-    default: return 0;
+typedef struct { int depth, cod; Val *v; } TLItem;   /* cod: the codomain of the Sigma v, at depth */
+static Stack tlst = { NULL, 0, 0, sizeof(TLItem) };
+int is_type_like(int depth0, Val *ty0) {
+    size_t base = tlst.n;
+    TLItem it0 = { depth0, 0, ty0 }; STACK_PUSH(&tlst, TLItem, it0);
+    while (tlst.n > base) {
+        TLItem it = STACK_POP(&tlst, TLItem);
+        int depth = it.depth; Val *ty = it.cod ? inst(&it.v->clo, vvar(depth - 1)) : it.v;
+        for (;;) {
+            ty = force(ty);
+            if (ty->k == V_U || ty->k == V_LEVEL) break;
+            if (ty->k == V_PI) { ty = inst(&ty->clo, ty->isi ? vivar(depth) : vvar(depth)); depth++; continue; }
+            if (ty->k == V_PATHP) { ty = vapp(ty->a, vivar(depth), 0); depth++; continue; }
+            if (ty->k == V_PARTIAL) { ty = ty->b; continue; }
+            if (ty->k == V_SUB) { ty = ty->a; continue; }
+            if (ty->k == V_SIGMA) { TLItem c = { depth + 1, 1, ty }; STACK_PUSH(&tlst, TLItem, c); ty = ty->dom; continue; }
+            tlst.n = base; return 0;
+        }
     }
+    return 1;
 }
 
-static Term *infer(Ctx *c, STerm *s, Val **ty);
 static Term *check(Ctx *c, STerm *s, Val *ty);
-static Term *check1(Ctx *c, STerm *s, Val *ty);
+static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre);
+static Term *check_type(Ctx *c, STerm *s, LVal *lvl);
+static Term *check_interval(Ctx *c, STerm *s);
+static void resolve_deferred(Ctx *c, int all);
 
 /* a term must be a type of either sort: returns its core, universe level and whether it is a pretype */
 /* a type whose sort is not known yet (a meta, e.g. an implicit parameter still to be inferred) is in a universe at a fresh level */
@@ -127,34 +145,9 @@ static Val *refine_to_universe(Ctx *c, Val *ty) {
     if (ty->k == V_NEU && ty->h == H_META) { int l = lv_meta_new(); if (conv(c->n, ty, vu_l(lv_meta(l)))) ty = force(ty); }
     return ty;
 }
-static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) {
-    Val *ty; c->irrpos++; Term *t = infer(c, s, &ty); c->irrpos--; ty = refine_to_universe(c, ty);   /* a type is an irrelevant position */
-    if (ty->k != V_U) die("line %d: expected a type, but %s : %s", s->line, "the term", show(c, ty));
-    *lvl = ty->lvl; *pre = ty->pre; return t;
-}
 /* a term must be a type in a universe (with Kan structure): pretypes are refused */
-static Term *check_type(Ctx *c, STerm *s, LVal *lvl) {
-    int pre; Term *t = check_type_sort(c, s, lvl, &pre);
-    if (pre) die("line %d: a type in a universe is needed here, but the term is a pretype (Partial, Sub, Level, or a function from I) and has no Kan structure", s->line);
-    return t;
-}
 /* a line of types  (i : I) -> U l : either a lambda over an interval variable, or a term whose type is such a function */
-static Term *check_line(Ctx *c, STerm *s, LVal *lvl) {
-    if (s->k == S_LAM) {
-        ctx_bind_i(c, s->binders[0].name);
-        Term *body = check_type(c, s->a, lvl);
-        ctx_pop(c);
-        Term *t = mk_lam(s->binders[0].name, body, 0); t->isi = 1; return t;
-    }
-    Val *ty; Term *t = infer(c, s, &ty); ty = force(ty);
-    if (ty->k != V_PI || !ty->isi) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
-    Val *cod = refine_to_universe(c, inst(&ty->clo, vivar(c->n)));
-    if (cod->k != V_U) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
-    if (cod->pre) die("line %d: expected a line of types (i : I) -> U, but the line yields pretypes: %s", s->line, show(c, ty));
-    *lvl = cod->lvl; return t;
-}
 static Val *vinterval(void) { return mkval(V_INTERVAL); }
-static Term *check_interval(Ctx *c, STerm *s) { return check(c, s, vinterval()); }
 
 /* ---- induction principles ---- */
 
@@ -177,31 +170,42 @@ static Term *E(Term *t, EInfo *I, int depth);
 static Term *boundary_at(Con *C, int end);
 
 /* instantiate a term under a telescope of n binders (vs[0] the innermost) with terms of the outer context */
-Term *inst_tele(Term *t, int n, Term **vs, int k) {
-    if (!t) return NULL;
-    Term *r;
+typedef struct { int n; Term **vs; } InstTele;
+static int inst_tele_pre(Term *t, int k, void *ctx, TWDecide *o) {
+    InstTele *it = ctx;
     switch (t->k) {
     case T_VAR:
-        if (t->n < k) return t;
-        if (t->n - k < n) return shift(vs[t->n - k], 0, k);
-        return mk_var(t->n - n);
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return t;
-    case T_PI:  r = mk_pi(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), t->irr); r->isi = t->isi; r->pre = t->pre; return r;
-    case T_LAM: r = mk_lam(t->name, inst_tele(t->a, n, vs, k + 1), t->irr); r->isi = t->isi; return r;
-    case T_SIGMA: r = mk_term(T_SIGMA, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k + 1), NULL, NULL); r->name = t->name; return r;
-    case T_LET: return mk_let(t->name, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k + 1), t->irr);
-    case T_SYS: {
-        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = inst_tele(t->br[i].face, n, vs, k); r->br[i].body = inst_tele(t->br[i].body, n, vs, k); }
-        return r;
+        if (t->n < k) o->r = t;
+        else if (t->n - k < it->n) o->r = shift(it->vs[t->n - k], 0, k);
+        else o->r = mk_var(t->n - it->n);
+        return TW_DONE;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: o->r = t; return TW_DONE;
+    default: return TW_NODE;
     }
+}
+static Term *inst_tele_build(Term *t, Term **q, void *ctx) {
+    Term *r; (void)ctx;
+    switch (t->k) {
+    case T_PI:  r = mk_pi(t->name, q[0], q[1], t->irr); r->isi = t->isi; r->pre = t->pre; return r;
+    case T_LAM: r = mk_lam(t->name, q[0], t->irr); r->isi = t->isi; return r;
+    case T_SIGMA: r = mk_term(T_SIGMA, q[0], q[1], NULL, NULL); r->name = t->name; return r;
+    case T_LET: return mk_let(t->name, q[0], q[1], q[2], t->irr);
+    case T_SYS:
+        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = q[2 * i]; r->br[i].body = q[2 * i + 1]; }
+        return r;
     default:
-        r = mk_term(t->k, inst_tele(t->a, n, vs, k), inst_tele(t->b, n, vs, k), inst_tele(t->c, n, vs, k), inst_tele(t->d, n, vs, k));
+        r = mk_term(t->k, q[0], q[1], q[2], q[3]);
         r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
     }
 }
-static Term *E_con_spine(Term *t, EInfo *I, int depth) {
-    /* t = c' p.. a'.. is.. (a constructor of the same data type applied): returns the method applied, or NULL */
+/* instantiate a term under a telescope of n binders (vs[0] the innermost) with terms of the outer context */
+Term *inst_tele(Term *t, int n, Term **vs, int k) { InstTele it = { n, vs }; return term_walk(t, k, 0, inst_tele_pre, inst_tele_build, &it); }
+/* t = c' p.. a'.. is.. (a constructor of the same data type applied): the method applied (E_con_post), from the images of
+   the terms E_con_pre lists: the recursive arguments, then the path method's endpoints, or the cube's boundary system
+   followed by the indices that have images */
+typedef struct { Con *Cp; Term **args, **vs; int nargs, np, tn, nrec, depth; } ECon;
+static ECon *E_con_pre(Term *t, EInfo *I, int depth, Term ***ks, int *nk) {
     int nargs = 0; Term *w = t;
     while (w->k == T_APP) { nargs++; w = w->a; }
     if (w->k != T_CON || datas[cons[w->n].data].block != datas[I->C->data].block) return NULL;
@@ -209,77 +213,110 @@ static Term *E_con_spine(Term *t, EInfo *I, int depth) {
     if (Cp->data != I->C->data && Cp->nint > 0) die("the index of %s applies the path constructor %s of another member: not supported", I->C->name, Cp->name);
     if (Cp->bord >= I->o) die("the boundary of %s uses the later constructor %s; boundaries may only use earlier constructors", I->C->name, Cp->name);
     if (nargs != np + Cp->nargs + Cp->nint) die("internal: constructor %s applied to %d arguments in a boundary", Cp->name, nargs);
+    ECon *e = xalloc(sizeof *e); e->Cp = Cp; e->nargs = nargs; e->np = np; e->depth = depth;
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
     for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
+    e->args = args;
+    int cap = Cp->nargs + 3 + datas[Cp->data].nidx; Term **k = xalloc(cap * sizeof(Term *)); int n = 0;
+    for (int j = 0; j < Cp->nargs; j++) if (Cp->args[j].isrec || Cp->args[j].isrecpath) k[n++] = args[np + j];
+    e->nrec = n;
+    if (Cp->nint > 0) {
+        /* a path constructor: its own boundary, instantiated along the spine ([params, args]: vs[0] is the last argument) */
+        int tn = np + Cp->nargs; Term **vs = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
+        for (int j = 0; j < Cp->nargs; j++) vs[j] = args[np + Cp->nargs - 1 - j];
+        for (int i = 0; i < np; i++) vs[Cp->nargs + i] = args[np - 1 - i];
+        e->vs = vs; e->tn = tn;
+        if (Cp->pathmethod) {
+            k[n++] = inst_tele(boundary_at(Cp, 0), tn, vs, 0);
+            k[n++] = inst_tele(boundary_at(Cp, 1), tn, vs, 0);
+        } else if (Cp->boundary) {
+            Term **vs2 = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
+            for (int q = 0; q < Cp->nint; q++) vs2[q] = args[np + Cp->nargs + Cp->nint - 1 - q];
+            for (int i = 0; i < tn; i++) vs2[Cp->nint + i] = vs[i];
+            k[n++] = inst_tele(Cp->boundary, tn + Cp->nint, vs2, 0);
+            Data *D = &datas[Cp->data];
+            for (int j = 0; j < D->nidx; j++) if (D->idxrec[j] >= 0) k[n++] = inst_tele(Cp->ridx[j], tn, vs, 0);
+        }
+    }
+    *ks = k; *nk = n;
+    return e;
+}
+static Term *E_con_post(Term *t, Term **rs, int nk, void *ctx, void *aux) {
+    EInfo *I = ctx; ECon *e = aux; Con *Cp = e->Cp; Term **args = e->args; int np = e->np, depth = e->depth;
+    (void)nk;
     Term *m = mk_var(depth + I->n + I->htot + I->r + (I->o - 1 - Cp->bord));
     for (int j = 0; j < Cp->nargs; j++) m = mk_app(m, args[np + j], Cp->args[j].irr);   /* the elements as they are: only the hypotheses below are images (CHM: m_c a.. E(a_rec)..; M20 found the images here) */
+    int r = 0;
     for (int j = 0; j < Cp->nargs; j++) if (Cp->args[j].isrec || Cp->args[j].isrecpath) {
-        Term *ih = E(args[np + j], I, depth);
+        Term *ih = rs[r++];
         if (ih == args[np + j] || term_eq(ih, args[np + j])) die("the boundary of %s: no induction hypothesis for the argument of %s", I->C->name, Cp->name);
         m = mk_app(m, ih, 0);
     }
     if (Cp->nint == 0) return m;
-    /* a path constructor: its own boundary, instantiated along the spine ([params, args]: vs[0] is the last argument) */
-    int tn = np + Cp->nargs; Term **vs = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
-    for (int j = 0; j < Cp->nargs; j++) vs[j] = args[np + Cp->nargs - 1 - j];
-    for (int i = 0; i < np; i++) vs[Cp->nargs + i] = args[np - 1 - i];
-    if (Cp->pathmethod) {   /* the method is a path: apply it, with the images of the boundary as endpoints */
-        Term *x = E(inst_tele(boundary_at(Cp, 0), tn, vs, 0), I, depth);
-        Term *y = E(inst_tele(boundary_at(Cp, 1), tn, vs, 0), I, depth);
-        return mk_term(T_PAPP, m, args[np + Cp->nargs], x, y);
-    }
+    if (Cp->pathmethod) return mk_term(T_PAPP, m, args[np + Cp->nargs], rs[r], rs[r + 1]);   /* the method is a path: its endpoints the boundary's images */
     /* the method is a cube  (is : I) -> Sub (P idx (c p a is)) phi [faces -> E(boundary)]: apply it and take the element out */
     for (int q = 0; q < Cp->nint; q++) m = mk_app(m, args[np + Cp->nargs + q], 0);
     if (!Cp->boundary) return m;
-    Term **vs2 = xalloc((tn + Cp->nint + 1) * sizeof(Term *));
-    for (int q = 0; q < Cp->nint; q++) vs2[q] = args[np + Cp->nargs + Cp->nint - 1 - q];
-    for (int i = 0; i < tn; i++) vs2[Cp->nint + i] = vs[i];
-    Term *sys = E(inst_tele(Cp->boundary, tn + Cp->nint, vs2, 0), I, depth);
+    Term *sys = rs[r++];
     Term *phi = NULL;
     for (int i = 0; i < sys->nbr; i++) phi = phi ? mk_term(T_IOR, phi, sys->br[i].face, NULL, NULL) : sys->br[i].face;
     Term *A = mk_var(depth + I->n + I->htot + I->r + I->o + (I->nb - 1 - I->pi));   /* P idx [img] (c p a is) */
     Data *D = &datas[Cp->data];
     for (int j = 0; j < D->nidx; j++) {
-        Term *ix = inst_tele(Cp->ridx[j], tn, vs, 0);
+        Term *ix = inst_tele(Cp->ridx[j], e->tn, e->vs, 0);
         A = mk_app(A, ix, 1);
-        if (D->idxrec[j] >= 0) A = mk_app(A, E(ix, I, depth), 0);
+        if (D->idxrec[j] >= 0) A = mk_app(A, rs[r++], 0);
     }
     A = mk_app(A, t, 0);
     return mk_term(T_OUTS, A, phi ? phi : mk_term(T_I0, NULL, NULL, NULL, NULL), sys, m);
 }
-static Term *E(Term *t, EInfo *I, int depth) {
-    if (!t) return NULL;
-    Term *r;
+static Term *E_papp_post(Term *t, Term **rs, int n, void *ctx, void *aux) { (void)n; (void)ctx; (void)aux; return mk_term(T_PAPP, rs[0], t->b, rs[1], rs[2]); }
+static Term *E_sys_post(Term *t, Term **rs, int n, void *ctx, void *aux) {
+    (void)n; (void)ctx; (void)aux;
+    Term *r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+    for (int i = 0; i < t->nbr; i++) { r->br[i].face = t->br[i].face; r->br[i].body = rs[i]; }
+    return r;
+}
+static int E_pre(Term *t, int depth, void *ctx, TWDecide *o) {
+    EInfo *I = ctx;
     switch (t->k) {
     case T_VAR: {
-        int idx = t->n - depth;
+        int idx = t->n - depth; o->r = t;
         if (idx >= I->n + I->htot && idx < I->n + I->htot + I->r) {
             int j = I->r - 1 - (idx - I->n - I->htot);
-            if (I->record[j] >= 0) return mk_var(depth + I->n + (I->htot - 1 - I->record[j]));
+            if (I->record[j] >= 0) o->r = mk_var(depth + I->n + (I->htot - 1 - I->record[j]));
         }
-        return t;
+        return TW_DONE;
     }
-    case T_PAPP: {
-        Term *h = E(t->a, I, depth);
-        return mk_term(T_PAPP, h, t->b, E(t->c, I, depth), E(t->d, I, depth));
+    case T_PAPP: o->ks = xalloc(3 * sizeof(Term *)); o->ks[0] = t->a; o->ks[1] = t->c; o->ks[2] = t->d; o->nk = 3; o->post = E_papp_post; o->fin = 1; return TW_SPINE;
+    case T_APP: case T_CON: {
+        ECon *e = E_con_pre(t, I, depth, &o->ks, &o->nk);
+        if (e) { o->post = E_con_post; o->aux = e; o->fin = 1; return TW_SPINE; }
+        if (t->k == T_CON) { o->r = t; return TW_DONE; }
+        return TW_NODE;
     }
-    case T_APP: { Term *m = E_con_spine(t, I, depth); if (m) return m; return mk_app(E(t->a, I, depth), E(t->b, I, depth), t->irr); }
-    case T_CON: { Term *m = E_con_spine(t, I, depth); if (m) return m; return t; }
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: return t;
-    case T_PI: r = mk_pi(t->name, E(t->a, I, depth), E(t->b, I, depth + 1), t->irr); r->isi = t->isi; return r;
-    case T_LAM: r = mk_lam(t->name, E(t->a, I, depth + 1), t->irr); r->isi = t->isi; return r;
-    case T_LET: return mk_let(t->name, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth + 1), t->irr);
-    case T_SIGMA: r = mk_term(T_SIGMA, E(t->a, I, depth), E(t->b, I, depth + 1), NULL, NULL); r->name = t->name; return r;
-    case T_SYS: {
-        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = t->br[i].face; r->br[i].body = E(t->br[i].body, I, depth); }
-        return r;
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: case T_IAND: case T_IOR: case T_INEG: o->r = t; return TW_DONE;
+    case T_SYS:
+        o->ks = xalloc((t->nbr + 1) * sizeof(Term *)); o->nk = t->nbr;
+        for (int i = 0; i < t->nbr; i++) o->ks[i] = t->br[i].body;
+        o->post = E_sys_post; o->fin = 1; return TW_SPINE;
+    default: return TW_NODE;
     }
+}
+static Term *E_build(Term *t, Term **q, void *ctx) {
+    Term *r; (void)ctx;
+    switch (t->k) {
+    case T_APP: return mk_app(q[0], q[1], t->irr);
+    case T_PI: r = mk_pi(t->name, q[0], q[1], t->irr); r->isi = t->isi; return r;
+    case T_LAM: r = mk_lam(t->name, q[0], t->irr); r->isi = t->isi; return r;
+    case T_LET: return mk_let(t->name, q[0], q[1], q[2], t->irr);
+    case T_SIGMA: r = mk_term(T_SIGMA, q[0], q[1], NULL, NULL); r->name = t->name; return r;
     default:
-        r = mk_term(t->k, E(t->a, I, depth), E(t->b, I, depth), E(t->c, I, depth), E(t->d, I, depth));
+        r = mk_term(t->k, q[0], q[1], q[2], q[3]);
         r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
     }
 }
+static Term *E(Term *t, EInfo *I, int depth) { return term_walk(t, depth, 0, E_pre, E_build, I); }
 /* the boundary of C at an endpoint of its single interval: the body of the branch whose face holds there (under [params, args]) */
 static Term *boundary_at(Con *C, int end) {
     Term *v = mk_term(end ? T_I1 : T_I0, NULL, NULL, NULL, NULL);
@@ -290,28 +327,33 @@ static Term *boundary_at(Con *C, int end) {
     return NULL;
 }
 /* rename the free variables of t: variable v (v < n) becomes map[v]; t's own d binders are passed */
-static Term *remap(Term *t, int n, const int *map, int d) {
-    if (!t) return NULL;
-    Term *r;
+typedef struct { int n; const int *map; } Remap;
+static int remap_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    Remap *m = ctx;
+    if (t->k != T_VAR) return TW_NODE;
+    if (t->n < d) { o->r = t; return TW_DONE; }
+    if (t->n - d >= m->n) die("internal: remap: a variable out of range");
+    o->r = mk_var(m->map[t->n - d] + d); return TW_DONE;
+}
+static Term *remap_build(Term *t, Term **q, void *ctx) {
+    Term *r; (void)ctx;
     switch (t->k) {
-    case T_VAR:
-        if (t->n < d) return t;
-        if (t->n - d >= n) die("internal: remap: a variable out of range");
-        return mk_var(map[t->n - d] + d);
     case T_PI: case T_SIGMA:
-        r = mk_term(t->k, remap(t->a, n, map, d), remap(t->b, n, map, d + 1), NULL, NULL);
+        r = mk_term(t->k, q[0], q[1], NULL, NULL);
         r->name = t->name; r->irr = t->irr; r->isi = t->isi; r->pre = t->pre; r->imp = t->imp; return r;
-    case T_LAM: r = mk_lam(t->name, remap(t->a, n, map, d + 1), t->irr); r->isi = t->isi; r->imp = t->imp; return r;
-    case T_LET: return mk_let(t->name, remap(t->a, n, map, d), remap(t->b, n, map, d), remap(t->c, n, map, d + 1), t->irr);
+    case T_LAM: r = mk_lam(t->name, q[0], t->irr); r->isi = t->isi; r->imp = t->imp; return r;
+    case T_LET: return mk_let(t->name, q[0], q[1], q[2], t->irr);
     case T_SYS:
         r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = remap(t->br[i].face, n, map, d); r->br[i].body = remap(t->br[i].body, n, map, d); }
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = q[2 * i]; r->br[i].body = q[2 * i + 1]; }
         return r;
     default:
-        r = mk_term(t->k, remap(t->a, n, map, d), remap(t->b, n, map, d), remap(t->c, n, map, d), remap(t->d, n, map, d));
+        r = mk_term(t->k, q[0], q[1], q[2], q[3]);
         r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->imp = t->imp; r->num = t->num; return r;
     }
 }
+/* rename the free variables of t: variable v (v < n) becomes map[v]; t's own d binders are passed */
+static Term *remap(Term *t, int n, const int *map, int d) { Remap m = { n, map }; return term_walk(t, d, 0, remap_pre, remap_build, &m); }
 /* the motive of a member is run-time content when hcomp is a formal element of it */
 static int motive_rel(int member) { Data *M = &datas[member]; return M->hit || M->nidx > 0; }
 Term *elim_type(int d, LVal lvl, int res_irr, LVal dl) {
@@ -480,20 +522,6 @@ typedef struct { STerm *term; Val *dom; int meta; } Deferred;
 static Deferred *dnums; static int ndnums;
 static int deferrable(STerm *s) { return s->k == S_NUM || s->k == S_LAM || s->k == S_PAIR || s->k == S_SYS; }
 static Term *check(Ctx *c, STerm *s, Val *ty);
-static Term *check1(Ctx *c, STerm *s, Val *ty);
-static void resolve_deferred(Ctx *c, int all) {
-    for (;;) {
-        int found = -1;
-        for (int i = 0; i < ndnums && found < 0; i++) {
-            Val *dom = force(dnums[i].dom);
-            if (!(dom->k == V_NEU && dom->h == H_META) && tmetas[dnums[i].meta].ctxn == c->n) found = i;
-        }
-        if (found < 0) break;
-        Deferred d = dnums[found]; dnums[found] = dnums[--ndnums];
-        meta_assign(d.meta, check(c, d.term, force(d.dom)), tmetas[d.meta].ctxn);   /* may defer further arguments inside */
-    }
-    if (all && ndnums > 0) die("line %d: the type of this argument is not determined by its use; write the implicit argument, f {e} ..", dnums[0].term->line);
-}
 /* the type of an applied term is not known yet (a meta): it is a function type (x : ?D) -> ?C x with fresh metas for the
    domain and the codomain, at fresh levels; the application determines the shape, later constraints the rest */
 static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
@@ -513,40 +541,6 @@ static Val *refine_to_pi(Ctx *c, Val *ty, int line) {
     if (!conv(k, ty, eval(c2.env, pi))) die("line %d: the type of an applied term is not known here and cannot be a function type", line);
     return force(ty);
 }
-static Term *app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty, Val **ty) {
-    hty = force(hty);
-    for (int i = 0; i < nargs; i++) {
-        hty = force(hty);
-        while (hty->k == V_PI && hty->imp && !args[i]->imp) {   /* an implicit argument not written: a meta */
-            Term *m = fresh_meta(c, hty->dom, args[i]->line);
-            head = mk_app(head, m, hty->irr); hty = force(inst(&hty->clo, eval(c->env, m)));
-        }
-        hty = refine_to_pi(c, hty, args[i]->line);
-        if (hty->k == V_PI && deferrable(args[i])) {   /* against a type not known yet: checked once the spine has met its expected type */
-            Val *dom = force(hty->dom);
-            if (dom->k == V_NEU && dom->h == H_META) {
-                int id = meta_new(dom, c->n, c->names, c->tys, args[i]->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
-                dnums = rrealloc(dnums, (ndnums + 1) * sizeof(Deferred));
-                dnums[ndnums].term = args[i]; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
-                head = mk_app(head, m, hty->irr); hty = inst(&hty->clo, eval(c->env, m));
-                continue;
-            }
-        }
-        if (hty->k == V_PATHP) {
-            Term *r = check_interval(c, args[i]);
-            head = mk_term(T_PAPP, head, r, quote(c->n, hty->b), quote(c->n, hty->c));
-            hty = vapp(hty->a, eval(c->env, r), 0);
-            continue;
-        }
-        if (hty->k != V_PI) die("line %d: applying a non-function of type %s", args[i]->line, show(c, hty));
-        if (hty->irr & 2) { c->irrpos++; c->irrlen++; }   /* the argument of an irrelevant binder */
-        Term *a = check(c, args[i], hty->dom);
-        if (hty->irr & 2) { c->irrpos--; c->irrlen--; }
-        head = mk_app(head, a, hty->irr);
-        hty = inst(&hty->clo, eval(c->env, a));
-    }
-    *ty = hty; return head;
-}
 
 static int is_word_type(Ctx *c, Val *ty);
 static void check_wordop_type(int code, Val *vty, int line, const char *name);
@@ -556,252 +550,6 @@ static void need_args(STerm *h, int n, int want, const char *what) {
 /* the faces of phi as a list; dies if phi is not an interval value */
 static int faces_of(Val *phi, Face **fs) { if (phi->k != V_I) die("internal: face expected"); return iv_faces(phi->iv, fs); }
 
-static Term *infer_app(Ctx *c, STerm *s, Val **ty) {
-    STerm **args = NULL; int n = 0, cap = 0;
-    STerm *h = s;
-    while (h->k == S_APP) {
-        if (n == cap) { cap = cap ? 2 * cap : 8; STerm **na = xalloc(cap * sizeof(STerm *)); if (n) memcpy(na, args, n * sizeof(STerm *)); args = na; }
-        args[n++] = h->b; h = h->a;
-    }
-    for (int i = 0; i < n / 2; i++) { STerm *t = args[i]; args[i] = args[n - 1 - i]; args[n - 1 - i] = t; }
-    switch (h->k) {
-    case S_ELIM: {
-        int d = find_data(h->name);
-        if (d >= 0 && IN_DECL(d))   /* its constructors are not all declared yet: an eliminator here would have too few methods */
-            die("line %d: elim %s inside the declaration of %s: the type is not complete yet", s->line, h->name, h->name);
-        if (d < 0) die("line %d: elim of unknown data type '%s'", h->line, h->name);
-        Data *D = &datas[d]; int np = D->nparams;
-        /* the data type is taken at a fresh level (a meta, solved at the end of the definition), or at its
-           own hidden level inside its own declaration */
-        LVal dl; Term *dlt = global_level(T_DATA, d, &dl);
-        Data *DV = data_at(d, dl);
-        Env *pe = NULL; Val **pv = xalloc((np + 1) * sizeof(Val *)); Term **pt = xalloc((np + 1) * sizeof(Term *)); int ai = 0;
-        for (int i = 0; i < np; i++) {   /* the parameters are implicit: written {p}, or metas */
-            Val *pty = eval(pe, DV->ptys[i]);
-            pt[i] = (ai < n && args[ai]->imp) ? check(c, args[ai++], pty) : fresh_meta(c, pty, h->line);
-            pv[i] = eval(c->env, pt[i]); pe = env_push(pe, pv[i]);
-        }
-        if (n < ai + 1) die("line %d: elim %s needs a motive", h->line, D->name);
-        /* motive: peel its lambdas against the expected binders (indices, then the target),
-           then read the universe of what remains */
-        LVal lvl; int res_irr;
-        {
-            STerm *ms = args[ai]; Env *ie = pe; int nb = 0, depth = c->n;
-            int d0 = D->block, m0 = datas[d0].nidx; Data *DV0 = data_at(d0, dl);   /* the first motive is the block's first member's */
-            Val **iv = xalloc((m0 + 2) * sizeof(Val *));
-            #define TARGET_TYPE(dst) do { \
-                Val *dv_ = mkval(V_DATA); dv_->n = d0; dv_->lvl = dl; \
-                for (int i_ = 0; i_ < np; i_++) { vl_push(&dv_->args, pv[i_], 1); } \
-                for (int j_ = 0; j_ < m0; j_++) { vl_push(&dv_->args, iv[j_], 1); } \
-                (dst) = dv_; } while (0)
-            while (nb <= m0 && ms->k == S_LAM) {
-                Val *dom;
-                if (nb < m0) dom = eval(ie, DV0->itys[nb]); else TARGET_TYPE(dom);
-                ctx_bind(c, ms->binders[0].name, dom);
-                Val *x = vvar(c->n - 1); depth = c->n;
-                if (nb < m0) { iv[nb] = x; ie = env_push(ie, x); }
-                ms = ms->a; nb++;
-            }
-            Val *rty; Term *rt = infer(c, ms, &rty);
-            Val *cur = rty;
-            for (int j = nb; j <= m0; j++) {
-                if (cur->k != V_PI) die("line %d: motive for %s must abstract over %d index%s and the target", ms->line, datas[d0].name, m0, m0 == 1 ? "" : "es");
-                Val *dom;
-                if (j < m0) dom = eval(ie, DV0->itys[j]); else TARGET_TYPE(dom);
-                expect_conv(c, ms->line, cur->dom, dom, "motive binder");
-                Val *x = vvar(depth++);
-                if (j < m0) { iv[j] = x; ie = env_push(ie, x); }
-                cur = inst(&cur->clo, x);
-            }
-            #undef TARGET_TYPE
-            if (cur->k != V_U || cur->pre) die("line %d: motive for %s must land in a universe, not %s", ms->line, datas[d0].name, show(c, cur));
-            lvl = cur->lvl;
-            Val *fib = eval(c->env, rt);
-            for (int j = nb; j <= m0; j++) fib = vapp(fib, vvar(c->n + (j - nb)), 0);
-            (void)fib; res_irr = 0;
-            for (int i = 0; i < nb; i++) ctx_pop(c);
-        }
-        Term *ety = elim_type(d, lvl, res_irr, dl);
-        {   /* the indices and the target determine the parameters (metas), but they come last: check them first, for their
-               constraints; the spine is then checked in order (their terms are taken from that pass) */
-            int K = block_ncons(d), nbk = D->nblock, m = D->nidx;
-            if (n - ai == nbk + K + m + 1) {
-                Env *ie = pe; Val **iv = xalloc((m + 1) * sizeof(Val *));
-                for (int j = 0; j < m; j++) { Term *it = check(c, args[ai + nbk + K + j], eval(ie, DV->itys[j])); iv[j] = eval(c->env, it); ie = env_push(ie, iv[j]); }
-                Val *tt = mkval(V_DATA); tt->n = d; tt->lvl = dl;
-                for (int i = 0; i < np; i++) vl_push(&tt->args, pv[i], 1);
-                for (int j = 0; j < m; j++) vl_push(&tt->args, iv[j], 1);
-                (void)check(c, args[n - 1], tt);
-            }
-        }
-        Term *head = mk_ref_l(T_ELIM, d, dlt); Val *hty = eval(NULL, ety);
-        for (int i = 0; i < np; i++) { head = mk_app(head, pt[i], 1); hty = inst(&hty->clo, pv[i]); }
-        return app_spine(c, args + ai, n - ai, head, hty, ty);
-    }
-    case S_PATHP: {
-        LVal lvl; Term *line, *x, *y;
-        if (h->lvl == 0) {   /* PathP line x y */
-            need_args(h, n, 3, "PathP");
-            line = check_line(c, args[0], &lvl);
-        } else {             /* Path A x y = PathP (\_ -> A) x y */
-            need_args(h, n, 3, "Path");
-            Term *A = check_type(c, args[0], &lvl);
-            line = mk_lam("_", shift(A, 0, 1), 0); line->isi = 1;
-        }
-        Val *lv = eval(c->env, line);
-        x = check(c, args[1], vapp(lv, vi(iv_zero()), 0));
-        y = check(c, args[2], vapp(lv, vi(iv_one()), 0));
-        return app_spine(c, args + 3, n - 3, mk_term(T_PATHP, line, x, y, NULL), vu_l(lvl), ty);
-    }
-    case S_PARTIAL: {
-        need_args(h, n, 2, "Partial");
-        Term *phi = check_interval(c, args[0]);
-        LVal lvl; Term *A = check_type(c, args[1], &lvl);
-        return app_spine(c, args + 2, n - 2, mk_term(T_PARTIAL, phi, A, NULL, NULL), vupre_l(lvl), ty);
-    }
-    case S_TRANSP: {
-        need_args(h, n, 3, "transp");
-        LVal lvl; Term *line = check_line(c, args[0], &lvl);
-        Val *lv = eval(c->env, line);
-        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
-        Term *u0 = check(c, args[2], vapp(lv, vi(iv_zero()), 0));
-        /* the line must be constant wherever phi holds */
-        Val *Ai = vapp(lv, vivar(c->n), 0), *A0 = vapp(lv, vi(iv_zero()), 0);
-        Face *fs; int nf = faces_of(pv, &fs);
-        for (int i = 0; i < nf; i++)
-            if (!conv(c->n + 1, restrict_val(Ai, &fs[i]), restrict_val(A0, &fs[i])))
-                die("line %d: transp: the line %s is not constant on the face where it must be the identity", args[0]->line, show(c, lv));
-        Term *t = mk_term(T_TRANSP, line, phi, u0, NULL);
-        t->n = !val_mentions_ivar(c->n + 1, Ai, c->n);     /* a constant line: erasure may drop the transport */
-        return app_spine(c, args + 3, n - 3, t, vapp(lv, vi(iv_one()), 0), ty);
-    }
-    case S_HCOMP: {
-        need_args(h, n, 4, "hcomp");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
-        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
-        /* u : (i : I) -> Partial phi A */
-        Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
-        uty->clo.env = c->env; uty->clo.t = mk_term(T_PARTIAL, shift(phi, 0, 1), shift(A, 0, 1), NULL, NULL);
-        Term *u = check(c, args[2], uty); Val *uv = eval(c->env, u);
-        Term *u0 = check(c, args[3], Av); Val *u0v = eval(c->env, u0);
-        /* the base must agree with the sides at i0 wherever phi holds */
-        Face *fs; int nf = faces_of(pv, &fs);
-        for (int i = 0; i < nf; i++) {
-            Val *side = vsys_at(vapp(uv, vi(iv_zero()), 0), &fs[i]);
-            if (!side) die("line %d: hcomp: the sides do not cover their face", args[2]->line);
-            if (!conv(c->n, side, restrict_val(u0v, &fs[i])))
-                die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s\n  side = %s\n  base = %s", args[3]->line, show(c, pv), show(c, side), show(c, restrict_val(u0v, &fs[i])));
-        }
-        Term *t = mk_term(T_HCOMP, A, phi, u, u0); t->n = (Av->k == V_U);
-        return app_spine(c, args + 4, n - 4, t, Av, ty);
-    }
-    case S_COMP: {
-        /* comp A phi u u0 : A i1  with  u : (i : I) -> Partial phi (A i),  u0 : A i0 agreeing with u i0 on phi.
-           Elaborated to its definition in terms of hcomp and transp (Cohen-Huber-Mortberg):
-             hcomp (A i1) phi (\i -> [ phi -> transp (\j -> A (i \/ j)) i (u i) ]) (transp A i0 u0)   */
-        need_args(h, n, 4, "comp");
-        LVal lvl; Term *line = check_line(c, args[0], &lvl); Val *lv = eval(c->env, line);
-        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
-        Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
-        uty->clo.env = c->env; uty->clo.t = mk_term(T_PARTIAL, shift(phi, 0, 1), mk_app(shift(line, 0, 1), mk_var(0), 0), NULL, NULL);
-        Term *u = check(c, args[2], uty); Val *uv = eval(c->env, u);
-        Term *u0 = check(c, args[3], vapp(lv, vi(iv_zero()), 0)); Val *u0v = eval(c->env, u0);
-        Face *fs; int nf = faces_of(pv, &fs);
-        for (int i = 0; i < nf; i++) {
-            Val *side = vsys_at(vapp(uv, vi(iv_zero()), 0), &fs[i]);
-            if (!side) die("line %d: comp: the sides do not cover their face", args[2]->line);
-            if (!conv(c->n, side, restrict_val(u0v, &fs[i])))
-                die("line %d: comp: the base does not agree with the sides at i0 on a face of %s", args[3]->line, show(c, pv));
-        }
-        int constline = !val_mentions_ivar(c->n + 1, vapp(lv, vivar(c->n), 0), c->n);
-        Term *A1 = mk_app(line, mk_term(T_I1, NULL, NULL, NULL, NULL), 0);
-        /* under \i: */
-        Term *iv_ = mk_var(0);
-        Term *inner_line = mk_lam("j", mk_app(shift(line, 0, 2), mk_term(T_IOR, mk_var(1), mk_var(0), NULL, NULL), 0), 0); inner_line->isi = 1;
-        Term *tr = mk_term(T_TRANSP, inner_line, iv_, mk_app(shift(u, 0, 1), iv_, 0), NULL); tr->n = constline;
-        Term *sys = mk_term(T_SYS, NULL, NULL, NULL, NULL); sys->nbr = 1; sys->br = xalloc(sizeof(TBranch));
-        sys->br[0].face = shift(phi, 0, 1); sys->br[0].body = tr;
-        Term *sides = mk_lam("i", sys, 0); sides->isi = 1;
-        Term *base = mk_term(T_TRANSP, line, mk_term(T_I0, NULL, NULL, NULL, NULL), u0, NULL); base->n = constline;
-        Term *t = mk_term(T_HCOMP, A1, phi, sides, base); t->n = (vapp(lv, vi(iv_one()), 0)->k == V_U);
-        return app_spine(c, args + 4, n - 4, t, vapp(lv, vi(iv_one()), 0), ty);
-    }
-    case S_SUB: {   /* Sub A phi u : U,  u : Partial phi A */
-        need_args(h, n, 3, "Sub");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
-        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
-        Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = Av;
-        Term *u = check(c, args[2], pty);
-        return app_spine(c, args + 3, n - 3, mk_term(T_SUB, A, phi, u, NULL), vupre_l(lvl), ty);
-    }
-    case S_SIGMA: {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
-        need_args(h, n, 2, "Sigma");
-        LVal la, lb; Term *A = check_type(c, args[0], &la); Val *Av = force(eval(c->env, A));
-        Term *B;
-        if (args[1]->k == S_LAM) {
-            ctx_bind(c, args[1]->binders[0].name, Av);
-            Term *body = check_type(c, args[1]->a, &lb);
-            ctx_pop(c);
-            B = body;
-            Term *t = mk_term(T_SIGMA, A, B, NULL, NULL); t->name = args[1]->binders[0].name; t->irr = args[1]->irrel;
-            return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
-        }
-        Val *bty; Term *bt = infer(c, args[1], &bty);
-        if (bty->k != V_PI) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
-        expect_conv(c, args[1]->line, bty->dom, Av, "family domain");
-        Val *cod = inst(&bty->clo, vvar(c->n));
-        if (cod->k != V_U || cod->pre) die("line %d: the second argument of Sigma must be a family A -> U", args[1]->line);
-        lb = cod->lvl;
-        Term *t = mk_term(T_SIGMA, A, mk_app(shift(bt, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x"; t->irr = args[1]->irrel;
-        return app_spine(c, args + 2, n - 2, t, vu_l(lv_max(la, lb)), ty);
-    }
-    case S_FST: case S_SND: {
-        need_args(h, n, 1, h->k == S_FST ? "fst" : "snd");
-        Val *pty; Term *p = infer(c, args[0], &pty); pty = force(pty);
-        if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", args[0]->line, show(c, pty));
-        if (h->k == S_SND && pty->irr && !c->irrpos)
-            die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", args[0]->line);
-        Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
-        if (is_word_type(c, pty)) t->n = 1;
-        t->irr = pty->irr;   /* from an irrelevant pair: at run time the pair is its first component (M19) */
-        Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
-        return app_spine(c, args + 1, n - 1, t, rty, ty);
-    }
-    case S_GLUE: {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
-        need_args(h, n, 3, "Glue");
-        LVal lvl; Term *A = check_type(c, args[0], &lvl); Val *Av = force(eval(c->env, A));
-        Term *phi = check_interval(c, args[1]); Val *pv = eval(c->env, phi);
-        int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", h->line);
-        Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu_l(lvl);
-        sig->clo.env = env_push(c->env, Av);   /* under [.., A]: Equiv^lvl T A with T the bound variable */
-        sig->clo.t = mk_app(mk_app(mk_ref_l(T_DEF, eq, mk_lval(lvl)), mk_var(0), 0), mk_var(1), 0);
-        Val *pty = mkval(V_PARTIAL); pty->a = pv; pty->b = sig;
-        Term *Te = check(c, args[2], pty);
-        Term *g = mk_term(T_GLUE, A, phi, Te, mk_lval(lvl));   /* the level, for the rules' equivProof */
-        return app_spine(c, args + 3, n - 3, g, vu_l(lvl), ty);
-    }
-    case S_GLUEEL: die("line %d: glue must be checked against a Glue type", h->line);
-    case S_UNGLUE: {
-        need_args(h, n, 1, "unglue");
-        Val *bty; Term *b = infer(c, args[0], &bty); bty = force(bty);
-        if (bty->k != V_GLUE) die("line %d: unglue applied to a term of type %s, expected a Glue type", args[0]->line, show(c, bty));
-        Term *t = mk_term(T_UNGLUE, b, quote(c->n, bty->a), quote(c->n, bty->b), quote(c->n, bty->c));
-        return app_spine(c, args + 1, n - 1, t, bty->a, ty);
-    }
-    case S_INS: die("line %d: inS must be checked against a Sub type", h->line);
-    case S_OUTS: {  /* outS s : A  for s : Sub A phi u */
-        need_args(h, n, 1, "outS");
-        Val *sty; Term *s = infer(c, args[0], &sty); sty = force(sty);
-        if (sty->k != V_SUB) die("line %d: outS applied to a term of type %s, expected a Sub type", args[0]->line, show(c, sty));
-        Term *t = mk_term(T_OUTS, quote(c->n, sty->a), quote(c->n, sty->b), quote(c->n, sty->c), s);
-        return app_spine(c, args + 1, n - 1, t, sty->a, ty);
-    }
-    default: {
-        Val *hty; Term *head = infer(c, h, &hty);
-        return app_spine(c, args, n, head, hty, ty);
-    }
-    }
-}
 
 /* ---- systems ---- */
 
@@ -812,123 +560,9 @@ static Val *glue_type_at(const Face *f, void *data) {   /* the glued type T on a
     if (!Te) die("internal: glue: no glued type on this face");
     return vproj(Te, 1);
 }
-static Term *check_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data);
-static Term *check_system(Ctx *c, STerm *s, Val *ty) {
-    if (ty->k != V_PARTIAL) die("line %d: a system must be checked against a Partial type, not %s", s->line, show(c, ty));
-    return check_system_at(c, s, ty->a, partial_type_at, ty->b);
-}
-static Term *check_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data) {
-    Term *t = mk_term(T_SYS, NULL, NULL, NULL, NULL); t->nbr = s->nbr; t->br = xalloc((s->nbr + 1) * sizeof(TBranch));
-    Val **psi = xalloc((s->nbr + 1) * sizeof(Val *)), **bv = xalloc((s->nbr + 1) * sizeof(Val *));
-    IVal cover = iv_zero();
-    for (int k = 0; k < s->nbr; k++) {
-        t->br[k].face = check_interval(c, s->br[k].face);
-        psi[k] = eval(c->env, t->br[k].face);
-        cover = iv_or(cover, psi[k]->iv);
-    }
-    if (!iv_eq(cover, phi->iv)) die("line %d: the system's faces cover %s, but its type demands %s", s->line, show(c, vi(cover)), show(c, phi));
-    for (int k = 0; k < s->nbr; k++) {
-        Face *fs; int nf = faces_of(psi[k], &fs);
-        if (nf == 0) die("line %d: the face %s of a system branch is never satisfied", s->br[k].face->line, show(c, psi[k]));
-        Term *body = NULL;
-        for (int i = 0; i < nf; i++) {
-            Ctx rc = ctx_restrict(c, &fs[i]);
-            Term *b = check(&rc, s->br[k].body, tyat(&fs[i], data));
-            if (!body) body = b;
-        }
-        t->br[k].body = body;
-    }
-    (void)bv;
-    /* overlapping branches must agree: both evaluated under the restriction to the common face */
-    for (int k = 0; k < s->nbr; k++) for (int l = k + 1; l < s->nbr; l++) {
-        Face *fs; int nf = faces_of(vi(iv_and(psi[k]->iv, psi[l]->iv)), &fs);
-        for (int i = 0; i < nf; i++) {
-            Ctx rc = ctx_restrict(c, &fs[i]);
-            if (!conv(c->n, eval(rc.env, t->br[k].body), eval(rc.env, t->br[l].body)))
-                die("line %d: system branches %d and %d disagree where their faces overlap", s->line, k + 1, l + 1);
-        }
-    }
-    return t;
-}
 
 /* ---- terms ---- */
 
-static Term *infer(Ctx *c, STerm *s, Val **ty) {
-    switch (s->k) {
-    case S_VAR: {
-        for (int i = c->n - 1; i >= 0; i--)
-            if (!strcmp(c->names[i], s->name)) {
-                if (c->irrs[i] && !c->irrpos) die("line %d: '%s' is irrelevant (bound by .(%s : ..)); it may be used only in an irrelevant position (an irrelevant argument or component, a type, a proof of Empty)", s->line, s->name, s->name);
-                *ty = c->tys[i]; return mk_var(c->n - 1 - i);
-            }
-        int id;
-        if ((id = find_con(s->name)) >= 0) { LVal L; Term *lt = global_level(T_CON, id, &L); *ty = eval(NULL, con_at(id, L)->ty); return mk_ref_l(T_CON, id, lt); }
-        if ((id = find_def(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DEF, id, &L); *ty = def_ty_at(id, L); return mk_ref_l(T_DEF, id, lt); }
-        if ((id = find_data(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DATA, id, &L); *ty = eval(NULL, data_at(id, L)->ty); return mk_ref_l(T_DATA, id, lt); }
-        die("line %d: unbound name '%s'", s->line, s->name);
-    }
-    case S_HOLE: {   /* a hole standing for a type: a meta in a universe at a fresh level */
-        int l = lv_meta_new(); Val *U = vu_l(lv_meta(l)); *ty = U; return fresh_meta(c, U, s->line);
-    }
-    case S_U:
-        if (s->a) {   /* U {l}: a universe at a level expression */
-            Term *lt = check(c, s->a, vlevel()); LVal L = eval_level(c->env, lt);
-            Term *u = mk_u(0); u->a = lt; *ty = vu_l(lv_add(L, 1)); return u;
-        }
-        *ty = vu_l(lv_add(BASE_LEVEL(c), s->lvl + 1)); return mk_u_l(lv_add(BASE_LEVEL(c), s->lvl));   /* U n is U {L + n}, or U n when level-explicit */
-    case S_LEVEL: *ty = vupre(0); return mk_term(T_LEVEL, NULL, NULL, NULL, NULL);   /* a pretype: no Kan structure, not inductive */
-    case S_LZERO: *ty = vlevel(); return mk_lval(BASE_LEVEL(c));   /* constants are relative to the hidden level unless level-explicit */
-    case S_LSUC: { Term *a = check(c, s->a, vlevel()); Term *r = mk_term(T_LSUC, a, NULL, NULL, NULL); r->n = 1; *ty = vlevel(); return r; }
-    case S_LMAX: { Term *a = check(c, s->a, vlevel()), *b = check(c, s->b, vlevel()); *ty = vlevel(); return mk_term(T_LMAX, a, b, NULL, NULL); }
-    case S_I: die("line %d: I is the type of interval variables; it is not itself a term of a universe", s->line);
-    case S_I0: *ty = vinterval(); return mk_term(T_I0, NULL, NULL, NULL, NULL);
-    case S_I1: *ty = vinterval(); return mk_term(T_I1, NULL, NULL, NULL, NULL);
-    case S_IAND: case S_IOR: {
-        Term *a = check_interval(c, s->a), *b = check_interval(c, s->b);
-        *ty = vinterval(); return mk_term(s->k == S_IAND ? T_IAND : T_IOR, a, b, NULL, NULL);
-    }
-    case S_INEG: { Term *a = check_interval(c, s->a); *ty = vinterval(); return mk_term(T_INEG, a, NULL, NULL, NULL); }
-    case S_NUM:
-        die("line %d: the type of the numeral %llu is not determined here; a numeral is checked against a type shaped like the naturals (give it one: a binder, a let, an argument)", s->line, s->num);
-    case S_PI: {
-        SBinder *b = &s->binders[0];
-        if (b->ty->k == S_I) {   /* a function from the interval is a pretype: it has no Kan structure */
-            if (b->imp) die("line %d: an interval binder cannot be implicit", s->line);
-            ctx_bind_i(c, b->name);
-            LVal lb; int pb; Term *cod = check_type_sort(c, s->a, &lb, &pb);
-            ctx_pop(c);
-            *ty = vupre_l(lb);
-            Term *t = mk_pi(b->name, mk_term(T_INTERVAL, NULL, NULL, NULL, NULL), cod, 0); return t;
-        }
-        LVal la, lb; int pa, pb; Term *dom = check_type_sort(c, b->ty, &la, &pa);
-        Val *dv = eval(c->env, dom);
-        int irr = dom->k == T_LEVEL;   /* types are run-time codes, so every binder is relevant; levels are not */
-        if (b->irrel) irr = 2;         /* .(x : A): proof-irrelevant - erased, not compared, usable only in irrelevant positions */
-        ctx_bind_irr(c, b->name, dv, irr);
-        Term *cod = check_type_sort(c, s->a, &lb, &pb);
-        ctx_pop(c);
-        LVal l = lv_max(la, lb);
-        *ty = (pa || pb) ? vupre_l(l) : vu_l(l);   /* a function type from or into a pretype is a pretype */
-        Term *t = mk_pi(b->name, dom, cod, irr); t->pre = pa; t->imp = b->imp; return t;
-    }
-    case S_LAM: die("line %d: cannot infer the type of a lambda; add an annotation", s->line);
-    case S_SYS: die("line %d: cannot infer the type of a system; it must be checked against a Partial type", s->line);
-    case S_PAIR: die("line %d: cannot infer the type of a pair; it must be checked against a Sigma type", s->line);
-    case S_APP: case S_ELIM: case S_PATHP: case S_PARTIAL: case S_TRANSP: case S_HCOMP: case S_COMP: case S_SUB: case S_INS: case S_OUTS: case S_SIGMA: case S_FST: case S_SND: case S_GLUE: case S_GLUEEL: case S_UNGLUE: return infer_app(c, s, ty);
-    case S_LET: {
-        LVal l; int p; Term *tyt = check_type_sort(c, s->a, &l, &p);   /* a let may bind a line or a partial element */
-        Val *tv = eval(c->env, tyt);
-        Term *v = check(c, s->b, tv);
-        int irr = 0;
-        ctx_push(c, s->name, tv, eval(c->env, v));
-        Val *bty; Term *body = infer(c, s->c, &bty);
-        ctx_pop(c);
-        *ty = bty;
-        return mk_let(s->name, tyt, v, body, irr);
-    }
-    }
-    return NULL;
-}
 
 /* a data type shaped like the naturals: no parameters or indices, exactly two constructors, one nullary and one
    with a single recursive argument. Returns 1 and the two constructors' ids. */
@@ -954,13 +588,7 @@ static int is_word_type(Ctx *c, Val *ty) {
 }
 
 static Term *check_numeral(Ctx *c, STerm *s, Val *ty) {
-    int zi, si;
-    if (is_word_type(c, ty)) {   /* a numeral at the word type: the pair (n, refl), its bound decided by the kernel */
-        STerm *pr = xalloc(sizeof *pr), *r = xalloc(sizeof *r);
-        r->k = S_VAR; r->name = "refl"; r->line = s->line;
-        pr->k = S_PAIR; pr->line = s->line; pr->a = s; pr->b = r;
-        return check(c, pr, ty);
-    }
+    int zi, si;   /* a numeral at the word type is check1's: the pair (n, refl) */
     if (ty->k == V_LEVEL) {   /* a numeral is also a constant level */
         if (s->num > 1000000) die("line %d: the level %s is too large", s->line, s->digits);
         return mk_lval(lv_add(BASE_LEVEL(c), (int)s->num));
@@ -1028,122 +656,690 @@ bad:
     die("line %d: native %s: the type must be D -> D -> D for a data type D shaped like the naturals", line, name);
     return -1;
 }
-static Term *check(Ctx *c, STerm *s, Val *ty) {
-    ty = force(ty);
-    if (ty->k == V_DATA && datas[ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
-        c->irrpos++; c->irrlen++; Term *t = check1(c, s, ty); c->irrpos--; c->irrlen--; return t;
-    }
-    return check1(c, s, ty);
+/* ---- the elaborator on the machine (S4b) ----
+   check, infer and their helpers are frames on the evaluator's machine (machine.h), so elaboration's depth is bounded by
+   memory alone, as evaluation's is. A frame's term result travels through the register; infer's type, a sort's level and
+   pretype flag through the elaborator's registers below, read by the caller right after the call returns. A frame keeps
+   everything that outlives a call in its fields (the stack may move); a context restricted to a face lives on the heap.
+   The evaluator's entry points (eval, conv, force, quote, ...) are called as C: evaluation never enters the elaborator, so
+   each nests one driver run. */
+static Val *eret_ty;   /* infer's type */
+static LVal eret_lvl;  /* a sort's level */
+static int eret_pre;   /* a sort is a pretype */
+typedef struct {
+    MHdr h;
+    Ctx *c; STerm *s; Val *ty;
+    STerm **args, *hs, *ms; int n, ai, i, j, nb, depth, nf, d, np, m0, d0, pa, pb, irr, all, isl;
+    Term *t, *a, *b, *u, *line, *phi, *head, *tst, *rt, **pt, *dlt;
+    Val *v, *x, *got, *hty, *lv, *pv, *Av, *uv, *u0v, *tsv, **psi, **pvv, **iv;
+    Env *pe, *ie; Data *D, *DV, *DV0;
+    LVal la, lb, dl;
+    Face *fs; Ctx *rc;
+    TypeAt tyat; void *data;
+    const char *nm;
+} ElabF;
+#define F ((ElabF *)(mst.p + off))
+static void check_step(size_t off);
+static void check1_step(size_t off);
+static void infer_step(size_t off);
+static void infer_app_step(size_t off);
+static void infer_elim_step(size_t off);
+static void app_spine_step(size_t off);
+static void sort_step(size_t off);
+static void check_line_step(size_t off);
+static void system_step(size_t off);
+static void resolve_step(size_t off);
+static ElabF *epush(void (*step)(size_t), Ctx *c, STerm *s, Val *ty) { ElabF *f = mpush(sizeof *f, step); f->c = c; f->s = s; f->ty = ty; return f; }
+static void mpush_check(Ctx *c, STerm *s, Val *ty) { epush(check_step, c, s, ty); }
+static void mpush_infer(Ctx *c, STerm *s) { epush(infer_step, c, s, NULL); }
+/* a type of either sort (pre: 1 also refuses pretypes: a type in a universe, with Kan structure) */
+static void mpush_sort(Ctx *c, STerm *s, int kan) { epush(sort_step, c, s, NULL)->isl = kan; }
+static void mpush_check_line(Ctx *c, STerm *s) { epush(check_line_step, c, s, NULL); }
+static void mpush_system_at(Ctx *c, STerm *s, Val *phi, TypeAt tyat, void *data) { ElabF *f = epush(system_step, c, s, phi); f->tyat = tyat; f->data = data; }
+static void mpush_resolve(Ctx *c, int all) { epush(resolve_step, c, NULL, NULL)->all = all; }
+static void mpush_app_spine(Ctx *c, STerm **args, int nargs, Term *head, Val *hty) {
+    ElabF *f = epush(app_spine_step, c, NULL, NULL); f->args = args; f->n = nargs; f->head = head; f->hty = hty;
 }
-static Term *check1(Ctx *c, STerm *s, Val *ty) {
-    if (ty->k == V_PI && ty->imp && !(s->k == S_LAM && s->binders[0].imp)) {   /* an implicit function type: abstract over the argument */
-        const char *nm = xsprintf("{%s}", ty->name ? ty->name : "_");   /* not a name the program can write: no capture */
-        ctx_bind(c, nm, ty->dom);
-        Term *body = check(c, s, inst(&ty->clo, c->env->v));
-        ctx_pop(c);
-        Term *t = mk_lam(nm, body, ty->irr); t->imp = 1; return t;
-    }
-    if (s->k == S_HOLE) return fresh_meta(c, ty, s->line);
-    if (s->k == S_NUM) return check_numeral(c, s, ty);
-    if (s->k == S_LAM) {
-        SBinder *b = &s->binders[0];
-        if (b->imp && !(ty->k == V_PI && ty->imp)) die("line %d: the implicit lambda \\{%s} is checked against %s, not an implicit function type", s->line, b->name, show(c, ty));
-        if (ty->k == V_PATHP) {
-            ctx_bind_i(c, b->name);
-            int lvl = c->n - 1;
-            Term *body = check(c, s->a, vapp(ty->a, vivar(lvl), 0));
-            Val *bv = eval(c->env, body);
-            int var = lvl, v0 = 0, v1 = 1; Face f0 = { &var, &v0, 1 }, f1 = { &var, &v1, 1 };
-            if (!conv(c->n, restrict_val(bv, &f0), ty->b)) die("line %d: the path's left endpoint is %s, expected %s", s->line, show(c, restrict_val(bv, &f0)), show(c, ty->b));
-            if (!conv(c->n, restrict_val(bv, &f1), ty->c)) die("line %d: the path's right endpoint is %s, expected %s", s->line, show(c, restrict_val(bv, &f1)), show(c, ty->c));
-            ctx_pop(c);
-            Term *t = mk_lam(b->name, body, 0); t->isi = 1; return t;
-        }
-        if (ty->k != V_PI) die("line %d: lambda checked against non-function type %s", s->line, show(c, ty));
-        if (ty->isi) {
-            ctx_bind_i(c, b->name);
-            Term *body = check(c, s->a, inst(&ty->clo, vivar(c->n - 1)));
-            ctx_pop(c);
-            Term *t = mk_lam(b->name, body, 0); t->isi = 1; return t;
-        }
-        ctx_bind_irr(c, b->name, ty->dom, ty->irr);
-        Term *body = check(c, s->a, inst(&ty->clo, vvar(c->n - 1)));
-        ctx_pop(c);
-        Term *t = mk_lam(b->name, body, ty->irr); t->imp = b->imp; return t;
-    }
-    if (s->k == S_LET) {
-        LVal l; int p; Term *tyt = check_type_sort(c, s->a, &l, &p);
-        Val *tv = eval(c->env, tyt);
-        Term *v = check(c, s->b, tv);
-        int irr = 0;
-        ctx_push(c, s->name, tv, eval(c->env, v));
-        Term *body = check(c, s->c, ty);
-        ctx_pop(c);
-        return mk_let(s->name, tyt, v, body, irr);
-    }
-    if (s->k == S_APP && s->a->k == S_INS) {   /* inS x : Sub A phi u  when x : A agrees with u on phi */
-        if (ty->k != V_SUB) die("line %d: inS checked against %s, expected a Sub type", s->line, show(c, ty));
-        Term *x = check(c, s->b, ty->a); Val *xv = eval(c->env, x);
-        Face *fs; int nf = faces_of(ty->b, &fs);
-        for (int i = 0; i < nf; i++) {
-            Val *side = vsys_at(ty->c, &fs[i]);
-            if (!side || !conv(c->n, restrict_val(xv, &fs[i]), side))
-                die("line %d: inS: the element does not agree with the subtype's sides on a face of %s", s->line, show(c, ty->b));
-        }
-        return mk_term(T_INS, x, NULL, NULL, NULL);
-    }
-    if (s->k == S_APP && s->a->k == S_APP && s->a->a->k == S_GLUEEL) {   /* glue ts a : Glue A phi Te */
-        if (ty->k != V_GLUE) die("line %d: glue checked against %s, expected a Glue type", s->line, show(c, ty));
-        STerm *tss = s->a->b, *as = s->b;
-        if (tss->k != S_SYS) die("line %d: the first argument of glue must be a system", tss->line);
-        Term *tst = check_system_at(c, tss, ty->b, glue_type_at, ty->c);
-        Val *tsv = eval(c->env, tst);
-        Term *a = check(c, as, ty->a); Val *av = eval(c->env, a);
-        Face *fs; int nf = faces_of(ty->b, &fs);
-        for (int i = 0; i < nf; i++) {
-            Val *Te = vsys_at(ty->c, &fs[i]), *t = vsys_at(tsv, &fs[i]);
-            if (!Te || !t) die("line %d: glue: the sides do not cover their face", s->line);
-            Val *ea = vapp(vproj(vproj(Te, 2), 1), t, 0);
-            if (!conv(c->n, restrict_val(av, &fs[i]), ea))
-                die("line %d: glue: the base does not agree with the equivalence applied to the sides on a face of %s", s->line, show(c, ty->b));
-        }
-        return mk_term(T_GLUEEL, tst, a, quote(c->n, ty), NULL);
-    }
-    if (s->k == S_PAIR) {
-        if (ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", s->line, show(c, ty));
-        Term *a = check(c, s->a, ty->dom);
-        if (ty->irr) { c->irrpos++; c->irrlen++; }
-        Term *b = check(c, s->b, inst(&ty->clo, eval(c->env, a)));
-        if (ty->irr) { c->irrpos--; c->irrlen--; }
-        Term *t = mk_term(T_PAIR, a, b, NULL, NULL); t->irr = ty->irr;
-        if (is_word_type(c, ty)) t->n = 1;
-        return t;
-    }
-    if (s->k == S_SYS) return check_system(c, s, ty);
-    Val *got; Term *t = infer(c, s, &got); got = force(got);
-    while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied */
-        Term *m = fresh_meta(c, got->dom, s->line);
-        t = mk_app(t, m, got->irr); got = force(inst(&got->clo, eval(c->env, m)));
-    }
-    if (got->k == V_U && ty->k == V_NEU && ty->h == H_META) {
-        /* a universe against a type not known yet: subtyping holds between sorts only, so the type is a universe of the same
-           sort at a level to be determined; the level is a fresh level meta, bounded below by got's (the level store decides it) */
-        Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
-        if (!conv(c->n, ty, U) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
-        if (lv_enforce_leq(got->lvl, U->lvl) != 1 && !c->irrlen) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
-        resolve_deferred(c, 0); return t;
-    }
-    if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
-        int r = lv_enforce_leq(got->lvl, ty->lvl);
-        if (r == 1 || c->irrlen) { resolve_deferred(c, 0); return t; }
-        if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
-        die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
-    }
-    if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
-    if (!conv(c->n, got, ty) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
-    resolve_deferred(c, 0);
-    return t;
+
+/* a term must be a type (of either sort, or with isl a type in a universe): its core, universe level and whether it is a
+   pretype; a type whose sort is not known yet (a meta) is in a universe at a fresh level */
+static void sort_step(size_t off) {
+    MSTART
+    F->c->irrpos++;   /* a type is an irrelevant position */
+    MCALL(mpush_infer(F->c, F->s)); F->t = MTERM(); F->v = eret_ty;
+    F->c->irrpos--;
+    { Val *ty = refine_to_universe(F->c, F->v);
+      if (ty->k != V_U) die("line %d: expected a type, but %s : %s", F->s->line, "the term", show(F->c, ty));
+      if (F->isl && ty->pre) die("line %d: a type in a universe is needed here, but the term is a pretype (Partial, Sub, Level, or a function from I) and has no Kan structure", F->s->line);
+      eret_lvl = ty->lvl; eret_pre = ty->pre; }
+    MRETT(F->t);
+    MFINISH
 }
+/* a line of types  (i : I) -> U l : either a lambda over an interval variable, or a term whose type is such a function */
+static void check_line_step(size_t off) {
+    MSTART
+    if (F->s->k == S_LAM) {
+        ctx_bind_i(F->c, F->s->binders[0].name);
+        MCALL(mpush_sort(F->c, F->s->a, 1)); F->t = MTERM(); F->la = eret_lvl;
+        ctx_pop(F->c);
+        { Term *t = mk_lam(F->s->binders[0].name, F->t, 0); t->isi = 1; eret_lvl = F->la; MRETT(t); }
+    }
+    MCALL(mpush_infer(F->c, F->s)); F->t = MTERM(); F->v = eret_ty;
+    { Val *ty = force(F->v); STerm *s = F->s; Ctx *c = F->c;
+      if (ty->k != V_PI || !ty->isi) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
+      Val *cod = refine_to_universe(c, inst(&ty->clo, vivar(c->n)));
+      if (cod->k != V_U) die("line %d: expected a line of types (i : I) -> U, but the term has type %s", s->line, show(c, ty));
+      if (cod->pre) die("line %d: expected a line of types (i : I) -> U, but the line yields pretypes: %s", s->line, show(c, ty));
+      eret_lvl = cod->lvl; }
+    MRETT(F->t);
+    MFINISH
+}
+/* the deferred arguments whose types are known now, checked in this context (a check may defer further arguments) */
+static void resolve_step(size_t off) {
+    MSTART
+    for (;;) {
+        { int found = -1;
+          for (int i = 0; i < ndnums && found < 0; i++) {
+              Val *dom = force(dnums[i].dom);
+              if (!(dom->k == V_NEU && dom->h == H_META) && tmetas[dnums[i].meta].ctxn == F->c->n) found = i;
+          }
+          if (found < 0) break;
+          Deferred d = dnums[found]; dnums[found] = dnums[--ndnums];
+          F->i = d.meta; F->s = d.term; F->v = d.dom; }
+        MCALL(mpush_check(F->c, F->s, force(F->v)));
+        meta_assign(F->i, MTERM(), tmetas[F->i].ctxn);
+    }
+    if (F->all && ndnums > 0) die("line %d: the type of this argument is not determined by its use; write the implicit argument, f {e} ..", dnums[0].term->line);
+    MRET(NULL);
+    MFINISH
+}
+/* a head applied along a spine of arguments */
+static void app_spine_step(size_t off) {
+    MSTART
+    F->hty = force(F->hty);
+    for (F->i = 0; F->i < F->n; F->i++) {
+        { Ctx *c = F->c; STerm *ai = F->args[F->i]; Val *hty = force(F->hty); Term *head = F->head;
+          while (hty->k == V_PI && hty->imp && !ai->imp) {   /* an implicit argument not written: a meta */
+              Term *m = fresh_meta(c, hty->dom, ai->line);
+              head = mk_app(head, m, hty->irr); hty = force(inst(&hty->clo, eval(c->env, m)));
+          }
+          hty = refine_to_pi(c, hty, ai->line);
+          F->hty = hty; F->head = head;
+          if (hty->k == V_PI && deferrable(ai)) {   /* against a type not known yet: checked once the spine has met its expected type */
+              Val *dom = force(hty->dom);
+              if (dom->k == V_NEU && dom->h == H_META) {
+                  int id = meta_new(dom, c->n, c->names, c->tys, ai->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
+                  dnums = rrealloc(dnums, (ndnums + 1) * sizeof(Deferred));
+                  dnums[ndnums].term = ai; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
+                  F->head = mk_app(head, m, hty->irr); F->hty = inst(&hty->clo, eval(c->env, m));
+                  continue;
+              }
+          }
+          if (hty->k != V_PATHP && hty->k != V_PI) die("line %d: applying a non-function of type %s", ai->line, show(c, hty)); }
+        if (F->hty->k == V_PATHP) {
+            MCALL(mpush_check(F->c, F->args[F->i], vinterval()));
+            { Term *r = MTERM(); Ctx *c = F->c; Val *hty = F->hty;
+              F->head = mk_term(T_PAPP, F->head, r, quote(c->n, hty->b), quote(c->n, hty->c));
+              F->hty = vapp(hty->a, eval(c->env, r), 0); }
+            continue;
+        }
+        if (F->hty->irr & 2) { F->c->irrpos++; F->c->irrlen++; }   /* the argument of an irrelevant binder */
+        MCALL(mpush_check(F->c, F->args[F->i], F->hty->dom));
+        if (F->hty->irr & 2) { F->c->irrpos--; F->c->irrlen--; }
+        { Term *a = MTERM();
+          F->head = mk_app(F->head, a, F->hty->irr);
+          F->hty = inst(&F->hty->clo, eval(F->c->env, a)); }
+    }
+    eret_ty = F->hty; MRETT(F->head);
+    MFINISH
+}
+
+/* ---- applications and the formers written as heads ---- */
+static void infer_app_step(size_t off) {
+    MSTART
+    {   STerm **args = NULL; int n = 0, cap = 0; STerm *h = F->s;
+        while (h->k == S_APP) {
+            if (n == cap) { cap = cap ? 2 * cap : 8; STerm **na = xalloc(cap * sizeof(STerm *)); if (n) memcpy(na, args, n * sizeof(STerm *)); args = na; }
+            args[n++] = h->b; h = h->a;
+        }
+        for (int i = 0; i < n / 2; i++) { STerm *t = args[i]; args[i] = args[n - 1 - i]; args[n - 1 - i] = t; }
+        F->args = args; F->n = n; F->hs = h; }
+    #define C_ F->c
+    #define A_(i) F->args[i]
+    if (F->hs->k == S_ELIM) MBECOME(infer_elim_step);
+    if (F->hs->k == S_PATHP) {
+        if (F->hs->lvl == 0) {   /* PathP line x y */
+            need_args(F->hs, F->n, 3, "PathP");
+            MCALL(mpush_check_line(C_, A_(0))); F->line = MTERM(); F->la = eret_lvl;
+        } else {                 /* Path A x y = PathP (\_ -> A) x y */
+            need_args(F->hs, F->n, 3, "Path");
+            MCALL(mpush_sort(C_, A_(0), 1)); F->la = eret_lvl;
+            F->line = mk_lam("_", shift(MTERM(), 0, 1), 0); F->line->isi = 1;
+        }
+        F->lv = eval(C_->env, F->line);
+        MCALL(mpush_check(C_, A_(1), vapp(F->lv, vi(iv_zero()), 0))); F->a = MTERM();
+        MCALL(mpush_check(C_, A_(2), vapp(F->lv, vi(iv_one()), 0))); F->b = MTERM();
+        { STerm **a = F->args + 3; int n = F->n - 3; Ctx *c = C_; Term *t = mk_term(T_PATHP, F->line, F->a, F->b, NULL); Val *u = vu_l(F->la);
+          MTAIL(mpush_app_spine(c, a, n, t, u)); }
+    }
+    if (F->hs->k == S_PARTIAL) {
+        need_args(F->hs, F->n, 2, "Partial");
+        MCALL(mpush_check(C_, A_(0), vinterval())); F->phi = MTERM();
+        MCALL(mpush_sort(C_, A_(1), 1)); F->la = eret_lvl;
+        { STerm **a = F->args + 2; int n = F->n - 2; Ctx *c = C_; Term *t = mk_term(T_PARTIAL, F->phi, MTERM(), NULL, NULL); Val *u = vupre_l(F->la);
+          MTAIL(mpush_app_spine(c, a, n, t, u)); }
+    }
+    if (F->hs->k == S_TRANSP) {
+        need_args(F->hs, F->n, 3, "transp");
+        MCALL(mpush_check_line(C_, A_(0))); F->line = MTERM(); F->la = eret_lvl;
+        F->lv = eval(C_->env, F->line);
+        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        MCALL(mpush_check(C_, A_(2), vapp(F->lv, vi(iv_zero()), 0))); F->u = MTERM();
+        {   /* the line must be constant wherever phi holds */
+            Ctx *c = C_; Val *lv = F->lv;
+            Val *Ai = vapp(lv, vivar(c->n), 0), *A0 = vapp(lv, vi(iv_zero()), 0);
+            Face *fs; int nf = faces_of(F->pv, &fs);
+            for (int i = 0; i < nf; i++)
+                if (!conv(c->n + 1, restrict_val(Ai, &fs[i]), restrict_val(A0, &fs[i])))
+                    die("line %d: transp: the line %s is not constant on the face where it must be the identity", A_(0)->line, show(c, lv));
+            Term *t = mk_term(T_TRANSP, F->line, F->phi, F->u, NULL);
+            t->n = !val_mentions_ivar(c->n + 1, Ai, c->n);     /* a constant line: erasure may drop the transport */
+            STerm **a = F->args + 3; int n = F->n - 3; Val *r = vapp(lv, vi(iv_one()), 0);
+            MTAIL(mpush_app_spine(c, a, n, t, r)); }
+    }
+    if (F->hs->k == S_HCOMP) {
+        need_args(F->hs, F->n, 4, "hcomp");
+        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->Av = force(eval(C_->env, F->t));
+        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        {   /* u : (i : I) -> Partial phi A */
+            Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
+            uty->clo.env = C_->env; uty->clo.t = mk_term(T_PARTIAL, shift(F->phi, 0, 1), shift(F->t, 0, 1), NULL, NULL);
+            F->v = uty; }
+        MCALL(mpush_check(C_, A_(2), F->v)); F->u = MTERM(); F->uv = eval(C_->env, F->u);
+        MCALL(mpush_check(C_, A_(3), F->Av)); F->a = MTERM(); F->u0v = eval(C_->env, F->a);
+        {   /* the base must agree with the sides at i0 wherever phi holds */
+            Ctx *c = C_; Face *fs; int nf = faces_of(F->pv, &fs);
+            for (int i = 0; i < nf; i++) {
+                Val *side = vsys_at(vapp(F->uv, vi(iv_zero()), 0), &fs[i]);
+                if (!side) die("line %d: hcomp: the sides do not cover their face", A_(2)->line);
+                if (!conv(c->n, side, restrict_val(F->u0v, &fs[i])))
+                    die("line %d: hcomp: the base does not agree with the sides at i0 on a face of %s\n  side = %s\n  base = %s", A_(3)->line, show(c, F->pv), show(c, side), show(c, restrict_val(F->u0v, &fs[i])));
+            }
+            Term *t = mk_term(T_HCOMP, F->t, F->phi, F->u, F->a); t->n = (F->Av->k == V_U);
+            STerm **a = F->args + 4; int n = F->n - 4; Val *Av = F->Av;
+            MTAIL(mpush_app_spine(c, a, n, t, Av)); }
+    }
+    if (F->hs->k == S_COMP) {
+        /* comp A phi u u0 : A i1  with  u : (i : I) -> Partial phi (A i),  u0 : A i0 agreeing with u i0 on phi.
+           Elaborated to its definition in terms of hcomp and transp (Cohen-Huber-Mortberg):
+             hcomp (A i1) phi (\i -> [ phi -> transp (\j -> A (i \/ j)) i (u i) ]) (transp A i0 u0)   */
+        need_args(F->hs, F->n, 4, "comp");
+        MCALL(mpush_check_line(C_, A_(0))); F->line = MTERM(); F->lv = eval(C_->env, F->line);
+        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        {   Val *uty = mkval(V_PI); uty->name = "i"; uty->isi = 1; uty->dom = vinterval();
+            uty->clo.env = C_->env; uty->clo.t = mk_term(T_PARTIAL, shift(F->phi, 0, 1), mk_app(shift(F->line, 0, 1), mk_var(0), 0), NULL, NULL);
+            F->v = uty; }
+        MCALL(mpush_check(C_, A_(2), F->v)); F->u = MTERM(); F->uv = eval(C_->env, F->u);
+        MCALL(mpush_check(C_, A_(3), vapp(F->lv, vi(iv_zero()), 0))); F->a = MTERM(); F->u0v = eval(C_->env, F->a);
+        {   Ctx *c = C_; Term *line = F->line, *phi = F->phi, *u = F->u, *u0 = F->a; Val *lv = F->lv;
+            Face *fs; int nf = faces_of(F->pv, &fs);
+            for (int i = 0; i < nf; i++) {
+                Val *side = vsys_at(vapp(F->uv, vi(iv_zero()), 0), &fs[i]);
+                if (!side) die("line %d: comp: the sides do not cover their face", A_(2)->line);
+                if (!conv(c->n, side, restrict_val(F->u0v, &fs[i])))
+                    die("line %d: comp: the base does not agree with the sides at i0 on a face of %s", A_(3)->line, show(c, F->pv));
+            }
+            int constline = !val_mentions_ivar(c->n + 1, vapp(lv, vivar(c->n), 0), c->n);
+            Term *A1 = mk_app(line, mk_term(T_I1, NULL, NULL, NULL, NULL), 0);
+            /* under \i: */
+            Term *iv_ = mk_var(0);
+            Term *inner_line = mk_lam("j", mk_app(shift(line, 0, 2), mk_term(T_IOR, mk_var(1), mk_var(0), NULL, NULL), 0), 0); inner_line->isi = 1;
+            Term *tr = mk_term(T_TRANSP, inner_line, iv_, mk_app(shift(u, 0, 1), iv_, 0), NULL); tr->n = constline;
+            Term *sys = mk_term(T_SYS, NULL, NULL, NULL, NULL); sys->nbr = 1; sys->br = xalloc(sizeof(TBranch));
+            sys->br[0].face = shift(phi, 0, 1); sys->br[0].body = tr;
+            Term *sides = mk_lam("i", sys, 0); sides->isi = 1;
+            Term *base = mk_term(T_TRANSP, line, mk_term(T_I0, NULL, NULL, NULL, NULL), u0, NULL); base->n = constline;
+            Term *t = mk_term(T_HCOMP, A1, phi, sides, base); t->n = (vapp(lv, vi(iv_one()), 0)->k == V_U);
+            STerm **a = F->args + 4; int n = F->n - 4; Val *r = vapp(lv, vi(iv_one()), 0);
+            MTAIL(mpush_app_spine(c, a, n, t, r)); }
+    }
+    if (F->hs->k == S_SUB) {   /* Sub A phi u : U,  u : Partial phi A */
+        need_args(F->hs, F->n, 3, "Sub");
+        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
+        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        { Val *pty = mkval(V_PARTIAL); pty->a = F->pv; pty->b = F->Av; F->v = pty; }
+        MCALL(mpush_check(C_, A_(2), F->v));
+        { STerm **a = F->args + 3; int n = F->n - 3; Ctx *c = C_; Term *t = mk_term(T_SUB, F->t, F->phi, MTERM(), NULL); Val *u = vupre_l(F->la);
+          MTAIL(mpush_app_spine(c, a, n, t, u)); }
+    }
+    if (F->hs->k == S_SIGMA) {  /* Sigma A B : U,  B : A -> U (a lambda, or a term of that type) */
+        need_args(F->hs, F->n, 2, "Sigma");
+        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
+        if (A_(1)->k == S_LAM) {
+            ctx_bind(C_, A_(1)->binders[0].name, F->Av);
+            MCALL(mpush_sort(C_, A_(1)->a, 1)); F->b = MTERM(); F->lb = eret_lvl;
+            ctx_pop(C_);
+            { Term *t = mk_term(T_SIGMA, F->t, F->b, NULL, NULL); t->name = A_(1)->binders[0].name; t->irr = A_(1)->irrel;
+              STerm **a = F->args + 2; int n = F->n - 2; Ctx *c = C_; Val *u = vu_l(lv_max(F->la, F->lb));
+              MTAIL(mpush_app_spine(c, a, n, t, u)); }
+        }
+        MCALL(mpush_infer(C_, A_(1))); F->b = MTERM(); F->v = eret_ty;
+        { Val *bty = F->v; Ctx *c = C_;
+          if (bty->k != V_PI) die("line %d: the second argument of Sigma must be a family A -> U", A_(1)->line);
+          expect_conv(c, A_(1)->line, bty->dom, F->Av, "family domain");
+          Val *cod = inst(&bty->clo, vvar(c->n));
+          if (cod->k != V_U || cod->pre) die("line %d: the second argument of Sigma must be a family A -> U", A_(1)->line);
+          LVal lb = cod->lvl;
+          Term *t = mk_term(T_SIGMA, F->t, mk_app(shift(F->b, 0, 1), mk_var(0), 0), NULL, NULL); t->name = "x"; t->irr = A_(1)->irrel;
+          STerm **a = F->args + 2; int n = F->n - 2; Val *u = vu_l(lv_max(F->la, lb));
+          MTAIL(mpush_app_spine(c, a, n, t, u)); }
+    }
+    if (F->hs->k == S_FST || F->hs->k == S_SND) {
+        need_args(F->hs, F->n, 1, F->hs->k == S_FST ? "fst" : "snd");
+        MCALL(mpush_infer(C_, A_(0))); F->t = MTERM(); F->v = eret_ty;
+        { Ctx *c = C_; STerm *h = F->hs; Val *pty = force(F->v); Term *p = F->t;
+          if (pty->k != V_SIGMA) die("line %d: projection from a term of type %s, expected a Sigma type", A_(0)->line, show(c, pty));
+          if (h->k == S_SND && pty->irr && !c->irrpos)
+              die("line %d: the second component of this pair is irrelevant; it may be projected only in an irrelevant position (the argument of an irrelevant binder, an irrelevant component)", A_(0)->line);
+          Term *t = mk_term(h->k == S_FST ? T_FST : T_SND, p, NULL, NULL, NULL);
+          if (is_word_type(c, pty)) t->n = 1;
+          t->irr = pty->irr;   /* from an irrelevant pair: at run time the pair is its first component (M19) */
+          Val *rty = h->k == S_FST ? pty->dom : inst(&pty->clo, vproj(eval(c->env, p), 1));
+          STerm **a = F->args + 1; int n = F->n - 1;
+          MTAIL(mpush_app_spine(c, a, n, t, rty)); }
+    }
+    if (F->hs->k == S_GLUE) {   /* Glue A phi Te : U,  Te : Partial phi (Sigma U (\T -> Equiv T A)) */
+        need_args(F->hs, F->n, 3, "Glue");
+        MCALL(mpush_sort(C_, A_(0), 1)); F->t = MTERM(); F->la = eret_lvl; F->Av = force(eval(C_->env, F->t));
+        MCALL(mpush_check(C_, A_(1), vinterval())); F->phi = MTERM(); F->pv = eval(C_->env, F->phi);
+        {   int eq = find_def("Equiv"); if (eq < 0) die("line %d: Glue needs the definition 'Equiv' (in the prelude)", F->hs->line);
+            Val *sig = mkval(V_SIGMA); sig->name = "T"; sig->dom = vu_l(F->la);
+            sig->clo.env = env_push(C_->env, F->Av);   /* under [.., A]: Equiv^lvl T A with T the bound variable */
+            sig->clo.t = mk_app(mk_app(mk_ref_l(T_DEF, eq, mk_lval(F->la)), mk_var(0), 0), mk_var(1), 0);
+            Val *pty = mkval(V_PARTIAL); pty->a = F->pv; pty->b = sig; F->v = pty; }
+        MCALL(mpush_check(C_, A_(2), F->v));
+        { Term *g = mk_term(T_GLUE, F->t, F->phi, MTERM(), mk_lval(F->la));   /* the level, for the rules' equivProof */
+          STerm **a = F->args + 3; int n = F->n - 3; Ctx *c = C_; Val *u = vu_l(F->la);
+          MTAIL(mpush_app_spine(c, a, n, g, u)); }
+    }
+    if (F->hs->k == S_GLUEEL) die("line %d: glue must be checked against a Glue type", F->hs->line);
+    if (F->hs->k == S_UNGLUE) {
+        need_args(F->hs, F->n, 1, "unglue");
+        MCALL(mpush_infer(C_, A_(0))); F->t = MTERM(); F->v = eret_ty;
+        { Ctx *c = C_; Val *bty = force(F->v);
+          if (bty->k != V_GLUE) die("line %d: unglue applied to a term of type %s, expected a Glue type", A_(0)->line, show(c, bty));
+          Term *t = mk_term(T_UNGLUE, F->t, quote(c->n, bty->a), quote(c->n, bty->b), quote(c->n, bty->c));
+          STerm **a = F->args + 1; int n = F->n - 1; Val *r = bty->a;
+          MTAIL(mpush_app_spine(c, a, n, t, r)); }
+    }
+    if (F->hs->k == S_INS) die("line %d: inS must be checked against a Sub type", F->hs->line);
+    if (F->hs->k == S_OUTS) {  /* outS s : A  for s : Sub A phi u */
+        need_args(F->hs, F->n, 1, "outS");
+        MCALL(mpush_infer(C_, A_(0))); F->t = MTERM(); F->v = eret_ty;
+        { Ctx *c = C_; Val *sty = force(F->v);
+          if (sty->k != V_SUB) die("line %d: outS applied to a term of type %s, expected a Sub type", A_(0)->line, show(c, sty));
+          Term *t = mk_term(T_OUTS, quote(c->n, sty->a), quote(c->n, sty->b), quote(c->n, sty->c), F->t);
+          STerm **a = F->args + 1; int n = F->n - 1; Val *r = sty->a;
+          MTAIL(mpush_app_spine(c, a, n, t, r)); }
+    }
+    MCALL(mpush_infer(C_, F->hs)); F->t = MTERM(); F->v = eret_ty;
+    { STerm **a = F->args; int n = F->n; Ctx *c = C_; Term *head = F->t; Val *hty = F->v;
+      MTAIL(mpush_app_spine(c, a, n, head, hty)); }
+    MFINISH
+}
+/* elim D {p..} P m.. i.. x */
+static void infer_elim_step(size_t off) {
+    MSTART
+    {   STerm *h = F->hs;
+        F->d = find_data(h->name);
+        if (F->d >= 0 && IN_DECL(F->d))   /* its constructors are not all declared yet: an eliminator here would have too few methods */
+            die("line %d: elim %s inside the declaration of %s: the type is not complete yet", F->s->line, h->name, h->name);
+        if (F->d < 0) die("line %d: elim of unknown data type '%s'", h->line, h->name);
+        F->D = &datas[F->d]; F->np = F->D->nparams;
+        /* the data type is taken at a fresh level (a meta, solved at the end of the definition), or at its
+           own hidden level inside its own declaration */
+        F->dlt = global_level(T_DATA, F->d, &F->dl);
+        F->DV = data_at(F->d, F->dl);
+        F->pe = NULL; F->pvv = xalloc((F->np + 1) * sizeof(Val *)); F->pt = xalloc((F->np + 1) * sizeof(Term *)); F->ai = 0; }
+    for (F->i = 0; F->i < F->np; F->i++) {   /* the parameters are implicit: written {p}, or metas */
+        F->v = eval(F->pe, F->DV->ptys[F->i]);
+        if (F->ai < F->n && F->args[F->ai]->imp) { F->ai++; MCALL(mpush_check(F->c, F->args[F->ai - 1], F->v)); F->pt[F->i] = MTERM(); }
+        else F->pt[F->i] = fresh_meta(F->c, F->v, F->hs->line);
+        F->pvv[F->i] = eval(F->c->env, F->pt[F->i]); F->pe = env_push(F->pe, F->pvv[F->i]);
+    }
+    if (F->n < F->ai + 1) die("line %d: elim %s needs a motive", F->hs->line, F->D->name);
+    /* motive: peel its lambdas against the expected binders (indices, then the target),
+       then read the universe of what remains */
+    #define TARGET_TYPE(dst) do { \
+        Val *dv_ = mkval(V_DATA); dv_->n = F->d0; dv_->lvl = F->dl; \
+        for (int i_ = 0; i_ < F->np; i_++) { vl_push(&dv_->args, F->pvv[i_], 1); } \
+        for (int j_ = 0; j_ < F->m0; j_++) { vl_push(&dv_->args, F->iv[j_], 1); } \
+        (dst) = dv_; } while (0)
+    {   F->ms = F->args[F->ai]; F->ie = F->pe; F->nb = 0; F->depth = F->c->n;
+        F->d0 = F->D->block; F->m0 = datas[F->d0].nidx; F->DV0 = data_at(F->d0, F->dl);   /* the first motive is the block's first member's */
+        F->iv = xalloc((F->m0 + 2) * sizeof(Val *));
+        while (F->nb <= F->m0 && F->ms->k == S_LAM) {
+            Val *dom;
+            if (F->nb < F->m0) dom = eval(F->ie, F->DV0->itys[F->nb]); else TARGET_TYPE(dom);
+            ctx_bind(F->c, F->ms->binders[0].name, dom);
+            Val *x = vvar(F->c->n - 1); F->depth = F->c->n;
+            if (F->nb < F->m0) { F->iv[F->nb] = x; F->ie = env_push(F->ie, x); }
+            F->ms = F->ms->a; F->nb++;
+        } }
+    MCALL(mpush_infer(F->c, F->ms)); F->rt = MTERM(); F->v = eret_ty;
+    {   Ctx *c = F->c; STerm *ms = F->ms; Val *cur = F->v; int depth = F->depth, nb = F->nb, m0 = F->m0;
+        for (int j = nb; j <= m0; j++) {
+            if (cur->k != V_PI) die("line %d: motive for %s must abstract over %d index%s and the target", ms->line, datas[F->d0].name, m0, m0 == 1 ? "" : "es");
+            Val *dom;
+            if (j < m0) dom = eval(F->ie, F->DV0->itys[j]); else TARGET_TYPE(dom);
+            expect_conv(c, ms->line, cur->dom, dom, "motive binder");
+            Val *x = vvar(depth++);
+            if (j < m0) { F->iv[j] = x; F->ie = env_push(F->ie, x); }
+            cur = inst(&cur->clo, x);
+        }
+        if (cur->k != V_U || cur->pre) die("line %d: motive for %s must land in a universe, not %s", ms->line, datas[F->d0].name, show(c, cur));
+        F->la = cur->lvl;
+        Val *fib = eval(c->env, F->rt);
+        for (int j = nb; j <= m0; j++) fib = vapp(fib, vvar(c->n + (j - nb)), 0);
+        (void)fib;
+        for (int i = 0; i < nb; i++) ctx_pop(c); }
+    #undef TARGET_TYPE
+    F->t = elim_type(F->d, F->la, 0, F->dl);   /* the eliminator's type (res_irr 0) */
+    {   /* the indices and the target determine the parameters (metas), but they come last: check them first, for their
+           constraints; the spine is then checked in order (their terms are taken from that pass) */
+        int K = block_ncons(F->d), nbk = F->D->nblock, m = F->D->nidx;
+        F->j = -1;
+        if (F->n - F->ai == nbk + K + m + 1) { F->ie = F->pe; F->iv = xalloc((m + 1) * sizeof(Val *)); F->j = 0; F->nf = nbk + K; F->m0 = m; } }
+    if (F->j >= 0) {
+        for (F->j = 0; F->j < F->m0; F->j++) {
+            MCALL(mpush_check(F->c, F->args[F->ai + F->nf + F->j], eval(F->ie, F->DV->itys[F->j])));
+            F->iv[F->j] = eval(F->c->env, MTERM()); F->ie = env_push(F->ie, F->iv[F->j]);
+        }
+        {   Val *tt = mkval(V_DATA); tt->n = F->d; tt->lvl = F->dl;
+            for (int i = 0; i < F->np; i++) vl_push(&tt->args, F->pvv[i], 1);
+            for (int j = 0; j < F->m0; j++) vl_push(&tt->args, F->iv[j], 1);
+            F->v = tt; }
+        MCALL(mpush_check(F->c, F->args[F->n - 1], F->v));
+    }
+    {   Term *head = mk_ref_l(T_ELIM, F->d, F->dlt); Val *hty = eval(NULL, F->t);
+        for (int i = 0; i < F->np; i++) { head = mk_app(head, F->pt[i], 1); hty = inst(&hty->clo, F->pvv[i]); }
+        STerm **a = F->args + F->ai; int n = F->n - F->ai; Ctx *c = F->c;
+        MTAIL(mpush_app_spine(c, a, n, head, hty)); }
+    MFINISH
+}
+#undef C_
+#undef A_
+
+/* ---- systems ---- */
+static void system_step(size_t off) {
+    MSTART
+    {   STerm *s = F->s; Term *t = mk_term(T_SYS, NULL, NULL, NULL, NULL); t->nbr = s->nbr; t->br = xalloc((s->nbr + 1) * sizeof(TBranch));
+        F->t = t; F->psi = xalloc((s->nbr + 1) * sizeof(Val *)); F->v = vi(iv_zero()); }
+    for (F->i = 0; F->i < F->s->nbr; F->i++) {
+        MCALL(mpush_check(F->c, F->s->br[F->i].face, vinterval()));
+        F->t->br[F->i].face = MTERM();
+        F->psi[F->i] = eval(F->c->env, F->t->br[F->i].face);
+        F->v = vi(iv_or(F->v->iv, F->psi[F->i]->iv));
+    }
+    if (!iv_eq(F->v->iv, F->ty->iv)) die("line %d: the system's faces cover %s, but its type demands %s", F->s->line, show(F->c, F->v), show(F->c, F->ty));
+    for (F->i = 0; F->i < F->s->nbr; F->i++) {
+        F->nf = faces_of(F->psi[F->i], &F->fs);
+        if (F->nf == 0) die("line %d: the face %s of a system branch is never satisfied", F->s->br[F->i].face->line, show(F->c, F->psi[F->i]));
+        F->t->br[F->i].body = NULL;
+        for (F->j = 0; F->j < F->nf; F->j++) {
+            F->rc = xalloc(sizeof(Ctx)); *F->rc = ctx_restrict(F->c, &F->fs[F->j]);   /* on the heap: the frame may move */
+            F->x = F->tyat(&F->fs[F->j], F->data);
+            MCALL(mpush_check(F->rc, F->s->br[F->i].body, F->x));
+            if (!F->t->br[F->i].body) F->t->br[F->i].body = MTERM();
+        }
+    }
+    /* overlapping branches must agree: both evaluated under the restriction to the common face */
+    {   Ctx *c = F->c; STerm *s = F->s; Term *t = F->t; Val **psi = F->psi;
+        for (int k = 0; k < s->nbr; k++) for (int l = k + 1; l < s->nbr; l++) {
+            Face *fs; int nf = faces_of(vi(iv_and(psi[k]->iv, psi[l]->iv)), &fs);
+            for (int i = 0; i < nf; i++) {
+                Ctx rc = ctx_restrict(c, &fs[i]);
+                if (!conv(c->n, eval(rc.env, t->br[k].body), eval(rc.env, t->br[l].body)))
+                    die("line %d: system branches %d and %d disagree where their faces overlap", s->line, k + 1, l + 1);
+            }
+        } }
+    MRETT(F->t);
+    MFINISH
+}
+
+/* ---- terms ---- */
+static void infer_step(size_t off) {
+    MSTART
+    switch (F->s->k) {   /* the kinds that call nothing: at once (no resume point inside this switch) */
+    case S_VAR: {
+        Ctx *c = F->c; STerm *s = F->s;
+        for (int i = c->n - 1; i >= 0; i--)
+            if (!strcmp(c->names[i], s->name)) {
+                if (c->irrs[i] && !c->irrpos) die("line %d: '%s' is irrelevant (bound by .(%s : ..)); it may be used only in an irrelevant position (an irrelevant argument or component, a type, a proof of Empty)", s->line, s->name, s->name);
+                eret_ty = c->tys[i]; MRETT(mk_var(c->n - 1 - i));
+            }
+        int id;
+        if ((id = find_con(s->name)) >= 0) { LVal L; Term *lt = global_level(T_CON, id, &L); Val *ty = eval(NULL, con_at(id, L)->ty); eret_ty = ty; MRETT(mk_ref_l(T_CON, id, lt)); }
+        if ((id = find_def(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DEF, id, &L); Val *ty = def_ty_at(id, L); eret_ty = ty; MRETT(mk_ref_l(T_DEF, id, lt)); }
+        if ((id = find_data(s->name)) >= 0) { LVal L; Term *lt = global_level(T_DATA, id, &L); Val *ty = eval(NULL, data_at(id, L)->ty); eret_ty = ty; MRETT(mk_ref_l(T_DATA, id, lt)); }
+        die("line %d: unbound name '%s'", s->line, s->name);
+    }
+    case S_HOLE: {   /* a hole standing for a type: a meta in a universe at a fresh level */
+        int l = lv_meta_new(); Val *U = vu_l(lv_meta(l)); Term *m = fresh_meta(F->c, U, F->s->line); eret_ty = U; MRETT(m);
+    }
+    case S_U:
+        if (F->s->a) break;
+        { Ctx *c = F->c; eret_ty = vu_l(lv_add(BASE_LEVEL(c), F->s->lvl + 1)); MRETT(mk_u_l(lv_add(BASE_LEVEL(c), F->s->lvl))); }   /* U n is U {L + n}, or U n when level-explicit */
+    case S_LEVEL: eret_ty = vupre(0); MRETT(mk_term(T_LEVEL, NULL, NULL, NULL, NULL));   /* a pretype: no Kan structure, not inductive */
+    case S_LZERO: eret_ty = vlevel(); MRETT(mk_lval(BASE_LEVEL(F->c)));   /* constants are relative to the hidden level unless level-explicit */
+    case S_I: die("line %d: I is the type of interval variables; it is not itself a term of a universe", F->s->line);
+    case S_I0: eret_ty = vinterval(); MRETT(mk_term(T_I0, NULL, NULL, NULL, NULL));
+    case S_I1: eret_ty = vinterval(); MRETT(mk_term(T_I1, NULL, NULL, NULL, NULL));
+    case S_NUM:
+        die("line %d: the type of the numeral %llu is not determined here; a numeral is checked against a type shaped like the naturals (give it one: a binder, a let, an argument)", F->s->line, F->s->num);
+    case S_LAM: die("line %d: cannot infer the type of a lambda; add an annotation", F->s->line);
+    case S_SYS: die("line %d: cannot infer the type of a system; it must be checked against a Partial type", F->s->line);
+    case S_PAIR: die("line %d: cannot infer the type of a pair; it must be checked against a Sigma type", F->s->line);
+    case S_APP: case S_ELIM: case S_PATHP: case S_PARTIAL: case S_TRANSP: case S_HCOMP: case S_COMP: case S_SUB: case S_INS: case S_OUTS: case S_SIGMA: case S_FST: case S_SND: case S_GLUE: case S_GLUEEL: case S_UNGLUE:
+        MBECOME(infer_app_step);
+    default: break;
+    }
+    if (F->s->k == S_U) {   /* U {l}: a universe at a level expression */
+        MCALL(mpush_check(F->c, F->s->a, vlevel())); F->t = MTERM();
+        { LVal L = eval_level(F->c->env, F->t); Term *u = mk_u(0); u->a = F->t; eret_ty = vu_l(lv_add(L, 1)); MRETT(u); }
+    }
+    if (F->s->k == S_LSUC) { MCALL(mpush_check(F->c, F->s->a, vlevel())); { Term *r = mk_term(T_LSUC, MTERM(), NULL, NULL, NULL); r->n = 1; eret_ty = vlevel(); MRETT(r); } }
+    if (F->s->k == S_LMAX) {
+        MCALL(mpush_check(F->c, F->s->a, vlevel())); F->t = MTERM();
+        MCALL(mpush_check(F->c, F->s->b, vlevel())); eret_ty = vlevel(); MRETT(mk_term(T_LMAX, F->t, MTERM(), NULL, NULL));
+    }
+    if (F->s->k == S_IAND || F->s->k == S_IOR) {
+        MCALL(mpush_check(F->c, F->s->a, vinterval())); F->t = MTERM();
+        MCALL(mpush_check(F->c, F->s->b, vinterval()));
+        eret_ty = vinterval(); MRETT(mk_term(F->s->k == S_IAND ? T_IAND : T_IOR, F->t, MTERM(), NULL, NULL));
+    }
+    if (F->s->k == S_INEG) { MCALL(mpush_check(F->c, F->s->a, vinterval())); eret_ty = vinterval(); MRETT(mk_term(T_INEG, MTERM(), NULL, NULL, NULL)); }
+    if (F->s->k == S_PI) {
+        if (F->s->binders[0].ty->k == S_I) {   /* a function from the interval is a pretype: it has no Kan structure */
+            if (F->s->binders[0].imp) die("line %d: an interval binder cannot be implicit", F->s->line);
+            ctx_bind_i(F->c, F->s->binders[0].name);
+            MCALL(mpush_sort(F->c, F->s->a, 0)); F->t = MTERM(); F->lb = eret_lvl;
+            ctx_pop(F->c);
+            eret_ty = vupre_l(F->lb);
+            MRETT(mk_pi(F->s->binders[0].name, mk_term(T_INTERVAL, NULL, NULL, NULL, NULL), F->t, 0));
+        }
+        MCALL(mpush_sort(F->c, F->s->binders[0].ty, 0)); F->a = MTERM(); F->la = eret_lvl; F->pa = eret_pre;
+        {   SBinder *b = &F->s->binders[0];
+            Val *dv = eval(F->c->env, F->a);
+            F->irr = F->a->k == T_LEVEL;   /* types are run-time codes, so every binder is relevant; levels are not */
+            if (b->irrel) F->irr = 2;       /* .(x : A): proof-irrelevant - erased, not compared, usable only in irrelevant positions */
+            ctx_bind_irr(F->c, b->name, dv, F->irr); }
+        MCALL(mpush_sort(F->c, F->s->a, 0)); F->b = MTERM(); F->lb = eret_lvl; F->pb = eret_pre;
+        ctx_pop(F->c);
+        {   LVal l = lv_max(F->la, F->lb); SBinder *b = &F->s->binders[0];
+            eret_ty = (F->pa || F->pb) ? vupre_l(l) : vu_l(l);   /* a function type from or into a pretype is a pretype */
+            Term *t = mk_pi(b->name, F->a, F->b, F->irr); t->pre = F->pa; t->imp = b->imp; MRETT(t); }
+    }
+    if (F->s->k == S_LET) {
+        MCALL(mpush_sort(F->c, F->s->a, 0)); F->a = MTERM();   /* a let may bind a line or a partial element */
+        F->v = eval(F->c->env, F->a);
+        MCALL(mpush_check(F->c, F->s->b, F->v)); F->b = MTERM();
+        ctx_push(F->c, F->s->name, F->v, eval(F->c->env, F->b));
+        MCALL(mpush_infer(F->c, F->s->c)); F->t = MTERM(); F->x = eret_ty;
+        ctx_pop(F->c);
+        eret_ty = F->x; MRETT(mk_let(F->s->name, F->a, F->b, F->t, 0));
+    }
+    MRETT(NULL);
+    MFINISH
+}
+
+static void check_step(size_t off) {
+    MSTART
+    F->ty = force(F->ty);
+    if (F->ty->k == V_DATA && datas[F->ty->n].ncons == 0) {   /* a proof of an empty type is an irrelevant position (absurdity from irrelevant hypotheses) */
+        F->c->irrpos++; F->c->irrlen++;
+        MCALL(epush(check1_step, F->c, F->s, F->ty));
+        F->c->irrpos--; F->c->irrlen--; MRET(mret);
+    }
+    MBECOME(check1_step);
+    MFINISH
+}
+static void check1_step(size_t off) {
+    MSTART
+    if (F->ty->k == V_PI && F->ty->imp && !(F->s->k == S_LAM && F->s->binders[0].imp)) {   /* an implicit function type: abstract over the argument */
+        F->nm = xsprintf("{%s}", F->ty->name ? F->ty->name : "_");   /* not a name the program can write: no capture */
+        ctx_bind(F->c, F->nm, F->ty->dom);
+        MCALL(mpush_check(F->c, F->s, inst(&F->ty->clo, F->c->env->v)));
+        ctx_pop(F->c);
+        { Term *t = mk_lam(F->nm, MTERM(), F->ty->irr); t->imp = 1; MRETT(t); }
+    }
+    if (F->s->k == S_HOLE) MRETT(fresh_meta(F->c, F->ty, F->s->line));
+    if (F->s->k == S_NUM) {
+        if (is_word_type(F->c, F->ty)) {   /* a numeral at the word type: the pair (n, refl), its bound decided by the kernel */
+            STerm *pr = xalloc(sizeof *pr), *r = xalloc(sizeof *r);
+            r->k = S_VAR; r->name = "refl"; r->line = F->s->line;
+            pr->k = S_PAIR; pr->line = F->s->line; pr->a = F->s; pr->b = r;
+            Ctx *c = F->c; Val *ty = F->ty;
+            MTAIL(mpush_check(c, pr, ty));
+        }
+        MRETT(check_numeral(F->c, F->s, F->ty));
+    }
+    if (F->s->k == S_LAM) {
+        {   SBinder *b = &F->s->binders[0];
+            if (b->imp && !(F->ty->k == V_PI && F->ty->imp)) die("line %d: the implicit lambda \\{%s} is checked against %s, not an implicit function type", F->s->line, b->name, show(F->c, F->ty)); }
+        if (F->ty->k == V_PATHP) {
+            ctx_bind_i(F->c, F->s->binders[0].name);
+            F->i = F->c->n - 1;
+            MCALL(mpush_check(F->c, F->s->a, vapp(F->ty->a, vivar(F->i), 0))); F->t = MTERM();
+            {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty;
+                Val *bv = eval(c->env, F->t);
+                int var = F->i, v0 = 0, v1 = 1; Face f0 = { &var, &v0, 1 }, f1 = { &var, &v1, 1 };
+                if (!conv(c->n, restrict_val(bv, &f0), ty->b)) die("line %d: the path's left endpoint is %s, expected %s", s->line, show(c, restrict_val(bv, &f0)), show(c, ty->b));
+                if (!conv(c->n, restrict_val(bv, &f1), ty->c)) die("line %d: the path's right endpoint is %s, expected %s", s->line, show(c, restrict_val(bv, &f1)), show(c, ty->c));
+                ctx_pop(c);
+                Term *t = mk_lam(s->binders[0].name, F->t, 0); t->isi = 1; MRETT(t); }
+        }
+        if (F->ty->k != V_PI) die("line %d: lambda checked against non-function type %s", F->s->line, show(F->c, F->ty));
+        if (F->ty->isi) {
+            ctx_bind_i(F->c, F->s->binders[0].name);
+            MCALL(mpush_check(F->c, F->s->a, inst(&F->ty->clo, vivar(F->c->n - 1))));
+            ctx_pop(F->c);
+            { Term *t = mk_lam(F->s->binders[0].name, MTERM(), 0); t->isi = 1; MRETT(t); }
+        }
+        ctx_bind_irr(F->c, F->s->binders[0].name, F->ty->dom, F->ty->irr);
+        MCALL(mpush_check(F->c, F->s->a, inst(&F->ty->clo, vvar(F->c->n - 1))));
+        ctx_pop(F->c);
+        { Term *t = mk_lam(F->s->binders[0].name, MTERM(), F->ty->irr); t->imp = F->s->binders[0].imp; MRETT(t); }
+    }
+    if (F->s->k == S_LET) {
+        MCALL(mpush_sort(F->c, F->s->a, 0)); F->a = MTERM();
+        F->v = eval(F->c->env, F->a);
+        MCALL(mpush_check(F->c, F->s->b, F->v)); F->b = MTERM();
+        ctx_push(F->c, F->s->name, F->v, eval(F->c->env, F->b));
+        MCALL(mpush_check(F->c, F->s->c, F->ty));
+        ctx_pop(F->c);
+        MRETT(mk_let(F->s->name, F->a, F->b, MTERM(), 0));
+    }
+    if (F->s->k == S_APP && F->s->a->k == S_INS) {   /* inS x : Sub A phi u  when x : A agrees with u on phi */
+        if (F->ty->k != V_SUB) die("line %d: inS checked against %s, expected a Sub type", F->s->line, show(F->c, F->ty));
+        MCALL(mpush_check(F->c, F->s->b, F->ty->a)); F->t = MTERM();
+        {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty;
+            Val *xv = eval(c->env, F->t);
+            Face *fs; int nf = faces_of(ty->b, &fs);
+            for (int i = 0; i < nf; i++) {
+                Val *side = vsys_at(ty->c, &fs[i]);
+                if (!side || !conv(c->n, restrict_val(xv, &fs[i]), side))
+                    die("line %d: inS: the element does not agree with the subtype's sides on a face of %s", s->line, show(c, ty->b));
+            }
+            MRETT(mk_term(T_INS, F->t, NULL, NULL, NULL)); }
+    }
+    if (F->s->k == S_APP && F->s->a->k == S_APP && F->s->a->a->k == S_GLUEEL) {   /* glue ts a : Glue A phi Te */
+        if (F->ty->k != V_GLUE) die("line %d: glue checked against %s, expected a Glue type", F->s->line, show(F->c, F->ty));
+        if (F->s->a->b->k != S_SYS) die("line %d: the first argument of glue must be a system", F->s->a->b->line);
+        MCALL(mpush_system_at(F->c, F->s->a->b, F->ty->b, glue_type_at, F->ty->c)); F->tst = MTERM();
+        F->tsv = eval(F->c->env, F->tst);
+        MCALL(mpush_check(F->c, F->s->b, F->ty->a)); F->a = MTERM();
+        {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty;
+            Val *av = eval(c->env, F->a);
+            Face *fs; int nf = faces_of(ty->b, &fs);
+            for (int i = 0; i < nf; i++) {
+                Val *Te = vsys_at(ty->c, &fs[i]), *t = vsys_at(F->tsv, &fs[i]);
+                if (!Te || !t) die("line %d: glue: the sides do not cover their face", s->line);
+                Val *ea = vapp(vproj(vproj(Te, 2), 1), t, 0);
+                if (!conv(c->n, restrict_val(av, &fs[i]), ea))
+                    die("line %d: glue: the base does not agree with the equivalence applied to the sides on a face of %s", s->line, show(c, ty->b));
+            }
+            MRETT(mk_term(T_GLUEEL, F->tst, F->a, quote(c->n, ty), NULL)); }
+    }
+    if (F->s->k == S_PAIR) {
+        if (F->ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", F->s->line, show(F->c, F->ty));
+        MCALL(mpush_check(F->c, F->s->a, F->ty->dom)); F->a = MTERM();
+        if (F->ty->irr) { F->c->irrpos++; F->c->irrlen++; }
+        MCALL(mpush_check(F->c, F->s->b, inst(&F->ty->clo, eval(F->c->env, F->a))));
+        if (F->ty->irr) { F->c->irrpos--; F->c->irrlen--; }
+        { Term *t = mk_term(T_PAIR, F->a, MTERM(), NULL, NULL); t->irr = F->ty->irr;
+          if (is_word_type(F->c, F->ty)) t->n = 1;
+          MRETT(t); }
+    }
+    if (F->s->k == S_SYS) {
+        if (F->ty->k != V_PARTIAL) die("line %d: a system must be checked against a Partial type, not %s", F->s->line, show(F->c, F->ty));
+        { Ctx *c = F->c; STerm *s = F->s; Val *phi = F->ty->a, *A = F->ty->b; MTAIL(mpush_system_at(c, s, phi, partial_type_at, A)); }
+    }
+    MCALL(mpush_infer(F->c, F->s)); F->t = MTERM(); F->got = force(eret_ty);
+    {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty, *got = F->got; Term *t = F->t;
+        while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied */
+            Term *m = fresh_meta(c, got->dom, s->line);
+            t = mk_app(t, m, got->irr); got = force(inst(&got->clo, eval(c->env, m)));
+        }
+        F->t = t;
+        if (got->k == V_U && ty->k == V_NEU && ty->h == H_META) {
+            /* a universe against a type not known yet: subtyping holds between sorts only, so the type is a universe of the same
+               sort at a level to be determined; the level is a fresh level meta, bounded below by got's (the level store decides it) */
+            Val *U = vu_l(lv_meta(lv_meta_new())); U->pre = got->pre;
+            if (!conv(c->n, ty, U) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+            if (lv_enforce_leq(got->lvl, U->lvl) != 1 && !c->irrlen) die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, U));
+        } else if (got->k == V_U && ty->k == V_U && got->pre <= ty->pre) {   /* cumulativity (a universe type is also a pretype): enforce got <= expected */
+            int r = lv_enforce_leq(got->lvl, ty->lvl);
+            if (!(r == 1 || c->irrlen)) {
+                if (r < 0) die("line %d: level ambiguous: whether %s is below %s cannot be decided; write the level, f {l} ..", s->line, show(c, got), show(c, ty));
+                die("line %d: universe inconsistency: %s is not below %s", s->line, show(c, got), show(c, ty));
+            }
+        } else {
+            if (got->k == V_PARTIAL && ty->k != V_PARTIAL && iv_is_one(got->a->iv)) got = got->b;   /* a partial element on a face that holds is an element */
+            if (!conv(c->n, got, ty) && !c->irrlen) die("line %d: type mismatch: got %s, expected %s", s->line, show(c, got), show(c, ty));
+        } }
+    MCALL(mpush_resolve(F->c, 0));
+    MRETT(F->t);
+    MFINISH
+}
+#undef F
+
+/* the C entries (declarations call these; each runs the machine to the result) */
+static Term *check(Ctx *c, STerm *s, Val *ty) { mpush_check(c, s, ty); return (Term *)(void *)mrun(); }
+static Term *check_type_sort(Ctx *c, STerm *s, LVal *lvl, int *pre) { mpush_sort(c, s, 0); Term *t = (Term *)(void *)mrun(); *lvl = eret_lvl; *pre = eret_pre; return t; }
+static Term *check_type(Ctx *c, STerm *s, LVal *lvl) { mpush_sort(c, s, 1); Term *t = (Term *)(void *)mrun(); *lvl = eret_lvl; return t; }
+static Term *check_interval(Ctx *c, STerm *s) { return check(c, s, vinterval()); }
+static void resolve_deferred(Ctx *c, int all) { mpush_resolve(c, all); mrun(); }
 
 /* ---- declarations ---- */
 
@@ -1154,17 +1350,17 @@ static int declares_level(STerm *t) {
 }
 
 /* does the term mention the hidden level, other than as the level of an occurrence of a member of the block [lo, hi)? */
-static int mentions_hidden_but_block(Term *t, int lo, int hi) {
-    if (!t) return 0;
+typedef struct { int lo, hi; } Range;
+static int mhbb_pre(Term *t, int d, void *ctx) {
+    Range *r = ctx; (void)d;
     switch (t->k) {
-    case T_LVAL: return lv_mentions_hidden(t->lvl);
-    case T_DATA: case T_ELIM: return (t->n >= lo && t->n < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
-    case T_CON: return (cons[t->n].data >= lo && cons[t->n].data < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
-    case T_NUM: return (t->n >= lo && t->n < hi) ? 0 : mentions_hidden_but_block(t->a, lo, hi);
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_hidden_but_block(t->br[i].face, lo, hi) || mentions_hidden_but_block(t->br[i].body, lo, hi)) return 1; return 0;
-    default: return mentions_hidden_but_block(t->a, lo, hi) || mentions_hidden_but_block(t->b, lo, hi) || mentions_hidden_but_block(t->c, lo, hi) || mentions_hidden_but_block(t->d, lo, hi);
+    case T_LVAL: return lv_mentions_hidden(t->lvl) ? 1 : -1;
+    case T_DATA: case T_ELIM: case T_NUM: if (t->n >= r->lo && t->n < r->hi) return -1; term_any_push(t->a, d); return 2;
+    case T_CON: if (cons[t->n].data >= r->lo && cons[t->n].data < r->hi) return -1; term_any_push(t->a, d); return 2;
+    default: return 0;
     }
 }
+static int mentions_hidden_but_block(Term *t, int lo, int hi) { Range r = { lo, hi }; return term_any(t, 0, 1, mhbb_pre, &r); }
 static LVal lv_subst_metas(LVal l, LVal *sol, int m0) {
     for (int i = 0; i < l.n; i++) if (l.t[i].meta && l.t[i].var >= m0) { int id = l.t[i].var; l = lv_subst_meta(l, id, sol[id - m0]); i = -1; }
     return l;
@@ -1182,15 +1378,15 @@ static void solve_metas(const char *what, int line, int m0, LMark mark, Term **t
 }
 
 /* does t mention a data type of the block [lo, hi)? */
-static int mentions_range(Term *t, int lo, int hi) {
-    if (!t) return 0;
+static int mrange_pre(Term *t, int d, void *ctx) {
+    Range *r = ctx; (void)d;
     switch (t->k) {
-    case T_DATA: return t->n >= lo && t->n < hi;
-    case T_VAR: case T_U: case T_DEF: case T_CON: case T_NUM: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return 0;
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_range(t->br[i].face, lo, hi) || mentions_range(t->br[i].body, lo, hi)) return 1; return 0;
-    default: return mentions_range(t->a, lo, hi) || mentions_range(t->b, lo, hi) || mentions_range(t->c, lo, hi) || mentions_range(t->d, lo, hi);
+    case T_DATA: return t->n >= r->lo && t->n < r->hi ? 1 : -1;
+    case T_VAR: case T_U: case T_DEF: case T_CON: case T_NUM: case T_ELIM: case T_INTERVAL: case T_I0: case T_I1: return -1;
+    default: return 0;
     }
 }
+static int mentions_range(Term *t, int lo, int hi) { Range r = { lo, hi }; return term_any(t, 0, 1, mrange_pre, &r); }
 static int data_spine(Term *t, int d, int pbase, Term ***idx, int *nidx);
 /* is t an application spine of some member of the block [lo, hi)? which member in *which */
 static int data_spine_any(Term *t, int lo, int hi, int pbase, Term ***idx, int *nidx, int *which) {
@@ -1216,30 +1412,28 @@ static int data_spine(Term *t, int d, int pbase, Term ***idx, int *nidx) {
 
 
 /* does t mention the variable idx other than as a parameter argument of a constructor (which transport rewrites anyway)? */
-static int mentions_essentially(Term *t, int idx) {
-    if (!t) return 0;
+static int mess_pre(Term *t, int d, void *ctx) {
+    int idx = *(int *)ctx + d;
     switch (t->k) {
-    case T_VAR: return t->n == idx;
+    case T_VAR: return t->n == idx ? 1 : -1;
     case T_APP: {
         int nargs = 0; Term *w = t;
         while (w->k == T_APP) { nargs++; w = w->a; }
-        if (w->k == T_CON) {
+        if (w->k == T_CON) {   /* only the arguments after the parameters */
             int np = datas[cons[w->n].data].nparams;
             Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
             for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
-            for (int i = np; i < nargs; i++) if (mentions_essentially(args[i], idx)) return 1;
-            return 0;
+            for (int i = nargs - 1; i >= np; i--) term_any_push(args[i], d);
+            return 2;
         }
-        return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx);
+        term_any_push(t->b, d); term_any_push(t->a, d); return 2;
     }
-    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return 0;
-    case T_PI: case T_SIGMA: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx + 1);
-    case T_LAM: return mentions_essentially(t->a, idx + 1);
-    case T_LET: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx + 1);
-    case T_SYS: for (int i = 0; i < t->nbr; i++) if (mentions_essentially(t->br[i].face, idx) || mentions_essentially(t->br[i].body, idx)) return 1; return 0;
-    default: return mentions_essentially(t->a, idx) || mentions_essentially(t->b, idx) || mentions_essentially(t->c, idx) || mentions_essentially(t->d, idx);
+    case T_LEVEL: case T_LZERO: case T_LMETA: case T_LVAL: case T_INTERVAL: case T_I0: case T_I1: return -1;
+    default: return 0;
     }
 }
+/* does t mention the variable idx other than as a parameter argument of a constructor (which transport rewrites anyway)? */
+static int mentions_essentially(Term *t, int idx) { return term_any(t, 0, 0, mess_pre, &idx); }
 /* The boundary grammar (CHM18, 3.2): an element of D in a boundary is a recursive argument of the constructor, a
    recursive path argument applied to an interval, a recursive argument of function type applied, or an earlier
    constructor of D applied to the parameters, to arguments by this grammar and to intervals. Nothing else stands for
@@ -1261,31 +1455,34 @@ static int bg_rec_var(BGram *g, Term *t, int depth, int *j) {   /* a recursive a
     return bg_rec_var_any(g, t, depth, j) && g->C->args[*j].rec == g->dt;
 }
 /* a position whose type is not D: no recursive argument inside */
-static void bg_no_rec(BGram *g, Term *t, int depth) {
-    if (!t) return;
-    int j;
+static int bg_no_rec_pre(Term *t, int depth, void *ctx) {
+    BGram *g = ctx; int j;
     if (bg_rec_var_any(g, t, depth, &j))
         die("line %d: the boundary of %s uses the recursive argument %s at a position whose type is not %s; a recursive argument may only stand for an element of %s (its image under the eliminator is an induction hypothesis)",
             g->line, g->C->name, g->C->args[j].name, bg_D(g), bg_D(g));
-    switch (t->k) {
-    case T_PI: case T_SIGMA: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth + 1); return;
-    case T_LAM: bg_no_rec(g, t->a, depth + 1); return;
-    case T_LET: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth); bg_no_rec(g, t->c, depth + 1); return;
-    case T_SYS: for (int i = 0; i < t->nbr; i++) { bg_no_rec(g, t->br[i].face, depth); bg_no_rec(g, t->br[i].body, depth); } return;
-    default: bg_no_rec(g, t->a, depth); bg_no_rec(g, t->b, depth); bg_no_rec(g, t->c, depth); bg_no_rec(g, t->d, depth); return;
+    return 0;
+}
+static void bg_no_rec(BGram *g, Term *t, int depth) { term_any(t, depth, 0, bg_no_rec_pre, g); }
+/* the boundary grammar's positions: an element of D, a path in D, or a position with no recursive argument inside; a
+   work list (the memory layer's stack) visited in the order the recursion took */
+enum { BG_ELEM, BG_PATH, BG_NOREC, BG_BADFN };   /* BG_BADFN: the error the recursion reported at that point of its walk */
+typedef struct { int k; BGram g; Term *t; int depth; Con *Cp; int q; } BGItem;
+static Stack bgst = { NULL, 0, 0, sizeof(BGItem) };
+static void bg_push(int k, BGram *g, Term *t, int depth) { BGItem it = { k, *g, t, depth, NULL, 0 }; STACK_PUSH(&bgst, BGItem, it); }
+static void bg_reverse(size_t from) {   /* the items pushed since from in visiting order: reversed, so the first is on top */
+    for (size_t i = from, j = bgst.n; i + 1 < j; i++, j--) { BGItem x = STACK_AT(&bgst, BGItem, i); STACK_AT(&bgst, BGItem, i) = STACK_AT(&bgst, BGItem, j - 1); STACK_AT(&bgst, BGItem, j - 1) = x; }
+}
+static void bg_step(BGItem *it) {
+    BGram *g = &it->g; Term *t = it->t; int depth = it->depth, j;
+    if (it->k == BG_NOREC) { bg_no_rec(g, t, depth); return; }
+    if (it->k == BG_BADFN)
+        die("line %d: the boundary or index of %s: the argument %s of %s (a function into %s) must be an abstraction or a recursive argument of that type", g->line, g->C->name, it->Cp->args[it->q].name, it->Cp->name, bg_D(g));
+    if (it->k == BG_PATH) {   /* a path in D: a recursive path argument, or an abstraction over an interval whose body is an element */
+        if (bg_rec_var(g, t, depth, &j) && g->C->args[j].isrecpath) return;
+        if (t->k == T_LAM && t->isi) { bg_push(BG_ELEM, g, t->a, depth + 1); return; }
+        die("line %d: the boundary of %s: a path in %s must be a recursive path argument or an abstraction over an interval", g->line, g->C->name, bg_D(g));
     }
-}
-static void bg_elem(BGram *g, Term *t, int depth);
-/* a path in D: a recursive path argument, or an abstraction over an interval whose body is an element */
-static void bg_path(BGram *g, Term *t, int depth) {
-    int j;
-    if (bg_rec_var(g, t, depth, &j) && g->C->args[j].isrecpath) return;
-    if (t->k == T_LAM && t->isi) { bg_elem(g, t->a, depth + 1); return; }
-    die("line %d: the boundary of %s: a path in %s must be a recursive path argument or an abstraction over an interval", g->line, g->C->name, bg_D(g));
-}
-/* an element of D */
-static void bg_elem(BGram *g, Term *t, int depth) {
-    int j;
+    /* an element of D */
     if (bg_rec_var_any(g, t, depth, &j) && g->C->args[j].rec != g->dt)
         die("line %d: the boundary or index of %s: the recursive argument %s is an element of %s, not of %s", g->line, g->C->name, g->C->args[j].name, datas[g->C->args[j].rec].name, bg_D(g));
     if (bg_rec_var(g, t, depth, &j)) {
@@ -1293,16 +1490,17 @@ static void bg_elem(BGram *g, Term *t, int depth) {
         die("line %d: the boundary of %s: the recursive argument %s is not an element of %s; apply it", g->line, g->C->name, g->C->args[j].name, bg_D(g));
     }
     if (t->k == T_PAPP) {   /* a recursive path argument at an interval */
-        if (bg_rec_var(g, t->a, depth, &j) && g->C->args[j].isrecpath) { bg_no_rec(g, t->b, depth); return; }
+        if (bg_rec_var(g, t->a, depth, &j) && g->C->args[j].isrecpath) { bg_push(BG_NOREC, g, t->b, depth); return; }
         die("line %d: the boundary of %s: only a recursive path argument may be applied to an interval here", g->line, g->C->name);
     }
     int nargs = 0; Term *w = t;
     while (w->k == T_APP) { nargs++; w = w->a; }
+    size_t from = bgst.n;
     if (bg_rec_var(g, w, depth, &j)) {   /* a recursive argument of function type, applied */
         if (!g->C->args[j].isrec || nargs != g->C->args[j].npi)
             die("line %d: the boundary of %s: the recursive argument %s must be applied to exactly its %d argument%s", g->line, g->C->name, g->C->args[j].name, g->C->args[j].npi, g->C->args[j].npi == 1 ? "" : "s");
-        for (Term *x = t; x->k == T_APP; x = x->a) bg_no_rec(g, x->b, depth);
-        return;
+        for (Term *x = t; x->k == T_APP; x = x->a) bg_push(BG_NOREC, g, x->b, depth);
+        bg_reverse(from); return;
     }
     if (w->k != T_CON || cons[w->n].data != g->dt)
         die("line %d: the boundary or index of %s: an element of %s here must be a recursive argument or an earlier constructor applied; a Kan operation, eliminator, definition or let cannot stand for one (CHM18 3.2)",
@@ -1313,24 +1511,36 @@ static void bg_elem(BGram *g, Term *t, int depth) {
         die("line %d: the boundary of %s applies %s to %d arguments, expected %d", g->line, g->C->name, Cp->name, nargs, g->np + Cp->nargs + Cp->nint);
     Term **args = xalloc((nargs + 1) * sizeof(Term *)); w = t;
     for (int i = nargs - 1; i >= 0; i--) { args[i] = w->b; w = w->a; }
-    for (int i = 0; i < g->np; i++) bg_no_rec(g, args[i], depth);
+    for (int i = 0; i < g->np; i++) bg_push(BG_NOREC, g, args[i], depth);
     for (int q = 0; q < Cp->nargs; q++) {
         Term *a = args[g->np + q]; ConArg *A = &Cp->args[q];
-        if (!(A->isrec || A->isrecpath)) { bg_no_rec(g, a, depth); continue; }
+        if (!(A->isrec || A->isrecpath)) { bg_push(BG_NOREC, g, a, depth); continue; }
         BGram g2 = *g; g2.dt = A->rec;   /* the position ranges over the member of the recursive occurrence */
-        if (A->isrecpath) bg_path(&g2, a, depth);
-        else if (A->npi == 0) bg_elem(&g2, a, depth);
+        if (A->isrecpath) bg_push(BG_PATH, &g2, a, depth);
+        else if (A->npi == 0) bg_push(BG_ELEM, &g2, a, depth);
         else {   /* a function into the member: a recursive argument of that function type, or an abstraction whose body is an element */
             int jj;
             if (bg_rec_var(&g2, a, depth, &jj) && g->C->args[jj].isrec && g->C->args[jj].npi == A->npi) continue;
             Term *b = a; int k = 0;
             while (k < A->npi && b->k == T_LAM && !b->isi) { b = b->a; k++; }
-            if (k < A->npi) die("line %d: the boundary or index of %s: the argument %s of %s (a function into %s) must be an abstraction or a recursive argument of that type", g->line, g->C->name, A->name, Cp->name, bg_D(&g2));
-            bg_elem(&g2, b, depth + k);
+            if (k < A->npi) {   /* the recursion reported this after the earlier arguments' positions: so does the work list */
+                BGItem bad = { BG_BADFN, g2, a, depth, Cp, q }; STACK_PUSH(&bgst, BGItem, bad); continue;
+            }
+            bg_push(BG_ELEM, &g2, b, depth + k);
         }
     }
-    for (int q = 0; q < Cp->nint; q++) bg_no_rec(g, args[g->np + Cp->nargs + q], depth);
+    for (int q = 0; q < Cp->nint; q++) bg_push(BG_NOREC, g, args[g->np + Cp->nargs + q], depth);
+    bg_reverse(from);
 }
+static void bg_run(int k, BGram *g, Term *t, int depth) {
+    size_t base = bgst.n;
+    bg_push(k, g, t, depth);
+    while (bgst.n > base) {
+        BGItem it = STACK_POP(&bgst, BGItem);
+        bg_step(&it);
+    }
+}
+static void bg_elem(BGram *g, Term *t, int depth) { bg_run(BG_ELEM, g, t, depth); }
 
 /* a block of data types declared together (a lone data type is a block of one), sharing the parameters:
    the members' signatures first, in order (each may use the earlier members' type formers), then the constructors in

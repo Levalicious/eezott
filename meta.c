@@ -272,8 +272,8 @@ static Term *subst_open(Term *t, int idx, Term *v, int d) { SubstO s = { idx, v 
 /* replace every meta by its solution applied to its spine (beta-reduced by substitution), structurally */
 /* a solved meta's application: its spine arguments are zonked (outermost first), then the solution applied to them is
    zonked in its place */
-static Term *zonk_post(Term *t, Term **rs, int n, void *ctx) {
-    Term *h = t; (void)ctx;
+static Term *zonk_post(Term *t, Term **rs, int n, void *ctx, void *aux) {
+    Term *h = t; (void)ctx; (void)aux;
     while (h->k == T_APP) h = h->a;
     Meta *m = &tmetas[h->n];
     Term **args = xalloc((n + 1) * sizeof(Term *));

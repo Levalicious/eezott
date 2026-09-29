@@ -164,14 +164,17 @@ void term_print(FILE *f, Term *t, const char **names, int depth);
 int term_mentions_var(Term *t, int idx);
 /* iterative walks over terms (eval.c): no walk recurses on the C stack */
 typedef struct TWDecide TWDecide;
-typedef Term *(*TWPost)(Term *t, Term **rs, int n, void *ctx);
-struct TWDecide { Term *r; Term **ks; int nk; TWPost post; };
-enum { TW_NODE, TW_DONE, TW_SPINE };   /* a node rebuilt from its walked children / the result r / the terms ks walked, post's term walked in its place */
+typedef Term *(*TWPost)(Term *t, Term **rs, int n, void *ctx, void *aux);
+struct TWDecide { Term *r; Term **ks; int nk; TWPost post; int fin; void *aux; };
+/* a node rebuilt from its walked children / the result r / the terms ks walked, then post's term (given aux) walked in the
+   node's place - or, with fin, post's term is the node's result */
+enum { TW_NODE, TW_DONE, TW_SPINE };
 typedef int (*TWPre)(Term *t, int d, void *ctx, TWDecide *out);
 typedef Term *(*TWBuild)(Term *t, Term **kids, void *ctx);
-typedef int (*TAnyPre)(Term *t, int d, void *ctx);   /* 1 found, 0 look inside, -1 nothing inside */
+typedef int (*TAnyPre)(Term *t, int d, void *ctx);   /* 1 found, 0 look inside, -1 nothing inside, 2 its own children pushed (term_any_push) */
 Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx);
 int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx);
+void term_any_push(Term *t, int d);   /* for a visitor returning 2: push in reverse of the order they are to be visited */
 int term_nkids(Term *t, int all); Term *term_kid(Term *t, int i); int term_kid_binds(Term *t, int i);
 
 /* ---------------- interval values ---------------- */
