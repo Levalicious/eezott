@@ -23,33 +23,17 @@ static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vap
 
 /* ---- memory / errors ---- */
 void unfold_counts_report(void); void fallback_report(void);
-void die_resource(const char *fmt, ...) {
-    unfold_counts_report(); fallback_report();
-    va_list ap;
-    fflush(stdout);
-    fputs("eezott: resource limit: ", stderr);
-    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
-    fputc('\n', stderr);
-    exit(70);
-}
+/* the resource abort is the memory layer's (libeezo/mem.h); these diagnostics run first (main registers them) */
+void resource_diagnostics(void) { unfold_counts_report(); fallback_report(); }
 
 /* A memo entry stays valid across metas generations iff nothing inside it was blocked on an unsolved meta: resolving one
    can resume a reduction the entry took as neutral. A missed entry is merely slow, so this is set conservatively -
    every place that hands back a neutral where a decision was possible marks it, meta or not. */
 static int meta_blocked;
-static u64 alloc_total, alloc_limit;
-void *xalloc(size_t n) {
-    if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
-        const char *e = getenv("EEZOTT_MAX_ALLOC");
-        alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
-    }
-    alloc_total += n ? n : 1;
-    if (alloc_total > alloc_limit)
-        die_resource("allocated over %llu bytes (EEZOTT_MAX_ALLOC)", (unsigned long long)alloc_limit);
-    void *p = calloc(1, n ? n : 1);
-    if (!p) die_resource("out of memory");
-    return p;
-}
+/* The checker's values, terms, environments ... live for the run: one arena of the memory layer (libeezo/mem.h),
+   zeroed; its budget is the layer's (EEZOTT_MAX_ALLOC, set in main - the harness's cap, not the theory's) */
+static Arena tt_arena;
+void *xalloc(size_t n) { return arena_alloc(&tt_arena, n); }
 char *xstrdup(const char *s) { size_t n = strlen(s) + 1; char *p = xalloc(n); memcpy(p, s, n); return p; }
 char *xsprintf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int n = vsnprintf(NULL, 0, fmt, ap); va_end(ap);
@@ -335,14 +319,15 @@ static void lv_tp(FILE *f, LVal l, const char **names, int depth, int prec) {
    caller's names seed it), so a term prints however deep it is. */
 typedef enum { PT_TERM, PT_STR, PT_NAME } PKind;
 typedef struct { PKind k; Term *t; int depth, prec; const char *s; } PItem;
-static PItem *ps; static int nps, pcap;
+static Stack pst = { NULL, 0, 0, sizeof(PItem) };   /* a Stack of the memory layer (libeezo/mem.h) */
+#define ps ((PItem *)pst.p)
+#define nps (pst.n)
 static const char **pn; static int pncap;
 static void ppush(PKind k, Term *t, int depth, int prec, const char *str) {
-    if (nps == pcap) { pcap = pcap ? 2 * pcap : 256; ps = realloc(ps, (size_t)pcap * sizeof(PItem)); if (!ps) die_resource("out of memory"); }
-    PItem it = { k, t, depth, prec, str }; ps[nps++] = it;
+    PItem it = { k, t, depth, prec, str }; STACK_PUSH(&pst, PItem, it);
 }
 static void pn_set(int d, const char *s) {
-    if (d >= pncap) { int nc = pncap ? pncap : 256; while (nc <= d) nc *= 2; pn = realloc(pn, (size_t)nc * sizeof(char *)); if (!pn) die_resource("out of memory"); memset(pn + pncap, 0, (size_t)(nc - pncap) * sizeof(char *)); pncap = nc; }
+    if (d >= pncap) { int nc = pncap ? pncap : 256; while (nc <= d) nc *= 2; pn = rrealloc(pn, (size_t)nc * sizeof(char *)); memset(pn + pncap, 0, (size_t)(nc - pncap) * sizeof(char *)); pncap = nc; }
     pn[d] = s;
 }
 #define PT(t_, d_, p_) ppush(PT_TERM, (t_), (d_), (p_), NULL)
@@ -359,7 +344,7 @@ static void ref_lvl_push(FILE *f, Term *t, int depth) {
 static void tp_node(FILE *f, Term *t, int depth, int prec) {
     unsigned long long num;
     if ((t->k == T_APP || t->k == T_CON) && numeral_of(t, &num)) { fprintf(f, "%llu", num); return; }
-    int from = nps;
+    size_t from = nps;
     switch (t->k) {
     case T_VAR: {
         int lvl = depth - 1 - t->n;
@@ -473,11 +458,11 @@ static void tp_node(FILE *f, Term *t, int depth, int prec) {
         break;
     default: return;
     }
-    for (int i = from, j = nps - 1; i < j; i++, j--) { PItem x = ps[i]; ps[i] = ps[j]; ps[j] = x; }
+    if (nps > from) for (size_t i = from, j = nps - 1; i < j; i++, j--) { PItem x = ps[i]; ps[i] = ps[j]; ps[j] = x; }
 }
 void term_print(FILE *f, Term *t, const char **names, int depth) {
     for (int i = 0; i < depth; i++) pn_set(i, names[i]);
-    int base = nps;
+    size_t base = nps;
     PT(t, depth, 0);
     while (nps > base) {
         PItem it = ps[--nps];
@@ -927,7 +912,7 @@ static Val *elim_reduce(int data, VList *args) {
                 fputc('\n', stderr);
             }
         }
-        die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
+        resource_die("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
                      datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
     }
     if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
@@ -1108,7 +1093,7 @@ void unfold_counts_report(void) {
 }
 /* a rigid definition application to its value: the definition applied to its spine */
 Val *unfold_def(Val *v) {
-    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = calloc(65536, sizeof(long)); } }
+    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = rcalloc(65536, sizeof(long)); } }
     /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
        the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
        hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
@@ -1932,7 +1917,9 @@ static Term *quote_iv(int depth, IVal a) {
    a proof nobody reads. An explicit machine (frames on a heap stack, the child's result handed back in a register),
    not C recursion. */
 typedef struct { Val *v, *w; int i; } NFrame;
-static NFrame *nfs; static int nnfs, nfcap;
+static Stack nfst = { NULL, 0, 0, sizeof(NFrame) };   /* a Stack of the memory layer */
+#define nfs ((NFrame *)nfst.p)
+#define nnfs (nfst.n)
 /* force v; a constructor with arguments or a pair opens a frame (1), anything else is the result (0) */
 static int nf_open(Val *v, Val **ret) {
     v = force(v);
@@ -1940,12 +1927,11 @@ static int nf_open(Val *v, Val **ret) {
     if (v->k == V_CON && v->args.n > 0) { w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl; }
     else if (v->k == V_PAIR) { w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; }
     else { *ret = v; return 0; }
-    if (nnfs == nfcap) { nfcap = nfcap ? 2 * nfcap : 64; nfs = realloc(nfs, (size_t)nfcap * sizeof(NFrame)); if (!nfs) die_resource("out of memory"); }
-    NFrame fr = { v, w, 0 }; nfs[nnfs++] = fr;
+    NFrame fr = { v, w, 0 }; STACK_PUSH(&nfst, NFrame, fr);
     return 1;
 }
 Val *nf_force(Val *v0) {
-    int base = nnfs; Val *ret = NULL; int have = 0;
+    size_t base = nnfs; Val *ret = NULL; int have = 0;
     if (!nf_open(v0, &ret)) return ret;
     while (nnfs > base) {
         NFrame *fr = &nfs[nnfs - 1];
@@ -1978,13 +1964,12 @@ Val *nf_force(Val *v0) {
 /* Quoting: an explicit machine like conversion. Each node is made with its children's slots empty, and a task per
    slot fills it, in the order the recursion visited them (left to right, depth first). */
 typedef struct { int depth; Val *v; Term **dst; } QTask;
-static QTask *qs; static int nqs, qcap;
-static void qpush(int depth, Val *v, Term **dst) {
-    if (nqs == qcap) { qcap = qcap ? 2 * qcap : 256; qs = realloc(qs, (size_t)qcap * sizeof(QTask)); if (!qs) die_resource("out of memory"); }
-    QTask q = { depth, v, dst }; qs[nqs++] = q;
-}
+static Stack qst = { NULL, 0, 0, sizeof(QTask) };   /* a Stack of the memory layer */
+#define qs ((QTask *)qst.p)
+#define nqs (qst.n)
+static void qpush(int depth, Val *v, Term **dst) { QTask q = { depth, v, dst }; STACK_PUSH(&qst, QTask, q); }
 static Term *quote_node(int depth, Val *v) {
-    int from = nqs;
+    size_t from = nqs;
     Term *t = NULL;
     v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
@@ -2051,11 +2036,11 @@ static Term *quote_node(int depth, Val *v) {
     }
     default: return NULL;
     }
-    for (int i = from, j = nqs - 1; i < j; i++, j--) { QTask x = qs[i]; qs[i] = qs[j]; qs[j] = x; }
+    if (nqs > from) for (size_t i = from, j = nqs - 1; i < j; i++, j--) { QTask x = qs[i]; qs[i] = qs[j]; qs[j] = x; }
     return t;
 }
 Term *quote(int depth, Val *v) {
-    Term *root = NULL; int base = nqs;
+    Term *root = NULL; size_t base = nqs;
     qpush(depth, v, &root);
     while (nqs > base) { QTask q = qs[--nqs]; *q.dst = quote_node(q.depth, q.v); }
     return root;
@@ -2075,17 +2060,16 @@ typedef enum { G_PLAIN, G_PROJ2, G_CLO, G_FACE, G_SPEC_END, G_RESUME } GKind;
 typedef enum { FB_DEF, FB_ELIM, FB_META } FbKind;
 typedef struct { GKind k; int depth; Val *a, *b; int isi; FbKind fb; Face face; } Goal;
 typedef struct { LMark lm; MMark mm; int height; FbKind fb; int depth; Val *a, *b; } Spec;
-static Goal *gs; static int ngs, gcap;
-static Spec *ss; static int nss, scap;
-static void gpush(Goal g) {
-    if (ngs == gcap) { gcap = gcap ? 2 * gcap : 256; gs = realloc(gs, (size_t)gcap * sizeof(Goal)); if (!gs) die_resource("out of memory"); }
-    gs[ngs++] = g;
-}
+static Stack gst = { NULL, 0, 0, sizeof(Goal) }, sst = { NULL, 0, 0, sizeof(Spec) };   /* Stacks of the memory layer */
+#define gs ((Goal *)gst.p)
+#define ngs (gst.n)
+#define ss ((Spec *)sst.p)
+#define nss (sst.n)
+static void gpush(Goal g) { STACK_PUSH(&gst, Goal, g); }
 static void gpush2(GKind k, int depth, Val *a, Val *b) { Goal g = {0}; g.k = k; g.depth = depth; g.a = a; g.b = b; gpush(g); }
 /* a speculative block: the marks were taken before anything it may undo; its goals go above the end marker */
 static void spec_open(LMark lm, MMark mm, FbKind fb, int depth, Val *a, Val *b) {
-    if (nss == scap) { scap = scap ? 2 * scap : 64; ss = realloc(ss, (size_t)scap * sizeof(Spec)); if (!ss) die_resource("out of memory"); }
-    Spec s = { lm, mm, ngs, fb, depth, a, b }; ss[nss++] = s;
+    Spec s = { lm, mm, (int)ngs, fb, depth, a, b }; STACK_PUSH(&sst, Spec, s);
     gpush2(G_SPEC_END, depth, NULL, NULL);
 }
 /* a spine's argument pairs, left to right: path and plain application to an interval coincide; the argument of an
@@ -2269,7 +2253,7 @@ static int conv_fail_logged;
 /* conversion is transactional: level constraints and meta solutions added by a comparison that fails are rolled back */
 int conv(int depth, Val *a, Val *b) {
     LMark m = lstore_mark(); MMark mm = meta_mark();
-    int gbase = ngs, sbase = nss;
+    size_t gbase = ngs, sbase = nss;
     gpush2(G_PLAIN, depth, a, b);
     while (ngs > gbase) {
         Goal g = gs[--ngs];
@@ -2285,7 +2269,7 @@ int conv(int depth, Val *a, Val *b) {
         if (r) continue;
         if (conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE") && (g.k == G_PLAIN)) {
             conv_fail_logged++;
-            fprintf(stderr, "[conv] #%d depth %d goals %d: ", conv_fail_logged, g.depth, ngs - gbase);
+            fprintf(stderr, "[conv] #%d depth %d goals %zu: ", conv_fail_logged, g.depth, ngs - gbase);
             const char *nm[2048] = {0};
             term_print(stderr, quote(0, g.a), nm, 0); fputs("   !=   ", stderr);
             term_print(stderr, quote(0, g.b), nm, 0); fputc('\n', stderr);

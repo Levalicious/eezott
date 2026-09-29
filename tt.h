@@ -62,12 +62,13 @@
 #include <limits.h>
 #include "../libeezo/types.h"
 #include "../libeezo/bn.h"
+#include "../libeezo/mem.h"
 
 void *xalloc(size_t n);
 char *xstrdup(const char *s);
 char *xsprintf(const char *fmt, ...);
 void die(const char *fmt, ...);
-void die_resource(const char *fmt, ...);   /* resource abort: 'resource limit: ...', exit 70 */
+void resource_diagnostics(void);           /* printed before the memory layer's resource abort (libeezo/mem.h) */
 
 /* ---------------- surface syntax ---------------- */
 
