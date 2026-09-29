@@ -1986,61 +1986,63 @@ Term *quote(int depth, Val *v) {
 }
 int val_mentions_ivar(int depth, Val *v, int level) { return term_mentions_var(quote(depth, v), depth - 1 - level); }
 
-/* ---- conversion ---- */
-static int conv_spine(int depth, VList *a, VList *b) {
-    if (a->n != b->n) return 0;
-    for (int i = 0; i < a->n; i++) {
-        if (a->a[i].proj != b->a[i].proj) return 0;   /* path and plain application to an interval coincide */
-        if (a->a[i].proj) continue;
-        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;   /* the argument of an irrelevant binder */
-        if (!conv(depth, a->a[i].v, b->a[i].v)) return 0;
-    }
-    return 1;
+/* ---- conversion ----
+   An explicit machine, not C recursion: the goals left to prove sit on a heap stack in the order the recursive
+   definition visited them (depth first, left to right), so a comparison's depth is bounded by memory alone
+   (Order_Lev_EezottIterative). Conversion is a conjunction of goals except at three speculative points - the same
+   definition's spines, the same deferred elimination's spines, the same meta's spines - where a failure is recovered:
+   a frame there holds the rollback marks, the goal stack's height, and the fallback (unfold both, force both,
+   postpone). A failure rolls back to the innermost frame and resumes its fallback; with none left, the whole
+   comparison fails and is rolled back (conversion is transactional). A conversion nested inside a step (unify_meta,
+   eval) runs its own machine above the outer one's goals and leaves the stacks as it found them. */
+typedef enum { G_PLAIN, G_PROJ2, G_CLO, G_FACE, G_SPEC_END, G_RESUME } GKind;
+typedef enum { FB_DEF, FB_ELIM, FB_META } FbKind;
+typedef struct { GKind k; int depth; Val *a, *b; int isi; FbKind fb; Face face; } Goal;
+typedef struct { LMark lm; MMark mm; int height; FbKind fb; int depth; Val *a, *b; } Spec;
+static Goal *gs; static int ngs, gcap;
+static Spec *ss; static int nss, scap;
+static void gpush(Goal g) {
+    if (ngs == gcap) { gcap = gcap ? 2 * gcap : 256; gs = realloc(gs, (size_t)gcap * sizeof(Goal)); if (!gs) die_resource("out of memory"); }
+    gs[ngs++] = g;
 }
-static int conv_sys(int depth, Val *a, Val *b) {   /* partial elements agree on every face of their (common) support */
+static void gpush2(GKind k, int depth, Val *a, Val *b) { Goal g = {0}; g.k = k; g.depth = depth; g.a = a; g.b = b; gpush(g); }
+/* a speculative block: the marks were taken before anything it may undo; its goals go above the end marker */
+static void spec_open(LMark lm, MMark mm, FbKind fb, int depth, Val *a, Val *b) {
+    if (nss == scap) { scap = scap ? 2 * scap : 64; ss = realloc(ss, (size_t)scap * sizeof(Spec)); if (!ss) die_resource("out of memory"); }
+    Spec s = { lm, mm, ngs, fb, depth, a, b }; ss[nss++] = s;
+    gpush2(G_SPEC_END, depth, NULL, NULL);
+}
+/* a spine's argument pairs, left to right: path and plain application to an interval coincide; the argument of an
+   irrelevant binder is not compared. 0 refuted, 2 pushed. */
+static int push_spine(int depth, VList *a, VList *b) {
+    if (a->n != b->n) return 0;
+    for (int i = 0; i < a->n; i++) if (a->a[i].proj != b->a[i].proj) return 0;
+    for (int i = a->n - 1; i >= 0; i--) {
+        if (a->a[i].proj) continue;
+        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;
+        gpush2(G_PLAIN, depth, a->a[i].v, b->a[i].v);
+    }
+    return 2;
+}
+/* partial elements agree on every face of their (common) support */
+static int push_sys(int depth, Val *a, Val *b) {
     Val *s = a->k == V_SYS ? a : b;
     IVal phi = iv_zero();
     for (int i = 0; i < s->nbr; i++) phi = iv_or(phi, s->br[i].phi->iv);
     Face *fs; int nf = iv_faces(phi, &fs);
-    for (int i = 0; i < nf; i++) {
-        Val *x = vsys_at(a, &fs[i]), *y = vsys_at(b, &fs[i]);
-        if (!x || !y || !conv(depth, x, y)) return 0;
-    }
-    return 1;
+    for (int i = nf - 1; i >= 0; i--) { Goal g = {0}; g.k = G_FACE; g.depth = depth; g.a = a; g.b = b; g.face = fs[i]; gpush(g); }
+    return 2;
 }
-static int conv1(int depth, Val *a, Val *b);
 /* the levels of two occurrences of a global agree (only polymorphic globals take one) */
 static int lvl_conv(TKind k, int id, LVal a, LVal b) { return !ref_poly(k, id) || lv_enforce_eq(a, b) == 1; }
-/* conversion is transactional: level constraints added by a comparison that fails are rolled back */
-int conv(int depth, Val *a, Val *b) {
-    LMark m = lstore_mark(); MMark mm = meta_mark();
-    int r = conv1(depth, a, b);
-    if (!r) { lstore_rollback(m); meta_rollback(mm); }
-    return r;
-}
-static int conv1_b(int depth, Val *a, Val *b);
-static int conv_fail_logged;
-int conv_depth_now;
-static int conv1(int depth, Val *a, Val *b) {
-    conv_depth_now++;
-    int r = conv1_b(depth, a, b);
-    conv_depth_now--;
-    if (!r && conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE")) {
-        conv_fail_logged++;
-        fprintf(stderr, "[conv] #%d depth %d call-depth %d: ", conv_fail_logged, depth, conv_depth_now);
-        const char *nm[2048] = {0};
-        term_print(stderr, quote(0, a), nm, 0); fputs("   !=   ", stderr);
-        term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr);
-        if ((a->k == V_I || b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
-    }
-    return r;
-}
-static int conv1_b(int depth, Val *a, Val *b) {
+/* one step on a goal: 1 proved, 0 refuted, 2 its subgoals pushed. skip: the head phase is done (a fallback found
+   nothing left to unfold) */
+static int conv_step(int depth, Val *a, Val *b, int skip) {
     a = fmeta(a); b = fmeta(b);
     /* definition applications stay rigid: the same definition compares by spine congruence, and the spine's arguments
        at .() binders (irr bit 2) are skipped - proofs differing only there are equal by construction (compareIrrelevant
        in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
-    for (;;) {
+    while (!skip) {
         int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
         int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
         /* a metavariable is solved by the other side as written - a rigid definition application, a deferred
@@ -2066,10 +2068,13 @@ static int conv1_b(int depth, Val *a, Val *b) {
           }
           if (am && bm) break; }
         if (ad && bd) {
-            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
-               Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
-            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_DEF, a->n, a->lvl, b->lvl)
-                && conv_spine(depth, &a->args, &b->args)) return 1;
+            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence;
+               speculative: on failure everything it did is rolled back and both sides unfold (FB_DEF) */
+            if (a->n == b->n && a->args.n == b->args.n) {
+                LMark lm = lstore_mark(); MMark mm = meta_mark();
+                if (lvl_conv(T_DEF, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_DEF, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                lstore_rollback(lm); meta_rollback(mm);
+            }
             /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
                height). A wrapper's body usually reaches the other definition's own head, and the congruence fast path
                then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
@@ -2087,14 +2092,14 @@ static int conv1_b(int depth, Val *a, Val *b) {
         }
         if (ad) { Val *u = fmeta(unfold_def(a)); if (u != a) { a = u; continue; } }
         if (bd) { Val *u = fmeta(unfold_def(b)); if (u != b) { b = u; continue; } }
-        /* deferred eliminations: the same one by spine congruence, else reduced (a stuck one drops its flag) */
+        /* deferred eliminations: the same one by spine congruence (speculative, FB_ELIM), else reduced (a stuck one
+           drops its flag) */
         if (ae && be) {
-            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)
-                && conv_spine(depth, &a->args, &b->args)) return 1;
-            { static const char *dt = NULL; static int dtc = 0; if (!dt) { dt = getenv("EEZOTT_DEFER_TRACE"); if (!dt) dt = ""; }
-              if (*dt && cur_decl_name && !strcmp(cur_decl_name, dt) && dtc < 12) { dtc++; const char *nm[2048] = {0};
-                fprintf(stderr, "[defer] same=%d nargs %d/%d: ", a->n == b->n, a->args.n, b->args.n);
-                term_print(stderr, quote(0, a), nm, 0); fputs("   vs   ", stderr); term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr); } }
+            if (a->n == b->n && a->args.n == b->args.n) {
+                LMark lm = lstore_mark(); MMark mm = meta_mark();
+                if (lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_ELIM, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                lstore_rollback(lm); meta_rollback(mm);
+            }
             a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
         }
         if (ae) { a = fmeta(elim_force(a)); continue; }
@@ -2105,12 +2110,13 @@ static int conv1_b(int depth, Val *a, Val *b) {
     if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) return lv_enforce_eq(a->lvl, lv_var(b->n)) == 1;
     if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) return lv_enforce_eq(b->lvl, lv_var(a->n)) == 1;
     if (a == b) return 1;
-    {   /* a meta: solved by pattern unification, or the constraint is postponed */
+    {   /* a meta: solved by pattern unification, or the constraint is postponed (the same meta: its spines,
+           speculatively - on failure the constraint is postponed, FB_META) */
         int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
         if (am && bm && a->n == b->n) {
-            LMark m = lstore_mark(); MMark mm = meta_mark();
-            if (conv_spine(depth, &a->args, &b->args)) return 1;
-            lstore_rollback(m); meta_rollback(mm); meta_postpone(depth, a, b); return 1;
+            LMark lm = lstore_mark(); MMark mm = meta_mark();
+            spec_open(lm, mm, FB_META, depth, a, b);
+            return push_spine(depth, &a->args, &b->args);
         }
         if (am) return unify_meta(depth, a, b);
         if (bm) return unify_meta(depth, b, a);
@@ -2119,19 +2125,20 @@ static int conv1_b(int depth, Val *a, Val *b) {
     if (a->k == V_NUM && b->k == V_NUM) return a->n == b->n && lvl_conv(T_DATA, a->n, a->lvl, b->lvl) && bn_cmp(a->num, b->num) == 0;
     if (a->k == V_NUM && b->k == V_CON) a = num_view(a);
     if (b->k == V_NUM && a->k == V_CON) b = num_view(b);
-    if (a->k == V_SYS || b->k == V_SYS) return conv_sys(depth, a, b);
+    if (a->k == V_SYS || b->k == V_SYS) return push_sys(depth, a, b);
     if (a->k == V_LAM || b->k == V_LAM) {          /* eta */
         int isi = (a->k == V_LAM ? a->isi : b->isi);
         Val *x = isi ? vivar(depth) : vvar(depth);
         /* a neutral applied to an interval is the same application whether it was formed as a path or as a function of I */
         Val *fa = a->k == V_LAM ? inst(&a->clo, x) : vapp(a, x, 0);
         Val *fb = b->k == V_LAM ? inst(&b->clo, x) : vapp(b, x, 0);
-        return conv(depth + 1, fa, fb);
+        gpush2(G_PLAIN, depth + 1, fa, fb); return 2;
     }
     if (a->k == V_IRR || b->k == V_IRR) die("internal: an elided irrelevant value reached conversion");
     if (a->k == V_PAIR || b->k == V_PAIR) {   /* eta; an irrelevant second component is not compared */
         int irr = (a->k == V_PAIR && a->irr) || (b->k == V_PAIR && b->irr);
-        return conv(depth, vproj(a, 1), vproj(b, 1)) && (irr || conv(depth, vproj(a, 2), vproj(b, 2)));
+        if (!irr) gpush2(G_PROJ2, depth, a, b);
+        gpush2(G_PLAIN, depth, vproj(a, 1), vproj(b, 1)); return 2;
     }
     if (a->k != b->k) return 0;
     switch (a->k) {
@@ -2139,31 +2146,83 @@ static int conv1_b(int depth, Val *a, Val *b) {
     case V_L: return lv_enforce_eq(a->lvl, b->lvl) == 1;
     case V_LEVEL: return 1;
     case V_SIGMA: {
-        if (a->irr != b->irr || !conv(depth, a->dom, b->dom)) return 0;
-        Val *x = vvar(depth);
-        return conv(depth + 1, inst(&a->clo, x), inst(&b->clo, x));
+        if (a->irr != b->irr) return 0;
+        Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = 0; gpush(g);
+        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
     }
     case V_INTERVAL: return 1;
     case V_I: return iv_eq(a->iv, b->iv);
     case V_PI: {
-        if (!conv(depth, a->dom, b->dom)) return 0;
-        Val *x = a->isi ? vivar(depth) : vvar(depth);
-        return conv(depth + 1, inst(&a->clo, x), inst(&b->clo, x));
+        Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = a->isi; gpush(g);
+        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
     }
-    case V_PATHP: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_PARTIAL: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b);
-    case V_SUB: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_INS: return conv(depth, a->a, b->a);
-    case V_GLUE: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_GLUEEL: return conv(depth, a->b, b->b) && conv(depth, a->a, b->a);
+    case V_PATHP: case V_SUB: case V_GLUE:
+        gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_PARTIAL: gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_INS: gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_GLUEEL: gpush2(G_PLAIN, depth, a->a, b->a); gpush2(G_PLAIN, depth, a->b, b->b); return 2;
     case V_NEU:
         if (a->h != b->h) return 0;
-        if (a->h == H_TRANSP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c))) return 0; }
-        else if (a->h == H_HCOMP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c) && conv(depth, a->dom, b->dom))) return 0; }
-        else if (a->h == H_OUTS || a->h == H_UNGLUE) { if (!conv(depth, a->dom, b->dom)) return 0; }
-        else if (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl))) return 0;   /* a variable's n is its level, not a global id */
-        return conv_spine(depth, &a->args, &b->args);
-    case V_DATA: case V_CON: return a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl) && conv_spine(depth, &a->args, &b->args);
+        if (a->h != H_TRANSP && a->h != H_HCOMP && a->h != H_OUTS && a->h != H_UNGLUE
+            && (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)))) return 0;   /* a variable's n is its level, not a global id */
+        if (!push_spine(depth, &a->args, &b->args)) return 0;   /* the spine after the head's own parts */
+        if (a->h == H_TRANSP) { gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
+        else if (a->h == H_HCOMP) { gpush2(G_PLAIN, depth, a->dom, b->dom); gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
+        else if (a->h == H_OUTS || a->h == H_UNGLUE) gpush2(G_PLAIN, depth, a->dom, b->dom);
+        return 2;
+    case V_DATA: case V_CON:
+        if (!(a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl))) return 0;
+        return push_spine(depth, &a->args, &b->args);
     default: return 0;
     }
+}
+/* a speculative block failed (its marks already rolled back): its fallback */
+static int conv_resume(Goal g) {
+    switch (g.fb) {
+    case FB_DEF: {
+        Val *ua = fmeta(unfold_def(g.a)), *ub = fmeta(unfold_def(g.b));
+        if (ua == g.a && ub == g.b) return conv_step(g.depth, g.a, g.b, 1);
+        return conv_step(g.depth, ua, ub, 0);
+    }
+    case FB_ELIM: return conv_step(g.depth, fmeta(elim_force(g.a)), fmeta(elim_force(g.b)), 0);
+    case FB_META: meta_postpone(g.depth, g.a, g.b); return 1;
+    }
+    return 0;
+}
+static int conv_fail_logged;
+/* conversion is transactional: level constraints and meta solutions added by a comparison that fails are rolled back */
+int conv(int depth, Val *a, Val *b) {
+    LMark m = lstore_mark(); MMark mm = meta_mark();
+    int gbase = ngs, sbase = nss;
+    gpush2(G_PLAIN, depth, a, b);
+    while (ngs > gbase) {
+        Goal g = gs[--ngs];
+        int r = 0;
+        switch (g.k) {
+        case G_SPEC_END: nss--; continue;   /* the speculative spines all held: the goal that opened the block is proved */
+        case G_PLAIN: r = conv_step(g.depth, g.a, g.b, 0); break;
+        case G_PROJ2: r = conv_step(g.depth, vproj(g.a, 2), vproj(g.b, 2), 0); break;
+        case G_CLO: { Val *x = g.isi ? vivar(g.depth) : vvar(g.depth); r = conv_step(g.depth + 1, inst(&g.a->clo, x), inst(&g.b->clo, x), 0); break; }
+        case G_FACE: { Val *x = vsys_at(g.a, &g.face), *y = vsys_at(g.b, &g.face); r = x && y ? conv_step(g.depth, x, y, 0) : 0; break; }
+        case G_RESUME: r = conv_resume(g); break;
+        }
+        if (r) continue;
+        if (conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE") && (g.k == G_PLAIN)) {
+            conv_fail_logged++;
+            fprintf(stderr, "[conv] #%d depth %d goals %d: ", conv_fail_logged, g.depth, ngs - gbase);
+            const char *nm[2048] = {0};
+            term_print(stderr, quote(0, g.a), nm, 0); fputs("   !=   ", stderr);
+            term_print(stderr, quote(0, g.b), nm, 0); fputc('\n', stderr);
+            if ((g.a->k == V_I || g.b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
+        }
+        if (nss > sbase) {   /* recovered: roll the innermost speculative block back and take its fallback */
+            Spec s = ss[--nss];
+            lstore_rollback(s.lm); meta_rollback(s.mm); ngs = s.height;
+            Goal rg = {0}; rg.k = G_RESUME; rg.fb = s.fb; rg.depth = s.depth; rg.a = s.a; rg.b = s.b; gpush(rg);
+            continue;
+        }
+        ngs = gbase; nss = sbase; lstore_rollback(m); meta_rollback(mm);
+        return 0;
+    }
+    return 1;
 }

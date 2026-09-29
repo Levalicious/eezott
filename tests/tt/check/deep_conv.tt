@@ -1,0 +1,3 @@
+-- conversion is an explicit machine, not C recursion: both sides unfold to 100000 successors of a variable (a spine
+-- that deep), compared without touching the C stack's limit. The recursive comparison segfaulted here at 1000.
+def t (x : Nat) : Path Nat (add 100000 x) (add 99999 (suc x)) := \i -> add 100000 x
