@@ -183,22 +183,7 @@ static int inst_tele_pre(Term *t, int k, void *ctx, TWDecide *o) {
     default: return TW_NODE;
     }
 }
-static Term *inst_tele_build(Term *t, Term **q, void *ctx) {
-    Term *r; (void)ctx;
-    switch (t->k) {
-    case T_PI:  r = mk_pi(t->name, q[0], q[1], t->irr); r->isi = t->isi; r->pre = t->pre; return r;
-    case T_LAM: r = mk_lam(t->name, q[0], t->irr); r->isi = t->isi; return r;
-    case T_SIGMA: r = mk_term(T_SIGMA, q[0], q[1], NULL, NULL); r->name = t->name; return r;
-    case T_LET: return mk_let(t->name, q[0], q[1], q[2], t->irr);
-    case T_SYS:
-        r = mk_term(T_SYS, NULL, NULL, NULL, NULL); r->nbr = t->nbr; r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = q[2 * i]; r->br[i].body = q[2 * i + 1]; }
-        return r;
-    default:
-        r = mk_term(t->k, q[0], q[1], q[2], q[3]);
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
-    }
-}
+static Term *inst_tele_build(Term *t, Term **q, void *ctx) { (void)ctx; return term_rebuild(t, q); }
 /* instantiate a term under a telescope of n binders (vs[0] the innermost) with terms of the outer context */
 Term *inst_tele(Term *t, int n, Term **vs, int k) { InstTele it = { n, vs }; return term_walk(t, k, 0, inst_tele_pre, inst_tele_build, &it); }
 /* t = c' p.. a'.. is.. (a constructor of the same data type applied): the method applied (E_con_post), from the images of
@@ -303,19 +288,7 @@ static int E_pre(Term *t, int depth, void *ctx, TWDecide *o) {
     default: return TW_NODE;
     }
 }
-static Term *E_build(Term *t, Term **q, void *ctx) {
-    Term *r; (void)ctx;
-    switch (t->k) {
-    case T_APP: return mk_app(q[0], q[1], t->irr);
-    case T_PI: r = mk_pi(t->name, q[0], q[1], t->irr); r->isi = t->isi; return r;
-    case T_LAM: r = mk_lam(t->name, q[0], t->irr); r->isi = t->isi; return r;
-    case T_LET: return mk_let(t->name, q[0], q[1], q[2], t->irr);
-    case T_SIGMA: r = mk_term(T_SIGMA, q[0], q[1], NULL, NULL); r->name = t->name; return r;
-    default:
-        r = mk_term(t->k, q[0], q[1], q[2], q[3]);
-        r->n = t->n; r->irr = t->irr; r->name = t->name; r->isi = t->isi; r->lvl = t->lvl; r->pre = t->pre; r->num = t->num; return r;
-    }
-}
+static Term *E_build(Term *t, Term **q, void *ctx) { (void)ctx; return term_rebuild(t, q); }
 static Term *E(Term *t, EInfo *I, int depth) { return term_walk(t, depth, 0, E_pre, E_build, I); }
 /* the boundary of C at an endpoint of its single interval: the body of the branch whose face holds there (under [params, args]) */
 static Term *boundary_at(Con *C, int end) {

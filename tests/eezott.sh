@@ -101,6 +101,7 @@ check transp_pi.tt     nat 2
 check hcomp_nat.tt     nat 2
 check implicit_id.tt   nat 9
 check implicit_lam.tt  nat 4
+check irr_sigma_comp.tt nat 3   # a shifted Sigma keeps its irrelevant component
 check implicit_cons.tt nat 3
 check mutual_tree.tt   nat 4
 check mutual_iit.tt    nat 3
