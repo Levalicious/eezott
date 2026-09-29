@@ -101,23 +101,23 @@ void meta_postpone(int depth, Val *a, Val *b) {
    context restricted to an endpoint, any other term) is an ignorable position: the solution may not use it, which is sound (it
    is a solution) and incomplete only when the other side needs it, in which case a free variable is out of scope and the
    constraint is postponed. */
-static int pattern_spine(Val *m, int *lv, int *isi) {
-    int ctxn = tmetas[m->n].ctxn;   /* the first ctxn entries are the meta's context; the rest are applications of the meta */
-    for (int i = 0; i < m->args.n; i++) {
-        Arg *a = &m->args.a[i];
-        if (a->proj || a->papp) return 0;
-        Val *x = force(a->v); int l, ii = 0;
-        if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
-        else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
-        else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
-        else if (i < ctxn) { l = -2 - i; ii = x->k == V_I; }   /* a context position that is not a variable: ignorable */
-        else return 0;                                          /* an application to a term: not a pattern */
-        for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
-        lv[i] = l; isi[i] = ii;
-    }
+/* one spine argument, already forced, against the pattern rules (pattern_spine's body): 0 if the spine is not a pattern */
+int meta_pattern_arg(Val *m, int i, Val *x, int *lv, int *isi) {
+    int ctxn = tmetas[m->n].ctxn;
+    Arg *a = &m->args.a[i];
+    if (a->proj || a->papp) return 0;
+    int l, ii = 0;
+    if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
+    else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
+    else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
+    else if (i < ctxn) { l = -2 - i; ii = x->k == V_I; }   /* a context position that is not a variable: ignorable */
+    else return 0;                                          /* an application to a term: not a pattern */
+    for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
+    lv[i] = l; isi[i] = ii;
     return 1;
 }
 typedef struct { int *lv, k, depth, id, occurs, scope; } Ren;
+static Term *ren_vars(Term *t, Ren *r, int d);
 static Term *copy_term(Term *t) { Term *r = xalloc(sizeof *r); *r = *t; return r; }
 /* ren_vars the free variables of a term quoted at depth to the spine's binders; t is under d binders of its own */
 static Term *ren_vars(Term *t, Ren *r, int d) {
@@ -141,27 +141,32 @@ static Term *ren_vars(Term *t, Ren *r, int d) {
         c = copy_term(t); c->a = ren_vars(t->a, r, d); c->b = ren_vars(t->b, r, d); c->c = ren_vars(t->c, r, d); c->d = ren_vars(t->d, r, d); return c;
     }
 }
-static void solve(int id, Term *body, int k, int *isi) {
+/* the solution: the body abstracted over the spine's binders */
+Term *meta_solution_term(Term *body, int k, int *isi) {
     for (int j = k - 1; j >= 0; j--) { Term *l = mk_lam(xsprintf("x%d", j), body, 0); l->isi = isi[j]; body = l; }
-    tmetas[id].solt = body; tmetas[id].sol = eval(NULL, body);
+    return body;
+}
+void meta_record(int id, Term *solt, Val *sol) {
+    tmetas[id].solt = solt; tmetas[id].sol = sol;
     metas_version++;
     if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = rrealloc(undo, ucap * sizeof(int)); }
     undo[nundo++] = id;
 }
+static void solve(int id, Term *body, int k, int *isi) {
+    Term *solt = meta_solution_term(body, k, isi);
+    meta_record(id, solt, eval(NULL, solt));
+}
+/* the quoted other side renamed to the spine's binders: *occurs if the meta occurs, *scope if a variable is outside the spine */
+Term *meta_rename(Term *body, int *lv, int k, int depth, int id, int *occurs, int *scope) {
+    Ren r = { lv, k, depth, id, 0, 0 };
+    body = ren_vars(body, &r, 0);
+    *occurs = r.occurs; *scope = r.scope;
+    return body;
+}
 /* Miller pattern unification: the spine must be a pattern (see pattern_spine), the other side is quoted and its free variables renamed to
    the spine's binders; the meta occurring in it is refused, a free variable outside the spine postpones the constraint; anything that is
    not a pattern is postponed. The solution is then the most general one. */
-int unify_meta(int depth, Val *m, Val *other) {
-    int k = m->args.n; int *lv = xalloc((k + 1) * sizeof(int)), *isi = xalloc((k + 1) * sizeof(int));
-    if (!pattern_spine(m, lv, isi)) { meta_postpone(depth, m, other); return 1; }
-    Term *body = quote(depth, other);
-    Ren r = { lv, k, depth, m->n, 0, 0 };
-    body = ren_vars(body, &r, 0);
-    if (r.occurs) return 0;
-    if (r.scope) { meta_postpone(depth, m, other); return 3; }   /* 3: postponed for a variable out of the spine's scope */
-    solve(m->n, body, k, isi);
-    return 1;
-}
+/* unify_meta is the machine's (eval.c) */
 void meta_drop_last_post(void) { if (nposts > 0) nposts--; }
 
 static const char *vshow(int depth, Val *v, const char **names, int nnames) {

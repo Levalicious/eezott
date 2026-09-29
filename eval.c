@@ -17,6 +17,7 @@
  * Agda reducer (see Programs/Reference/agda).
  */
 #include "tt.h"
+#include <stdint.h>
 
 Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
@@ -865,6 +866,9 @@ static void mpush_vproj(Val *p, int which);
 static void mpush_pair_snd(Val *p);
 static void mpush_ih_apply(Native *c, Val *y);
 static void mpush_subst_env(Env *e, Env **dst, int lv, IVal s);
+static void mpush_conv(int depth, Val *a, Val *b);
+static void mpush_quote(int depth, Val *v);
+static void mpush_vsys_at(Val *sys, const Face *f);
 static void mpush_clofn(Val *(*fn)(void *, Val *), void *data, Val *arg);
 static void mpush_subst(Val *v, int lv, IVal s);
 static void mpush_restrict(Val *v, const Face *f);
@@ -2314,7 +2318,8 @@ static void vtransp_step(size_t off) {
                 F->e = NULL; for (int i = 0; i < F->res->args.n; i++) F->e = env_push(F->e, F->res->args.a[i].v);
                 for (F->j = 0; F->j < F->D->nidx; F->j++) {
                     MCALL(mpush_eval(F->e, F->C->ridx[F->j]));
-                    if (!conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v)) MRET(neu_transp(F->line, F->phi, F->u0));
+                    MCALL(mpush_conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v));
+                    if (!(int)(intptr_t)mret) MRET(neu_transp(F->line, F->phi, F->u0));
                 }
             }
             { Val *D1 = F->D1, *phi = vi(iv_or(F->psi, F->phi->iv)), *sides = F->sides, *res = F->res; MTAIL(mpush_vhcomp(D1, phi, sides, res)); }
@@ -2324,7 +2329,8 @@ static void vtransp_step(size_t off) {
         F->e = NULL; for (int i = 0; i < F->res->args.n; i++) F->e = env_push(F->e, F->res->args.a[i].v);
         for (F->j = 0; F->j < F->D->nidx; F->j++) {
             MCALL(mpush_eval(F->e, F->C->ridx[F->j]));
-            if (!conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v)) MRET(neu_transp(F->line, F->phi, F->u0));
+            MCALL(mpush_conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v));
+            if (!(int)(intptr_t)mret) MRET(neu_transp(F->line, F->phi, F->u0));
         }
     }
     MRET(F->res);
@@ -2722,47 +2728,58 @@ typedef struct { Val *v, *w; int i; } NFrame;
 static Stack nfst = { NULL, 0, 0, sizeof(NFrame) };   /* a Stack of the memory layer */
 #define nfs ((NFrame *)nfst.p)
 #define nnfs (nfst.n)
-/* force v; a constructor with arguments or a pair opens a frame (1), anything else is the result (0) */
-static int nf_open(Val *v, Val **ret) {
-    v = force(v);
+/* a forced value: a constructor with arguments or a pair opens a frame (1), anything else is a result (0) */
+static int nf_classify(Val *v) {
     Val *w;
     if (v->k == V_CON && v->args.n > 0) { w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl; }
     else if (v->k == V_PAIR) { w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; }
-    else { *ret = v; return 0; }
+    else return 0;
     NFrame fr = { v, w, 0 }; STACK_PUSH(&nfst, NFrame, fr);
     return 1;
 }
-Val *nf_force(Val *v0) {
-    size_t base = nnfs; Val *ret = NULL; int have = 0;
-    if (!nf_open(v0, &ret)) return ret;
-    while (nnfs > base) {
-        NFrame *fr = &nfs[nnfs - 1];
-        if (fr->v->k == V_CON) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
-            if (fr->i < fr->v->args.n) {
-                Arg a = fr->v->args.a[fr->i];
-                if (!a.irr) {
-                    if (!have) { if (nf_open(a.v, &ret)) continue; }
-                    a.v = ret; have = 0;
+/* the walk's frames live on nfst; the machine frame below drives it, forcing and applying through the machine */
+typedef struct { MHdr h; size_t base; Val *ret, *x; int have; Arg a; } NfF;
+static void nf_force_step(size_t off);
+static void mpush_nf_force(Val *v) { NfF *f = mpush(sizeof *f, nf_force_step); f->x = v; }
+#define F ((NfF *)(mst.p + off))
+#define TOP (&nfs[nnfs - 1])
+static void nf_force_step(size_t off) {
+    MSTART
+    F->base = nnfs;
+    MFORCE(F->x);
+    if (!nf_classify(F->x)) MRET(F->x);
+    while (nnfs > F->base) {
+        if (TOP->v->k == V_CON) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
+            if (TOP->i < TOP->v->args.n) {
+                F->a = TOP->v->args.a[TOP->i];
+                if (!F->a.irr) {
+                    if (!F->have) { F->x = F->a.v; MFORCE(F->x); if (nf_classify(F->x)) continue; F->ret = F->x; }
+                    F->a.v = F->ret; F->have = 0;
                 }
-                fr = &nfs[nnfs - 1]; fr->w = vapply_arg(fr->w, &a); fr->i++;
+                { Arg *ap = xalloc(sizeof *ap); *ap = F->a; MCALL(mpush_apply_arg(TOP->w, ap)); }
+                TOP->w = mret; TOP->i++;
                 continue;
             }
         } else {   /* a pair: its first component, then (relevant) its second */
-            if (fr->i == 0) {
-                if (!have) { if (nf_open(fr->v->a, &ret)) continue; }
-                fr = &nfs[nnfs - 1]; fr->w->a = ret; have = 0; fr->i = 1;
+            if (TOP->i == 0) {
+                if (!F->have) { F->x = TOP->v->a; MFORCE(F->x); if (nf_classify(F->x)) continue; F->ret = F->x; }
+                TOP->w->a = F->ret; F->have = 0; TOP->i = 1;
                 continue;
             }
-            if (fr->i == 1 && !fr->v->irr) {
-                if (!have) { if (nf_open(pair_snd(fr->v), &ret)) continue; }
-                fr = &nfs[nnfs - 1]; fr->w->b = ret; have = 0; fr->i = 2;
+            if (TOP->i == 1 && !TOP->v->irr) {
+                if (!F->have) { MCALL(mpush_pair_snd(TOP->v)); F->x = mret; MFORCE(F->x); if (nf_classify(F->x)) continue; F->ret = F->x; }
+                TOP->w->b = F->ret; F->have = 0; TOP->i = 2;
                 continue;
             }
         }
-        ret = fr->w; have = 1; nnfs--;   /* this frame is done: its value goes to the parent */
+        F->ret = TOP->w; F->have = 1; nnfs--;   /* this frame is done: its value goes to the parent */
     }
-    return ret;
+    MRET(F->ret);
+    MFINISH
 }
+#undef TOP
+#undef F
+Val *nf_force(Val *v0) { mpush_nf_force(v0); return mrun(); }
 /* Quoting: an explicit machine like conversion. Each node is made with its children's slots empty, and a task per
    slot fills it, in the order the recursion visited them (left to right, depth first). */
 typedef struct { int depth; Val *v; Term **dst; } QTask;
@@ -2770,10 +2787,10 @@ static Stack qst = { NULL, 0, 0, sizeof(QTask) };   /* a Stack of the memory lay
 #define qs ((QTask *)qst.p)
 #define nqs (qst.n)
 static void qpush(int depth, Val *v, Term **dst) { QTask q = { depth, v, dst }; STACK_PUSH(&qst, QTask, q); }
-static Term *quote_node(int depth, Val *v) {
+/* a node: v resolved through metas, ib its binder's body instantiated (LAM, PI, SIGMA) - both by the machine */
+static Term *quote_node(int depth, Val *v, Val *ib) {
     size_t from = nqs;
     Term *t = NULL;
-    v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
     case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
     case V_L: return quote_level(depth, v->lvl);
@@ -2781,15 +2798,13 @@ static Term *quote_node(int depth, Val *v) {
     case V_INTERVAL: return mk(T_INTERVAL);
     case V_I: return quote_iv(depth, v->iv);
     case V_LAM: {
-        Val *x = v->isi ? vivar(depth) : vvar(depth);
         t = mk(T_LAM); t->name = v->name ? v->name : "x"; t->irr = v->irr; t->isi = v->isi; t->imp = v->imp;
-        qpush(depth + 1, inst(&v->clo, x), &t->a);
+        qpush(depth + 1, ib, &t->a);
         break;
     }
     case V_PI: {
-        Val *x = v->isi ? vivar(depth) : vvar(depth);
         t = mk(T_PI); t->name = v->name ? v->name : "_"; t->irr = v->irr; t->isi = v->isi; t->imp = v->imp;
-        qpush(depth, v->dom, &t->a); qpush(depth + 1, inst(&v->clo, x), &t->b);
+        qpush(depth, v->dom, &t->a); qpush(depth + 1, ib, &t->b);
         break;
     }
     case V_PATHP: t = mk_term(T_PATHP, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); qpush(depth, v->c, &t->c); break;
@@ -2798,7 +2813,7 @@ static Term *quote_node(int depth, Val *v) {
     case V_INS: t = mk_term(T_INS, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); break;
     case V_SIGMA:
         t = mk_term(T_SIGMA, NULL, NULL, NULL, NULL); t->name = v->name ? v->name : "_"; t->irr = v->irr;
-        qpush(depth, v->dom, &t->a); qpush(depth + 1, inst(&v->clo, vvar(depth)), &t->b);
+        qpush(depth, v->dom, &t->a); qpush(depth + 1, ib, &t->b);
         break;
     case V_PAIR:   /* an irrelevant component is elided from the normal form */
         t = mk_term(T_PAIR, NULL, v->irr ? mk_term(T_IRR, NULL, NULL, NULL, NULL) : NULL, NULL, NULL); t->irr = v->irr; t->n = v->n;
@@ -2841,12 +2856,33 @@ static Term *quote_node(int depth, Val *v) {
     if (nqs > from) for (size_t i = from, j = nqs - 1; i < j; i++, j--) { QTask x = qs[i]; qs[i] = qs[j]; qs[j] = x; }
     return t;
 }
-Term *quote(int depth, Val *v) {
-    Term *root = NULL; size_t base = nqs;
-    qpush(depth, v, &root);
-    while (nqs > base) { QTask q = qs[--nqs]; *q.dst = quote_node(q.depth, q.v); }
-    return root;
+/* the task loop, driven by a machine frame: a task's value resolved through metas and its binder instantiated by
+   the machine, then its node built (and its children's tasks pushed); the root is a heap cell, never the frame */
+typedef struct { MHdr h; size_t base; Term **root; QTask q; Val *v, *ib; } QuoteF;
+static void quote_step(size_t off);
+static void mpush_quote(int depth, Val *v) {
+    QuoteF *f = mpush(sizeof *f, quote_step);
+    f->root = xalloc(sizeof *f->root); *f->root = NULL; f->base = nqs;
+    qpush(depth, v, f->root);
 }
+#define F ((QuoteF *)(mst.p + off))
+static void quote_step(size_t off) {
+    MSTART
+    while (nqs > F->base) {
+        F->q = qs[--nqs];
+        F->v = F->q.v; MFMETA(F->v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
+        F->ib = NULL;
+        if (F->v->k == V_LAM || F->v->k == V_PI || F->v->k == V_SIGMA) {
+            Val *x = F->v->k == V_SIGMA ? vvar(F->q.depth) : F->v->isi ? vivar(F->q.depth) : vvar(F->q.depth);
+            MCALL(mpush_inst(&F->v->clo, x)); F->ib = mret;
+        }
+        *F->q.dst = quote_node(F->q.depth, F->v, F->ib);
+    }
+    mret = (Val *)(void *)*F->root; mpop(off); return;
+    MFINISH
+}
+#undef F
+Term *quote(int depth, Val *v) { mpush_quote(depth, v); return (Term *)(void *)mrun(); }
 int val_mentions_ivar(int depth, Val *v, int level) { return term_mentions_var(quote(depth, v), depth - 1 - level); }
 
 /* ---- conversion ----
@@ -2897,44 +2933,84 @@ static int push_sys(int depth, Val *a, Val *b) {
 }
 /* the levels of two occurrences of a global agree (only polymorphic globals take one) */
 static int lvl_conv(TKind k, int id, LVal a, LVal b) { return !ref_poly(k, id) || lv_enforce_eq(a, b) == 1; }
+/* integer results through the machine's register */
+#define MRETI(n) MRET((Val *)(intptr_t)(n))
+#define MINT() ((int)(intptr_t)mret)
+
+/* Miller pattern unification: the spine must be a pattern (meta_pattern_arg, each argument forced by the machine), the
+   other side is quoted and its free variables renamed to the spine's binders; the meta occurring in it is refused, a
+   free variable outside the spine postpones the constraint; anything that is not a pattern is postponed. The solution
+   is then the most general one. 1 solved or postponed, 3 postponed for a variable out of scope, 0 refused. */
+typedef struct { MHdr h; int depth, k, i; Val *m, *other, *x; int *lv, *isi; Term *solt; } UnifyF;
+static void unify_step(size_t off);
+static void mpush_unify(int depth, Val *m, Val *other) { UnifyF *f = mpush(sizeof *f, unify_step); f->depth = depth; f->m = m; f->other = other; }
+#define F ((UnifyF *)(mst.p + off))
+static void unify_step(size_t off) {
+    MSTART
+    F->k = F->m->args.n; F->lv = xalloc((F->k + 1) * sizeof(int)); F->isi = xalloc((F->k + 1) * sizeof(int));
+    for (F->i = 0; F->i < F->k; F->i++) {
+        { Arg *a = &F->m->args.a[F->i]; if (a->proj || a->papp) { meta_postpone(F->depth, F->m, F->other); MRETI(1); } }
+        F->x = F->m->args.a[F->i].v; MFORCE(F->x);
+        if (!meta_pattern_arg(F->m, F->i, F->x, F->lv, F->isi)) { meta_postpone(F->depth, F->m, F->other); MRETI(1); }
+    }
+    MCALL(mpush_quote(F->depth, F->other));
+    { Term *body = (Term *)(void *)mret; int occurs, scope;
+      body = meta_rename(body, F->lv, F->k, F->depth, F->m->n, &occurs, &scope);
+      if (occurs) MRETI(0);
+      if (scope) { meta_postpone(F->depth, F->m, F->other); MRETI(3); }
+      F->solt = meta_solution_term(body, F->k, F->isi); }
+    MCALL(mpush_eval(NULL, F->solt));
+    meta_record(F->m->n, F->solt, mret);
+    MRETI(1);
+    MFINISH
+}
+#undef F
+int unify_meta(int depth, Val *m, Val *other) { mpush_unify(depth, m, other); return (int)(intptr_t)mrun(); }
+
 /* one step on a goal: 1 proved, 0 refuted, 2 its subgoals pushed. skip: the head phase is done (a fallback found
-   nothing left to unfold) */
-static int conv_step(int depth, Val *a, Val *b, int skip) {
-    a = fmeta(a); b = fmeta(b);
+   nothing left to unfold). On the machine: its unfoldings, forcings, unifications and eta instantiations are calls. */
+typedef struct { MHdr h; int depth, skip, ad, bd, ae, be, am, r, isi; Val *a, *b, *u, *o, *x; } CstepF;
+static void conv_step_step(size_t off);
+static void mpush_conv_step(int depth, Val *a, Val *b, int skip) { CstepF *f = mpush(sizeof *f, conv_step_step); f->depth = depth; f->a = a; f->b = b; f->skip = skip; }
+#define F ((CstepF *)(mst.p + off))
+static void conv_step_step(size_t off) {
+    MSTART
+    MFMETA(F->a); MFMETA(F->b);
     /* definition applications stay rigid: the same definition compares by spine congruence, and the spine's arguments
        at .() binders (irr bit 2) are skipped - proofs differing only there are equal by construction (compareIrrelevant
        in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
-    while (!skip) {
-        int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
-        int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
+    while (!F->skip) {
+        F->ad = F->a->k == V_NEU && F->a->h == H_DEF; F->bd = F->b->k == V_NEU && F->b->h == H_DEF;
+        F->ae = F->a->k == V_NEU && F->a->h == H_ELIM && F->a->defer; F->be = F->b->k == V_NEU && F->b->h == H_ELIM && F->b->defer;
         /* a metavariable is solved by the other side as written - a rigid definition application, a deferred
            elimination - so the solution is the term the user wrote (M19). Only when that postpones for a variable
            out of the spine's scope is the other side unfolded and the constraint tried again: a definition may
            drop the variable, and that solution was found before. */
-        { int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
-          if ((am || bm) && !(am && bm)) {
-              Val *o = am ? b : a, *mv = am ? a : b;
-              int r = unify_meta(depth, mv, o);
-              if (r == 1) return 1;
-              /* r is 0 (the meta occurs in the side as written) or 3 (postponed for a variable outside the spine):
-                 either may vanish when that side is unfolded - a definition may drop the argument or the variable -
-                 so it is unfolded one step and the constraint tried again. Nothing left to unfold: an occurrence
-                 is the failure it is, a scope postponement stays. */
-              Val *u = o;
-              if (o->k == V_NEU && o->h == H_DEF) u = fmeta(unfold_def(o));
-              else if (o->k == V_NEU && o->h == H_ELIM && o->defer) u = fmeta(elim_force(o));
-              if (u == o) return r == 3;
-              if (r == 3) meta_drop_last_post();
-              if (am) b = u; else a = u;
-              continue;
-          }
-          if (am && bm) break; }
-        if (ad && bd) {
+        { int am = F->a->k == V_NEU && F->a->h == H_META, bm = F->b->k == V_NEU && F->b->h == H_META;
+          if (am && bm) break;
+          F->am = am;
+          if (!am && !bm) goto no_meta; }
+        F->o = F->am ? F->b : F->a;
+        MCALL(mpush_unify(F->depth, F->am ? F->a : F->b, F->o)); F->r = MINT();
+        if (F->r == 1) MRETI(1);
+        /* r is 0 (the meta occurs in the side as written) or 3 (postponed for a variable outside the spine):
+           either may vanish when that side is unfolded - a definition may drop the argument or the variable -
+           so it is unfolded one step and the constraint tried again. Nothing left to unfold: an occurrence
+           is the failure it is, a scope postponement stays. */
+        F->u = F->o;
+        if (F->o->k == V_NEU && F->o->h == H_DEF) { MCALL(mpush_unfold_def(F->o)); F->u = mret; MFMETA(F->u); }
+        else if (F->o->k == V_NEU && F->o->h == H_ELIM && F->o->defer) { MCALL(mpush_elim_force(F->o)); F->u = mret; MFMETA(F->u); }
+        if (F->u == F->o) MRETI(F->r == 3);
+        if (F->r == 3) meta_drop_last_post();
+        if (F->am) F->b = F->u; else F->a = F->u;
+        continue;
+    no_meta:
+        if (F->ad && F->bd) {
             /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence;
                speculative: on failure everything it did is rolled back and both sides unfold (FB_DEF) */
-            if (a->n == b->n && a->args.n == b->args.n) {
+            if (F->a->n == F->b->n && F->a->args.n == F->b->args.n) {
                 LMark lm = lstore_mark(); MMark mm = meta_mark();
-                if (lvl_conv(T_DEF, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_DEF, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                if (lvl_conv(T_DEF, F->a->n, F->a->lvl, F->b->lvl)) { spec_open(lm, mm, FB_DEF, F->depth, F->a, F->b); MRETI(push_spine(F->depth, &F->a->args, &F->b->args)); }
                 lstore_rollback(lm); meta_rollback(mm);
             }
             /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
@@ -2942,149 +3018,185 @@ static int conv_step(int depth, Val *a, Val *b, int skip) {
                then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
                a literal fuel, say - and the comparison walks that body's closures (Bug_Eezott_ConvUnfoldsBothSides).
                A native's guard neutral unfolds to itself: it is rigid, and two of them differ by their spines. */
-            Val *ua, *ub;
-            if (a->n != b->n) {
-                if (a->n > b->n) { ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } }
-                else { ub = fmeta(unfold_def(b)); if (ub != b) { b = ub; continue; } ua = fmeta(unfold_def(a)); if (ua != a) { a = ua; continue; } }
+            if (F->a->n != F->b->n) {
+                if (F->a->n > F->b->n) {
+                    MCALL(mpush_unfold_def(F->a)); F->u = mret; MFMETA(F->u); if (F->u != F->a) { F->a = F->u; continue; }
+                    MCALL(mpush_unfold_def(F->b)); F->u = mret; MFMETA(F->u); if (F->u != F->b) { F->b = F->u; continue; }
+                } else {
+                    MCALL(mpush_unfold_def(F->b)); F->u = mret; MFMETA(F->u); if (F->u != F->b) { F->b = F->u; continue; }
+                    MCALL(mpush_unfold_def(F->a)); F->u = mret; MFMETA(F->u); if (F->u != F->a) { F->a = F->u; continue; }
+                }
                 break;
             }
-            ua = fmeta(unfold_def(a)); ub = fmeta(unfold_def(b));
-            if (ua == a && ub == b) break;
-            a = ua; b = ub; continue;
+            MCALL(mpush_unfold_def(F->a)); F->u = mret; MFMETA(F->u);
+            MCALL(mpush_unfold_def(F->b)); F->o = mret; MFMETA(F->o);
+            if (F->u == F->a && F->o == F->b) break;
+            F->a = F->u; F->b = F->o; continue;
         }
-        if (ad) { Val *u = fmeta(unfold_def(a)); if (u != a) { a = u; continue; } }
-        if (bd) { Val *u = fmeta(unfold_def(b)); if (u != b) { b = u; continue; } }
+        if (F->ad) { MCALL(mpush_unfold_def(F->a)); F->u = mret; MFMETA(F->u); if (F->u != F->a) { F->a = F->u; continue; } }
+        if (F->bd) { MCALL(mpush_unfold_def(F->b)); F->u = mret; MFMETA(F->u); if (F->u != F->b) { F->b = F->u; continue; } }
         /* deferred eliminations: the same one by spine congruence (speculative, FB_ELIM), else reduced (a stuck one
            drops its flag) */
-        if (ae && be) {
-            if (a->n == b->n && a->args.n == b->args.n) {
+        if (F->ae && F->be) {
+            if (F->a->n == F->b->n && F->a->args.n == F->b->args.n) {
                 LMark lm = lstore_mark(); MMark mm = meta_mark();
-                if (lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_ELIM, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                if (lvl_conv(T_ELIM, F->a->n, F->a->lvl, F->b->lvl)) { spec_open(lm, mm, FB_ELIM, F->depth, F->a, F->b); MRETI(push_spine(F->depth, &F->a->args, &F->b->args)); }
                 lstore_rollback(lm); meta_rollback(mm);
             }
-            a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
+            MCALL(mpush_elim_force(F->a)); F->a = mret; MFMETA(F->a);
+            MCALL(mpush_elim_force(F->b)); F->b = mret; MFMETA(F->b);
+            continue;
         }
-        if (ae) { a = fmeta(elim_force(a)); continue; }
-        if (be) { b = fmeta(elim_force(b)); continue; }
+        if (F->ae) { MCALL(mpush_elim_force(F->a)); F->a = mret; MFMETA(F->a); continue; }
+        if (F->be) { MCALL(mpush_elim_force(F->b)); F->b = mret; MFMETA(F->b); continue; }
         break;
     }
-    /* a level variable is a level value in the context and a neutral variable under a binder opened by conversion */
-    if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) return lv_enforce_eq(a->lvl, lv_var(b->n)) == 1;
-    if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) return lv_enforce_eq(b->lvl, lv_var(a->n)) == 1;
-    if (a == b) return 1;
-    {   /* a meta: solved by pattern unification, or the constraint is postponed (the same meta: its spines,
-           speculatively - on failure the constraint is postponed, FB_META) */
-        int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
-        if (am && bm && a->n == b->n) {
-            LMark lm = lstore_mark(); MMark mm = meta_mark();
-            spec_open(lm, mm, FB_META, depth, a, b);
-            return push_spine(depth, &a->args, &b->args);
-        }
-        if (am) return unify_meta(depth, a, b);
-        if (bm) return unify_meta(depth, b, a);
-    }
-    /* literals (M15): equal numbers; against constructors, one constructor at a time */
-    if (a->k == V_NUM && b->k == V_NUM) return a->n == b->n && lvl_conv(T_DATA, a->n, a->lvl, b->lvl) && bn_cmp(a->num, b->num) == 0;
-    if (a->k == V_NUM && b->k == V_CON) a = num_view(a);
-    if (b->k == V_NUM && a->k == V_CON) b = num_view(b);
-    if (a->k == V_SYS || b->k == V_SYS) return push_sys(depth, a, b);
-    if (a->k == V_LAM || b->k == V_LAM) {          /* eta */
-        int isi = (a->k == V_LAM ? a->isi : b->isi);
-        Val *x = isi ? vivar(depth) : vvar(depth);
+    { Val *a = F->a, *b = F->b; int depth = F->depth;
+      /* a level variable is a level value in the context and a neutral variable under a binder opened by conversion */
+      if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) MRETI(lv_enforce_eq(a->lvl, lv_var(b->n)) == 1);
+      if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) MRETI(lv_enforce_eq(b->lvl, lv_var(a->n)) == 1);
+      if (a == b) MRETI(1);
+      {   /* a meta: solved by pattern unification, or the constraint is postponed (the same meta: its spines,
+             speculatively - on failure the constraint is postponed, FB_META) */
+          int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
+          if (am && bm && a->n == b->n) {
+              LMark lm = lstore_mark(); MMark mm = meta_mark();
+              spec_open(lm, mm, FB_META, depth, a, b);
+              MRETI(push_spine(depth, &a->args, &b->args));
+          }
+          if (am) MTAIL(mpush_unify(depth, a, b));
+          if (bm) MTAIL(mpush_unify(depth, b, a));
+      }
+      /* literals (M15): equal numbers; against constructors, one constructor at a time */
+      if (a->k == V_NUM && b->k == V_NUM) MRETI(a->n == b->n && lvl_conv(T_DATA, a->n, a->lvl, b->lvl) && bn_cmp(a->num, b->num) == 0);
+      if (a->k == V_NUM && b->k == V_CON) F->a = a = num_view(a);
+      if (b->k == V_NUM && a->k == V_CON) F->b = b = num_view(b);
+      if (a->k == V_SYS || b->k == V_SYS) MRETI(push_sys(depth, a, b));
+      if (a->k == V_IRR || b->k == V_IRR) {
+          if (!(a->k == V_LAM || b->k == V_LAM)) die("internal: an elided irrelevant value reached conversion");
+      }
+      if (!(a->k == V_LAM || b->k == V_LAM) && !(a->k == V_PAIR || b->k == V_PAIR)) goto structural; }
+    if (F->a->k == V_LAM || F->b->k == V_LAM) {          /* eta */
+        F->isi = (F->a->k == V_LAM ? F->a->isi : F->b->isi);
+        F->x = F->isi ? vivar(F->depth) : vvar(F->depth);
         /* a neutral applied to an interval is the same application whether it was formed as a path or as a function of I */
-        Val *fa = a->k == V_LAM ? inst(&a->clo, x) : vapp(a, x, 0);
-        Val *fb = b->k == V_LAM ? inst(&b->clo, x) : vapp(b, x, 0);
-        gpush2(G_PLAIN, depth + 1, fa, fb); return 2;
+        if (F->a->k == V_LAM) MCALL(mpush_inst(&F->a->clo, F->x)); else MCALL(mpush_vapp(F->a, F->x, 0));
+        F->u = mret;
+        if (F->b->k == V_LAM) MCALL(mpush_inst(&F->b->clo, F->x)); else MCALL(mpush_vapp(F->b, F->x, 0));
+        gpush2(G_PLAIN, F->depth + 1, F->u, mret); MRETI(2);
     }
-    if (a->k == V_IRR || b->k == V_IRR) die("internal: an elided irrelevant value reached conversion");
-    if (a->k == V_PAIR || b->k == V_PAIR) {   /* eta; an irrelevant second component is not compared */
-        int irr = (a->k == V_PAIR && a->irr) || (b->k == V_PAIR && b->irr);
-        if (!irr) gpush2(G_PROJ2, depth, a, b);
-        gpush2(G_PLAIN, depth, vproj(a, 1), vproj(b, 1)); return 2;
-    }
-    if (a->k != b->k) return 0;
+    /* a pair: eta; an irrelevant second component is not compared */
+    MCALL(mpush_vproj(F->a, 1)); F->u = mret;
+    MCALL(mpush_vproj(F->b, 1));
+    { int irr = (F->a->k == V_PAIR && F->a->irr) || (F->b->k == V_PAIR && F->b->irr);
+      if (!irr) gpush2(G_PROJ2, F->depth, F->a, F->b);
+      gpush2(G_PLAIN, F->depth, F->u, mret); MRETI(2); }
+structural:
+    { Val *a = F->a, *b = F->b; int depth = F->depth;
+    if (a->k != b->k) MRETI(0);
     switch (a->k) {
-    case V_U: return a->pre == b->pre && lv_enforce_eq(a->lvl, b->lvl) == 1;
-    case V_L: return lv_enforce_eq(a->lvl, b->lvl) == 1;
-    case V_LEVEL: return 1;
+    case V_U: MRETI(a->pre == b->pre && lv_enforce_eq(a->lvl, b->lvl) == 1);
+    case V_L: MRETI(lv_enforce_eq(a->lvl, b->lvl) == 1);
+    case V_LEVEL: MRETI(1);
     case V_SIGMA: {
-        if (a->irr != b->irr) return 0;
+        if (a->irr != b->irr) MRETI(0);
         Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = 0; gpush(g);
-        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
+        gpush2(G_PLAIN, depth, a->dom, b->dom); MRETI(2);
     }
-    case V_INTERVAL: return 1;
-    case V_I: return iv_eq(a->iv, b->iv);
+    case V_INTERVAL: MRETI(1);
+    case V_I: MRETI(iv_eq(a->iv, b->iv));
     case V_PI: {
         Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = a->isi; gpush(g);
-        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
+        gpush2(G_PLAIN, depth, a->dom, b->dom); MRETI(2);
     }
     case V_PATHP: case V_SUB: case V_GLUE:
-        gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
-    case V_PARTIAL: gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
-    case V_INS: gpush2(G_PLAIN, depth, a->a, b->a); return 2;
-    case V_GLUEEL: gpush2(G_PLAIN, depth, a->a, b->a); gpush2(G_PLAIN, depth, a->b, b->b); return 2;
+        gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); MRETI(2);
+    case V_PARTIAL: gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); MRETI(2);
+    case V_INS: gpush2(G_PLAIN, depth, a->a, b->a); MRETI(2);
+    case V_GLUEEL: gpush2(G_PLAIN, depth, a->a, b->a); gpush2(G_PLAIN, depth, a->b, b->b); MRETI(2);
     case V_NEU:
-        if (a->h != b->h) return 0;
+        if (a->h != b->h) MRETI(0);
         if (a->h != H_TRANSP && a->h != H_HCOMP && a->h != H_OUTS && a->h != H_UNGLUE
-            && (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)))) return 0;   /* a variable's n is its level, not a global id */
-        if (!push_spine(depth, &a->args, &b->args)) return 0;   /* the spine after the head's own parts */
+            && (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)))) MRETI(0);   /* a variable's n is its level, not a global id */
+        if (!push_spine(depth, &a->args, &b->args)) MRETI(0);   /* the spine after the head's own parts */
         if (a->h == H_TRANSP) { gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
         else if (a->h == H_HCOMP) { gpush2(G_PLAIN, depth, a->dom, b->dom); gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
         else if (a->h == H_OUTS || a->h == H_UNGLUE) gpush2(G_PLAIN, depth, a->dom, b->dom);
-        return 2;
+        MRETI(2);
     case V_DATA: case V_CON:
-        if (!(a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl))) return 0;
-        return push_spine(depth, &a->args, &b->args);
-    default: return 0;
-    }
+        if (!(a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl))) MRETI(0);
+        MRETI(push_spine(depth, &a->args, &b->args));
+    default: MRETI(0);
+    } }
+    MFINISH
 }
-/* a speculative block failed (its marks already rolled back): its fallback */
-static int conv_resume(Goal g) {
-    switch (g.fb) {
-    case FB_DEF: {
-        Val *ua = fmeta(unfold_def(g.a)), *ub = fmeta(unfold_def(g.b));
-        if (ua == g.a && ub == g.b) return conv_step(g.depth, g.a, g.b, 1);
-        return conv_step(g.depth, ua, ub, 0);
-    }
-    case FB_ELIM: return conv_step(g.depth, fmeta(elim_force(g.a)), fmeta(elim_force(g.b)), 0);
-    case FB_META: meta_postpone(g.depth, g.a, g.b); return 1;
-    }
-    return 0;
-}
+#undef F
+
 static int conv_fail_logged;
-/* conversion is transactional: level constraints and meta solutions added by a comparison that fails are rolled back */
-int conv(int depth, Val *a, Val *b) {
-    LMark m = lstore_mark(); MMark mm = meta_mark();
-    size_t gbase = ngs, sbase = nss;
-    gpush2(G_PLAIN, depth, a, b);
-    while (ngs > gbase) {
-        Goal g = gs[--ngs];
-        int r = 0;
-        switch (g.k) {
-        case G_SPEC_END: nss--; continue;   /* the speculative spines all held: the goal that opened the block is proved */
-        case G_PLAIN: r = conv_step(g.depth, g.a, g.b, 0); break;
-        case G_PROJ2: r = conv_step(g.depth, vproj(g.a, 2), vproj(g.b, 2), 0); break;
-        case G_CLO: { Val *x = g.isi ? vivar(g.depth) : vvar(g.depth); r = conv_step(g.depth + 1, inst(&g.a->clo, x), inst(&g.b->clo, x), 0); break; }
-        case G_FACE: { Val *x = vsys_at(g.a, &g.face), *y = vsys_at(g.b, &g.face); r = x && y ? conv_step(g.depth, x, y, 0) : 0; break; }
-        case G_RESUME: r = conv_resume(g); break;
+/* conversion is transactional: level constraints and meta solutions added by a comparison that fails are rolled back.
+   The goal loop is a frame: each goal's operands (a projection, a binder's body, a face) and its step are its calls;
+   a failed speculative block resumes its fallback (unfold both, force both, postpone). */
+typedef struct { MHdr h; int depth, r; Val *a, *b, *x, *y; LMark m; MMark mm; size_t gbase, sbase; Goal g; Face *fc; } ConvF;
+static void conv_loop_step(size_t off);
+static void mpush_conv(int depth, Val *a, Val *b) { ConvF *f = mpush(sizeof *f, conv_loop_step); f->depth = depth; f->a = a; f->b = b; }
+#define F ((ConvF *)(mst.p + off))
+static void conv_loop_step(size_t off) {
+    MSTART
+    F->m = lstore_mark(); F->mm = meta_mark();
+    F->gbase = ngs; F->sbase = nss;
+    gpush2(G_PLAIN, F->depth, F->a, F->b);
+    while (ngs > F->gbase) {
+        F->g = gs[--ngs];
+        F->r = 0;
+        if (F->g.k == G_SPEC_END) { nss--; continue; }   /* the speculative spines all held: the goal that opened the block is proved */
+        if (F->g.k == G_PLAIN) { MCALL(mpush_conv_step(F->g.depth, F->g.a, F->g.b, 0)); F->r = MINT(); }
+        else if (F->g.k == G_PROJ2) {
+            MCALL(mpush_vproj(F->g.a, 2)); F->x = mret;
+            MCALL(mpush_vproj(F->g.b, 2));
+            MCALL(mpush_conv_step(F->g.depth, F->x, mret, 0)); F->r = MINT();
+        } else if (F->g.k == G_CLO) {
+            F->y = F->g.isi ? vivar(F->g.depth) : vvar(F->g.depth);
+            MCALL(mpush_inst(&F->g.a->clo, F->y)); F->x = mret;
+            MCALL(mpush_inst(&F->g.b->clo, F->y));
+            MCALL(mpush_conv_step(F->g.depth + 1, F->x, mret, 0)); F->r = MINT();
+        } else if (F->g.k == G_FACE) {
+            F->fc = xalloc(sizeof *F->fc); *F->fc = F->g.face;   /* on the heap: the restriction frames keep a pointer to it */
+            MCALL(mpush_vsys_at(F->g.a, F->fc)); F->x = mret;
+            MCALL(mpush_vsys_at(F->g.b, F->fc)); F->y = mret;
+            if (F->x && F->y) { MCALL(mpush_conv_step(F->g.depth, F->x, F->y, 0)); F->r = MINT(); }
+        } else if (F->g.k == G_RESUME) {   /* a speculative block failed (its marks already rolled back): its fallback */
+            if (F->g.fb == FB_DEF) {
+                MCALL(mpush_unfold_def(F->g.a)); F->x = mret; MFMETA(F->x);
+                MCALL(mpush_unfold_def(F->g.b)); F->y = mret; MFMETA(F->y);
+                if (F->x == F->g.a && F->y == F->g.b) MCALL(mpush_conv_step(F->g.depth, F->g.a, F->g.b, 1));
+                else MCALL(mpush_conv_step(F->g.depth, F->x, F->y, 0));
+                F->r = MINT();
+            } else if (F->g.fb == FB_ELIM) {
+                MCALL(mpush_elim_force(F->g.a)); F->x = mret; MFMETA(F->x);
+                MCALL(mpush_elim_force(F->g.b)); F->y = mret; MFMETA(F->y);
+                MCALL(mpush_conv_step(F->g.depth, F->x, F->y, 0)); F->r = MINT();
+            } else { meta_postpone(F->g.depth, F->g.a, F->g.b); F->r = 1; }
         }
-        if (r) continue;
-        if (conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE") && (g.k == G_PLAIN)) {
+        if (F->r) continue;
+        if (conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE") && (F->g.k == G_PLAIN)) {   /* a diagnostic: C quoting */
             conv_fail_logged++;
-            fprintf(stderr, "[conv] #%d depth %d goals %zu: ", conv_fail_logged, g.depth, ngs - gbase);
+            fprintf(stderr, "[conv] #%d depth %d goals %zu: ", conv_fail_logged, F->g.depth, ngs - F->gbase);
             const char *nm[2048] = {0};
-            term_print(stderr, quote(0, g.a), nm, 0); fputs("   !=   ", stderr);
-            term_print(stderr, quote(0, g.b), nm, 0); fputc('\n', stderr);
-            if ((g.a->k == V_I || g.b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
+            term_print(stderr, quote(0, F->g.a), nm, 0); fputs("   !=   ", stderr);
+            term_print(stderr, quote(0, F->g.b), nm, 0); fputc('\n', stderr);
+            if ((F->g.a->k == V_I || F->g.b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
         }
-        if (nss > sbase) {   /* recovered: roll the innermost speculative block back and take its fallback */
-            Spec s = ss[--nss];
-            lstore_rollback(s.lm); meta_rollback(s.mm); ngs = s.height;
-            Goal rg = {0}; rg.k = G_RESUME; rg.fb = s.fb; rg.depth = s.depth; rg.a = s.a; rg.b = s.b; gpush(rg);
+        if (nss > F->sbase) {   /* recovered: roll the innermost speculative block back and take its fallback */
+            Spec sp = ss[--nss];
+            lstore_rollback(sp.lm); meta_rollback(sp.mm); ngs = sp.height;
+            Goal rg = {0}; rg.k = G_RESUME; rg.fb = sp.fb; rg.depth = sp.depth; rg.a = sp.a; rg.b = sp.b; gpush(rg);
             continue;
         }
-        ngs = gbase; nss = sbase; lstore_rollback(m); meta_rollback(mm);
-        return 0;
+        ngs = F->gbase; nss = F->sbase; lstore_rollback(F->m); meta_rollback(F->mm);
+        MRETI(0);
     }
-    return 1;
+    MRETI(1);
+    MFINISH
 }
+#undef F
+int conv(int depth, Val *a, Val *b) { mpush_conv(depth, a, b); return (int)(intptr_t)mrun(); }

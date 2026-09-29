@@ -313,6 +313,10 @@ MMark meta_mark(void); void meta_rollback(MMark m);
 int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 3 if postponed for a variable out of scope, 0 if refused (the meta occurs) */
 void meta_drop_last_post(void);                  /* undo the postponement unify_meta just made */
 void meta_postpone(int depth, Val *a, Val *b);
+int meta_pattern_arg(Val *m, int i, Val *x, int *lv, int *isi);   /* the machine's unification (eval.c) uses these */
+Term *meta_solution_term(Term *body, int k, int *isi);
+void meta_record(int id, Term *solt, Val *sol);
+Term *meta_rename(Term *body, int *lv, int k, int depth, int id, int *occurs, int *scope);
 void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
 int metas_retry(void);                       /* retry them without dying: 1 if none remain (the erasure's law matching) */
 int meta_solved(int id);
