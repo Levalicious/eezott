@@ -62,9 +62,9 @@ EEZOC="${EEZOC:-$WS/eezoc/eezoc}"
 runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
     local f="$1" label="$2" mty nf want show width
     case "$label" in unerasable/*) return 0;; esac   # refused at erasure by design (the gate checks that): no run-time value to observe
-    mty=$("$EEZOTT" -c -t main -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$f" 2>&1 | sed -n 's/^main : //p' | head -1)
+    mty=$( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOTT" -c -t main -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$f" 2>&1 | sed -n 's/^main : //p' | head -1)   # capped like every leg: a normal form may need more memory than the machine has
     case "$mty" in Nat) show=showNat; width=64;; Bool) show=showBool; width=1;; *) return 0;; esac
-    nf=$("$EEZOTT" -c -n main -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$f" 2>&1 | sed -n 's/^main = //p' | head -1)
+    nf=$( ulimit -v ${FUZZ_ULIMIT_KB:-4000000}; timeout 120 "$EEZOTT" -c -n main -p "$LIB/prelude.tt" -p "$LIB/num.tt" -L "$LIB" "$f" 2>&1 | sed -n 's/^main = //p' | head -1)
     case "$mty" in
         Nat) [[ "$nf" =~ ^[0-9]+$ ]] || return 0; want=$(printf '%*s' $width "$nf" | tr ' ' 0);;
         Bool) case "$nf" in true) want=t;; false) want=f;; *) return 0;; esac;;
