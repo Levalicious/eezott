@@ -24,8 +24,9 @@ static char *slurp(FILE *f) {
 
 /* ---- imports (M16b): '#import NAME' loads NAME.tt once, depth-first, each file parsed on its own ---- */
 #include <unistd.h>
-static const char *libdirs[32]; static int nlibdirs;
-static char *loaded[256]; static int nloaded;
+/* the -L directories and the files loaded so far: Stacks of the memory layer (libeezo/mem.h), any number of either */
+static Stack libdirs = { NULL, 0, 0, sizeof(const char *) };
+static Stack loaded = { NULL, 0, 0, sizeof(char *) };
 static SDecl *decls_head, **decls_tail = &decls_head;
 
 static char *read_path(const char *path) {
@@ -38,9 +39,9 @@ static char *dir_of(const char *path) {
     char *d = xalloc((size_t)(slash - path) + 2); memcpy(d, path, (size_t)(slash - path) + 1); return d;
 }
 static char *resolve_import(const char *from, const char *name) {
-    char *cands[40]; int n = 0;
+    char **cands = xalloc((libdirs.n + 4) * sizeof(char *)); int n = 0;
     if (from) cands[n++] = xsprintf("%s%s.tt", dir_of(from), name);
-    for (int i = 0; i < nlibdirs; i++) cands[n++] = xsprintf("%s/%s.tt", libdirs[i], name);
+    for (size_t i = 0; i < libdirs.n; i++) cands[n++] = xsprintf("%s/%s.tt", STACK_AT(&libdirs, const char *, i), name);
     const char *env = getenv("EEZOTT_LIB"); if (env && *env) cands[n++] = xsprintf("%s/%s.tt", env, name);
     char exe[4096]; ssize_t k = readlink("/proc/self/exe", exe, sizeof exe - 1);
     if (k > 0) { exe[k] = 0; cands[n++] = xsprintf("%s../stdlib/tt/%s.tt", dir_of(exe), name); }
@@ -50,9 +51,8 @@ static char *resolve_import(const char *from, const char *name) {
 }
 static void load_source(char *src, const char *path);
 static void load_file(const char *path) {
-    for (int i = 0; i < nloaded; i++) if (!strcmp(loaded[i], path)) return;
-    if (nloaded == 256) die("too many imported files");
-    loaded[nloaded++] = xstrdup(path);
+    for (size_t i = 0; i < loaded.n; i++) if (!strcmp(STACK_AT(&loaded, char *, i), path)) return;
+    STACK_PUSH(&loaded, char *, xstrdup(path));
     char *src = read_path(path); if (!src) die("cannot open %s", path);
     load_source(src, path);
 }
@@ -92,9 +92,10 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    char base; stack_base = &base;   /* the stack guard's reference frame (eval.c) */
     int check_only = 0, agda = 0, ctt = 0; const char *fname = NULL, *show = NULL, *nf = NULL;
-    const char *preludes[32]; int npreludes = 0;
+    Stack preludes = STACK_INIT(const char *);
+    mem_init("eezott", "EEZOTT_MAX_ALLOC");   /* the one memory layer (libeezo/mem.h): its failure path and budget */
+    mem_on_die(resource_diagnostics);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
         else if (!strcmp(argv[i], "-c")) check_only = 1;
@@ -105,12 +106,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-I")) stream_main = 1;
         else if (!strcmp(argv[i], "-n")) { if (++i >= argc) { usage(argv[0]); return 1; } nf = argv[i]; }
         else if (!strcmp(argv[i], "-t")) { if (++i >= argc) { usage(argv[0]); return 1; } show = argv[i]; }
-        else if (!strcmp(argv[i], "-L")) { if (++i >= argc || nlibdirs == 32) { usage(argv[0]); return 1; } libdirs[nlibdirs++] = argv[i]; }
-        else if (!strcmp(argv[i], "-p")) { if (++i >= argc || npreludes == 32) { usage(argv[0]); return 1; } preludes[npreludes++] = argv[i]; }
+        else if (!strcmp(argv[i], "-L")) { if (++i >= argc) { usage(argv[0]); return 1; } STACK_PUSH(&libdirs, const char *, argv[i]); }
+        else if (!strcmp(argv[i], "-p")) { if (++i >= argc) { usage(argv[0]); return 1; } STACK_PUSH(&preludes, const char *, argv[i]); }
         else if (argv[i][0] == '-' && argv[i][1]) { fprintf(stderr, "unknown option %s\n", argv[i]); usage(argv[0]); return 1; }
         else fname = argv[i];
     }
-    for (int i = 0; i < npreludes; i++) load_file(preludes[i]);
+    for (size_t i = 0; i < preludes.n; i++) load_file(STACK_AT(&preludes, const char *, i));
     int nprelude = 0;   /* declarations (data members counted singly) the preludes contribute: the program's own start after them */
     for (SDecl *d = decls_head; d; d = d->next) nprelude += d->isdata == 2 ? d->nmembers : 1;
     if (fname) load_file(fname);

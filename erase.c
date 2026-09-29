@@ -827,7 +827,7 @@ static void find_representation(int d, int zi, int si, int equiv_def) {
     Match m; int n = match_laws(tapp(tapp(tref(T_DEF, equiv_def), D), tm(mR)), mR, 1, &m);
     if (n == 0) return;   /* no equivalence in scope: the type runs as itself */
     if (n > 1) die("%s has two run-time representations in scope, %s and %s: one is needed", datas[d].name, defs[m.def2].name, defs[m.def].name);
-    reps = realloc(reps, (nreps + 1) * sizeof(Rep)); if (!reps) die_resource("out of memory");
+    reps = rrealloc(reps, (nreps + 1) * sizeof(Rep));
     Rep *r = &reps[nreps++]; memset(r, 0, sizeof *r);
     r->d = d; r->zi = zi; r->si = si; r->equiv = m.def; r->R = m.sol[0];
     /* the successor's law binds the value map g: (y : R) -> Path d (g (s y)) (suc (g y)) */

@@ -62,14 +62,13 @@
 #include <limits.h>
 #include "../libeezo/types.h"
 #include "../libeezo/bn.h"
+#include "../libeezo/mem.h"
 
 void *xalloc(size_t n);
 char *xstrdup(const char *s);
 char *xsprintf(const char *fmt, ...);
 void die(const char *fmt, ...);
-void die_resource(const char *fmt, ...);   /* resource abort: 'resource limit: ...', exit 70 */
-extern char *stack_base;                    /* main's frame: the structural walks measure their recursion against the stack limit */
-void stack_guard(const char *what);         /* a resource abort when the caller is within a margin of the C stack's soft limit */
+void resource_diagnostics(void);           /* printed before the memory layer's resource abort (libeezo/mem.h) */
 
 /* ---------------- surface syntax ---------------- */
 

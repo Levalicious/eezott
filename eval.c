@@ -17,57 +17,23 @@
  * Agda reducer (see Programs/Reference/agda).
  */
 #include "tt.h"
-#include <sys/resource.h>
 
 Def *defs; int ndefs; Data *datas; int ndatas; Con *cons; int ncons;
 static LVal elim_lvl;   /* the level of the eliminator being reduced (set by vapp) */
 
 /* ---- memory / errors ---- */
 void unfold_counts_report(void); void fallback_report(void);
-void die_resource(const char *fmt, ...) {
-    unfold_counts_report(); fallback_report();
-    va_list ap;
-    fflush(stdout);
-    fputs("eezott: resource limit: ", stderr);
-    va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
-    fputc('\n', stderr);
-    exit(70);
-}
-/* The C stack. The structural walks - nf_force, quote, term_print - recurse once per constructor, so a normal form the size of a
-   literal (double 2^64, built by suc (suc ih)) runs the stack out long before anything can report it: eezott -n main segfaulted
-   87205 frames deep, inside the tripwire's own diagnostic (M20 found it). main records its frame; the walkers measure their
-   distance from it against the soft limit less a margin, and abort as a resource limit, the way the tripwire does. */
-char *stack_base;
-static size_t stack_budget;
-void stack_guard(const char *what) {
-    char here;
-    if (!stack_base) return;
-    if (!stack_budget) {
-        struct rlimit rl; size_t lim = (size_t)8 << 20;
-        if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) lim = rl.rlim_cur;
-        stack_budget = lim > ((size_t)2 << 20) ? lim - ((size_t)1 << 20) : lim / 2;
-    }
-    size_t used = (size_t)(stack_base - &here);
-    if (used > stack_budget) die_resource("%s recursed %zu MB deep on the C stack: a normal form the size of a literal (work proportional to it)", what, used >> 20);
-}
+/* the resource abort is the memory layer's (libeezo/mem.h); these diagnostics run first (main registers them) */
+void resource_diagnostics(void) { unfold_counts_report(); fallback_report(); }
 
 /* A memo entry stays valid across metas generations iff nothing inside it was blocked on an unsolved meta: resolving one
    can resume a reduction the entry took as neutral. A missed entry is merely slow, so this is set conservatively -
    every place that hands back a neutral where a decision was possible marks it, meta or not. */
 static int meta_blocked;
-static u64 alloc_total, alloc_limit;
-void *xalloc(size_t n) {
-    if (!alloc_limit) {   /* off unless the harness asks: the budget is the harness's cap, not the theory's */
-        const char *e = getenv("EEZOTT_MAX_ALLOC");
-        alloc_limit = e ? strtoull(e, NULL, 0) : (u64)-1;
-    }
-    alloc_total += n ? n : 1;
-    if (alloc_total > alloc_limit)
-        die_resource("allocated over %llu bytes (EEZOTT_MAX_ALLOC)", (unsigned long long)alloc_limit);
-    void *p = calloc(1, n ? n : 1);
-    if (!p) die_resource("out of memory");
-    return p;
-}
+/* The checker's values, terms, environments ... live for the run: one arena of the memory layer (libeezo/mem.h),
+   zeroed; its budget is the layer's (EEZOTT_MAX_ALLOC, set in main - the harness's cap, not the theory's) */
+static Arena tt_arena;
+void *xalloc(size_t n) { return arena_alloc(&tt_arena, n); }
 char *xstrdup(const char *s) { size_t n = strlen(s) + 1; char *p = xalloc(n); memcpy(p, s, n); return p; }
 char *xsprintf(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int n = vsnprintf(NULL, 0, fmt, ap); va_end(ap);
@@ -329,7 +295,6 @@ static int numeral_of(Term *t, unsigned long long *out) {
     if (t->n != zi) return 0;
     *out = n; return 1;
 }
-static void tp(FILE *f, Term *t, const char **names, int depth, int prec);
 /* a level value: the hidden level reads as its offset alone (U n, f^n), others as lmax of lsuc^n applied to names */
 static void lv_tp(FILE *f, LVal l, const char **names, int depth, int prec) {
     int hn;
@@ -348,130 +313,167 @@ static void lv_tp(FILE *f, LVal l, const char **names, int depth, int prec) {
     if (l.c > 0 || l.n == 0) fprintf(f, "%d", l.c);
     if (ns > 1 && prec > 0) fputc(')', f);
 }
-static void ref_lvl_tp(FILE *f, Term *t, const char **names, int depth) {
+/* ---- printing ----
+   An explicit machine, not C recursion: the pieces still to print - terms, strings, binder names to bring into scope -
+   sit on a heap stack in output order, and the binder names in scope live in a table that grows with the depth (the
+   caller's names seed it), so a term prints however deep it is. */
+typedef enum { PT_TERM, PT_STR, PT_NAME } PKind;
+typedef struct { PKind k; Term *t; int depth, prec; const char *s; } PItem;
+static Stack pst = { NULL, 0, 0, sizeof(PItem) };   /* a Stack of the memory layer (libeezo/mem.h) */
+#define ps ((PItem *)pst.p)
+#define nps (pst.n)
+static const char **pn; static int pncap;
+static void ppush(PKind k, Term *t, int depth, int prec, const char *str) {
+    PItem it = { k, t, depth, prec, str }; STACK_PUSH(&pst, PItem, it);
+}
+static void pn_set(int d, const char *s) {
+    if (d >= pncap) { int nc = pncap ? pncap : 256; while (nc <= d) nc *= 2; pn = rrealloc(pn, (size_t)nc * sizeof(char *)); memset(pn + pncap, 0, (size_t)(nc - pncap) * sizeof(char *)); pncap = nc; }
+    pn[d] = s;
+}
+#define PT(t_, d_, p_) ppush(PT_TERM, (t_), (d_), (p_), NULL)
+#define PS(s_) ppush(PT_STR, NULL, 0, 0, (s_))
+#define PN(d_, s_) ppush(PT_NAME, NULL, (d_), 0, (s_))
+/* a global's level: the hidden level + n reads as ^n */
+static void ref_lvl_push(FILE *f, Term *t, int depth) {
     int hn;
     if (!t->a) return;
-    if (t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) fprintf(f, "^%d", hn); return; }
-    fputs("^{", f); tp(f, t->a, names, depth, 0); fputc('}', f);
+    if (t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) { char *b = xalloc(24); snprintf(b, 24, "^%d", hn); PS(b); } return; }
+    PS("^{"); PT(t->a, depth, 0); PS("}");
 }
-static void tp(FILE *f, Term *t, const char **names, int depth, int prec) {
-    stack_guard("term_print");
+/* one term: a leaf is printed at once; otherwise its pieces are pushed in output order (then reversed onto the stack) */
+static void tp_node(FILE *f, Term *t, int depth, int prec) {
     unsigned long long num;
     if ((t->k == T_APP || t->k == T_CON) && numeral_of(t, &num)) { fprintf(f, "%llu", num); return; }
+    size_t from = nps;
     switch (t->k) {
     case T_VAR: {
         int lvl = depth - 1 - t->n;
-        if (lvl >= 0 && lvl < depth && names[lvl]) fprintf(f, "%s", names[lvl]); else fprintf(f, "#%d", t->n);
-        break; }
+        if (lvl >= 0 && lvl < depth && lvl < pncap && pn[lvl]) fprintf(f, "%s", pn[lvl]); else fprintf(f, "#%d", t->n);
+        return; }
     case T_U: {
         int hn;
         fputs(t->pre ? "Pre" : "U", f);
-        if (t->a && t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) fprintf(f, " %d", hn); }   /* the hidden level + n reads as U n */
-        else if (t->a) { fputs(" {", f); tp(f, t->a, names, depth, 0); fputc('}', f); }
-        else if (t->n) fprintf(f, " %d", t->n);
-        break; }
-    case T_LEVEL: fputs("Level", f); break;
-    case T_LZERO: fprintf(f, "%d", t->n); break;
-    case T_LMETA: fprintf(f, "?%d", t->n); break;
-    case T_META: fprintf(f, "?%d", t->n); break;
+        if (t->a && t->a->k == T_LVAL && lv_is_hidden_plus(t->a->lvl, &hn)) { if (hn) fprintf(f, " %d", hn); return; }   /* the hidden level + n reads as U n */
+        if (t->a) { PS(" {"); PT(t->a, depth, 0); PS("}"); break; }
+        if (t->n) fprintf(f, " %d", t->n);
+        return; }
+    case T_LEVEL: fputs("Level", f); return;
+    case T_LZERO: fprintf(f, "%d", t->n); return;
+    case T_LMETA: fprintf(f, "?%d", t->n); return;
+    case T_META: fprintf(f, "?%d", t->n); return;
     case T_LSUC: {
         int atom = t->a->k == T_VAR || t->a->k == T_LZERO;
-        if (prec > 1) fputc('(', f);
-        for (int i = 0; i < t->n; i++) fputs(i + 1 < t->n || !atom ? "lsuc (" : "lsuc ", f);
-        tp(f, t->a, names, depth, 0);
-        for (int i = 0; i < t->n; i++) if (i + 1 < t->n || !atom) fputc(')', f);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        for (int i = 0; i < t->n; i++) PS(i + 1 < t->n || !atom ? "lsuc (" : "lsuc ");
+        PT(t->a, depth, 0);
+        for (int i = 0; i < t->n; i++) if (i + 1 < t->n || !atom) PS(")");
+        if (prec > 1) PS(")");
         break; }
-    case T_LMAX: if (prec > 0) fputc('(', f); fputs("lmax ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); if (prec > 0) fputc(')', f); break;
-    case T_DEF: fprintf(f, "%s", defs[t->n].name); ref_lvl_tp(f, t, names, depth); break;
-    case T_DATA: fprintf(f, "%s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
-    case T_CON: fprintf(f, "%s", cons[t->n].name); ref_lvl_tp(f, t, names, depth); break;
-    case T_NUM: { char *s = bn_to_dec(t->num); fputs(s, f); free(s); break; }
-    case T_IRR: fputc('.', f); break;
-    case T_ELIM: fprintf(f, "elim %s", datas[t->n].name); ref_lvl_tp(f, t, names, depth); break;
-    case T_LVAL: lv_tp(f, t->lvl, names, depth, prec); break;
-    case T_INTERVAL: fputs("I", f); break;
-    case T_I0: fputs("i0", f); break;
-    case T_I1: fputs("i1", f); break;
-    case T_INEG: fputs("~ ", f); tp(f, t->a, names, depth, 3); break;
-    case T_IAND: if (prec > 0) fputc('(', f); tp(f, t->a, names, depth, 1); fputs(" /\\ ", f); tp(f, t->b, names, depth, 1); if (prec > 0) fputc(')', f); break;
-    case T_IOR:  if (prec > 0) fputc('(', f); tp(f, t->a, names, depth, 1); fputs(" \\/ ", f); tp(f, t->b, names, depth, 1); if (prec > 0) fputc(')', f); break;
+    case T_LMAX: if (prec > 0) PS("("); PS("lmax "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); if (prec > 0) PS(")"); break;
+    case T_DEF: PS(defs[t->n].name); ref_lvl_push(f, t, depth); break;
+    case T_DATA: PS(datas[t->n].name); ref_lvl_push(f, t, depth); break;
+    case T_CON: PS(cons[t->n].name); ref_lvl_push(f, t, depth); break;
+    case T_NUM: { char *str = bn_to_dec(t->num); fputs(str, f); free(str); return; }
+    case T_IRR: fputc('.', f); return;
+    case T_ELIM: PS("elim "); PS(datas[t->n].name); ref_lvl_push(f, t, depth); break;
+    case T_LVAL: lv_tp(f, t->lvl, pn, depth < pncap ? depth : pncap, prec); return;
+    case T_INTERVAL: fputs("I", f); return;
+    case T_I0: fputs("i0", f); return;
+    case T_I1: fputs("i1", f); return;
+    case T_INEG: PS("~ "); PT(t->a, depth, 3); break;
+    case T_IAND: if (prec > 0) PS("("); PT(t->a, depth, 1); PS(" /\\ "); PT(t->b, depth, 1); if (prec > 0) PS(")"); break;
+    case T_IOR:  if (prec > 0) PS("("); PT(t->a, depth, 1); PS(" \\/ "); PT(t->b, depth, 1); if (prec > 0) PS(")"); break;
     case T_PI: {
-        if (prec > 0) fputc('(', f);
+        if (prec > 0) PS("(");
         const char *nm = t->name && strcmp(t->name, "_") ? t->name : NULL;
-        if (nm) { fprintf(f, t->imp ? "{%s : " : (t->irr & 2) ? ".(%s : " : "(%s : ", nm); tp(f, t->a, names, depth, 0); fputs(t->imp ? "} -> " : ") -> ", f); }
-        else { tp(f, t->a, names, depth, 1); fprintf(f, " -> "); }
-        names[depth] = nm ? nm : "_"; tp(f, t->b, names, depth + 1, 0);
-        if (prec > 0) fputc(')', f);
+        if (nm) { PS(t->imp ? "{" : (t->irr & 2) ? ".(" : "("); PS(nm); PS(" : "); PT(t->a, depth, 0); PS(t->imp ? "} -> " : ") -> "); }
+        else { PT(t->a, depth, 1); PS(" -> "); }
+        PN(depth, nm ? nm : "_"); PT(t->b, depth + 1, 0);
+        if (prec > 0) PS(")");
         break; }
     case T_SIGMA: {
-        if (prec > 1) fputc('(', f);
-        fprintf(f, "Sigma "); tp(f, t->a, names, depth, 2); fprintf(f, " (\\%s -> ", t->name ? t->name : "_");
-        names[depth] = t->name ? t->name : "_"; tp(f, t->b, names, depth + 1, 0); fputc(')', f);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("Sigma "); PT(t->a, depth, 2); PS(" (\\"); PS(t->name ? t->name : "_"); PS(" -> ");
+        PN(depth, t->name ? t->name : "_"); PT(t->b, depth + 1, 0); PS(")");
+        if (prec > 1) PS(")");
         break; }
-    case T_PAIR: fputc('(', f); tp(f, t->a, names, depth, 0); fputs(" , ", f); tp(f, t->b, names, depth, 0); fputc(')', f); break;
-    case T_FST: if (prec > 1) fputc('(', f); fputs("fst ", f); tp(f, t->a, names, depth, 2); if (prec > 1) fputc(')', f); break;
+    case T_PAIR: PS("("); PT(t->a, depth, 0); PS(" , "); PT(t->b, depth, 0); PS(")"); break;
+    case T_FST: if (prec > 1) PS("("); PS("fst "); PT(t->a, depth, 2); if (prec > 1) PS(")"); break;
     case T_GLUE:
-        if (prec > 1) fputc('(', f);
-        fputs("Glue ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); fputc(' ', f); tp(f, t->c, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("Glue "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); PS(" "); PT(t->c, depth, 2);
+        if (prec > 1) PS(")");
         break;
-    case T_GLUEEL: if (prec > 1) fputc('(', f); fputs("glue ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); if (prec > 1) fputc(')', f); break;
-    case T_UNGLUE: if (prec > 1) fputc('(', f); fputs("unglue ", f); tp(f, t->a, names, depth, 2); if (prec > 1) fputc(')', f); break;
-    case T_SND: if (prec > 1) fputc('(', f); fputs("snd ", f); tp(f, t->a, names, depth, 2); if (prec > 1) fputc(')', f); break;
+    case T_GLUEEL: if (prec > 1) PS("("); PS("glue "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); if (prec > 1) PS(")"); break;
+    case T_UNGLUE: if (prec > 1) PS("("); PS("unglue "); PT(t->a, depth, 2); if (prec > 1) PS(")"); break;
+    case T_SND: if (prec > 1) PS("("); PS("snd "); PT(t->a, depth, 2); if (prec > 1) PS(")"); break;
     case T_LAM: {
-        if (prec > 0) fputc('(', f);
-        fprintf(f, t->imp ? "\\{%s} -> " : "\\%s -> ", t->name); names[depth] = t->name; tp(f, t->a, names, depth + 1, 0);
-        if (prec > 0) fputc(')', f);
+        if (prec > 0) PS("(");
+        PS(t->imp ? "\\{" : "\\"); PS(t->name); PS(t->imp ? "} -> " : " -> "); PN(depth, t->name); PT(t->a, depth + 1, 0);
+        if (prec > 0) PS(")");
         break; }
     case T_APP: case T_PAPP:
-        if (prec > 1) fputc('(', f);
-        tp(f, t->a, names, depth, 1); fputc(' ', f); tp(f, t->b, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PT(t->a, depth, 1); PS(" "); PT(t->b, depth, 2);
+        if (prec > 1) PS(")");
         break;
     case T_LET:
-        if (prec > 0) fputc('(', f);
-        fprintf(f, "let %s : ", t->name); tp(f, t->a, names, depth, 0); fprintf(f, " := "); tp(f, t->b, names, depth, 0);
-        fprintf(f, " in "); names[depth] = t->name; tp(f, t->c, names, depth + 1, 0);
-        if (prec > 0) fputc(')', f);
+        if (prec > 0) PS("(");
+        PS("let "); PS(t->name); PS(" : "); PT(t->a, depth, 0); PS(" := "); PT(t->b, depth, 0);
+        PS(" in "); PN(depth, t->name); PT(t->c, depth + 1, 0);
+        if (prec > 0) PS(")");
         break;
     case T_PATHP:
-        if (prec > 1) fputc('(', f);
-        fputs("PathP ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); fputc(' ', f); tp(f, t->c, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("PathP "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); PS(" "); PT(t->c, depth, 2);
+        if (prec > 1) PS(")");
         break;
     case T_PARTIAL:
-        if (prec > 1) fputc('(', f);
-        fputs("Partial ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("Partial "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2);
+        if (prec > 1) PS(")");
         break;
     case T_TRANSP:
-        if (prec > 1) fputc('(', f);
-        fputs("transp ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); fputc(' ', f); tp(f, t->c, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("transp "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); PS(" "); PT(t->c, depth, 2);
+        if (prec > 1) PS(")");
         break;
     case T_HCOMP:
-        if (prec > 1) fputc('(', f);
-        fputs("hcomp ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); fputc(' ', f);
-        tp(f, t->c, names, depth, 2); fputc(' ', f); tp(f, t->d, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("hcomp "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); PS(" ");
+        PT(t->c, depth, 2); PS(" "); PT(t->d, depth, 2);
+        if (prec > 1) PS(")");
         break;
     case T_SUB:
-        if (prec > 1) fputc('(', f);
-        fputs("Sub ", f); tp(f, t->a, names, depth, 2); fputc(' ', f); tp(f, t->b, names, depth, 2); fputc(' ', f); tp(f, t->c, names, depth, 2);
-        if (prec > 1) fputc(')', f);
+        if (prec > 1) PS("(");
+        PS("Sub "); PT(t->a, depth, 2); PS(" "); PT(t->b, depth, 2); PS(" "); PT(t->c, depth, 2);
+        if (prec > 1) PS(")");
         break;
-    case T_INS: if (prec > 1) fputc('(', f); fputs("inS ", f); tp(f, t->a, names, depth, 2); if (prec > 1) fputc(')', f); break;
-    case T_OUTS: if (prec > 1) fputc('(', f); fputs("outS ", f); tp(f, t->d, names, depth, 2); if (prec > 1) fputc(')', f); break;
+    case T_INS: if (prec > 1) PS("("); PS("inS "); PT(t->a, depth, 2); if (prec > 1) PS(")"); break;
+    case T_OUTS: if (prec > 1) PS("("); PS("outS "); PT(t->d, depth, 2); if (prec > 1) PS(")"); break;
     case T_SYS:
-        fputs("[ ", f);
-        for (int i = 0; i < t->nbr; i++) { if (i) fputs(" | ", f); tp(f, t->br[i].face, names, depth, 0); fputs(" -> ", f); tp(f, t->br[i].body, names, depth, 0); }
-        fputs(" ]", f);
+        PS("[ ");
+        for (int i = 0; i < t->nbr; i++) { if (i) PS(" | "); PT(t->br[i].face, depth, 0); PS(" -> "); PT(t->br[i].body, depth, 0); }
+        PS(" ]");
         break;
+    default: return;
+    }
+    if (nps > from) for (size_t i = from, j = nps - 1; i < j; i++, j--) { PItem x = ps[i]; ps[i] = ps[j]; ps[j] = x; }
+}
+void term_print(FILE *f, Term *t, const char **names, int depth) {
+    for (int i = 0; i < depth; i++) pn_set(i, names[i]);
+    size_t base = nps;
+    PT(t, depth, 0);
+    while (nps > base) {
+        PItem it = ps[--nps];
+        if (it.k == PT_STR) fputs(it.s, f);
+        else if (it.k == PT_NAME) pn_set(it.depth, it.s);
+        else tp_node(f, it.t, it.depth, it.prec);
     }
 }
-void term_print(FILE *f, Term *t, const char **names, int depth) { tp(f, t, names, depth, 0); }
+#undef PT
+#undef PS
+#undef PN
 
 /* ---- interval algebra ---- */
 static int lit_cmp(const void *a, const void *b) {
@@ -910,7 +912,7 @@ static Val *elim_reduce(int data, VList *args) {
                 fputc('\n', stderr);
             }
         }
-        die_resource("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
+        resource_die("elimination of %s recursed %d deep on the literal %s in %s: the induction hypothesis is used, so this is work proportional to the literal",
                      datas[data].name, nest, dec, cur_decl_name ? cur_decl_name : "the top level");
     }
     if (elim_num_depth < 64) { char *dd = bn_to_dec(target->num); elim_trace[elim_num_depth].data = data; snprintf(elim_trace[elim_num_depth].lit, 16, "%s", dd); free(dd); }
@@ -1091,7 +1093,7 @@ void unfold_counts_report(void) {
 }
 /* a rigid definition application to its value: the definition applied to its spine */
 Val *unfold_def(Val *v) {
-    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = calloc(65536, sizeof(long)); } }
+    { static int seen; if (!seen) { seen = 1; if (getenv("EEZOTT_UNFOLD_COUNTS")) unf_count = rcalloc(65536, sizeof(long)); } }
     /* The unfolding is a pure function of the value (definition id, level, spine), so it is computed once and kept in
        the value itself: a rigidity-preserving application is the shared cell, and every later force of the same spine
        hits it. This is the memoization pass - without it each re-application of a nested definition's spine redoes the
@@ -1912,135 +1914,195 @@ static Term *quote_iv(int depth, IVal a) {
 /* The value a print-out should show. A pair's first component is a word over the naturals and may still be an
    unforced application - a value is canonical enough for conversion long before it is a printed normal form - so
    force it through. An irrelevant second component is a proof that prints as '.', and forcing it would mean walking
-   a proof nobody reads. */
-Val *nf_force(Val *v) {
-    stack_guard("nf_force");
+   a proof nobody reads. An explicit machine (frames on a heap stack, the child's result handed back in a register),
+   not C recursion. */
+typedef struct { Val *v, *w; int i; } NFrame;
+static Stack nfst = { NULL, 0, 0, sizeof(NFrame) };   /* a Stack of the memory layer */
+#define nfs ((NFrame *)nfst.p)
+#define nnfs (nfst.n)
+/* force v; a constructor with arguments or a pair opens a frame (1), anything else is the result (0) */
+static int nf_open(Val *v, Val **ret) {
     v = force(v);
-    if (v->k == V_CON && v->args.n > 0) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
-        Val *w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl;
-        for (int i = 0; i < v->args.n; i++) { Arg a = v->args.a[i]; if (!a.irr) a.v = nf_force(a.v); w = vapply_arg(w, &a); }
-        return w;
-    }
-    if (v->k != V_PAIR) return v;
-    Val *w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; w->a = nf_force(v->a);
-    if (!v->irr) w->b = nf_force(pair_snd(v));
-    return w;
+    Val *w;
+    if (v->k == V_CON && v->args.n > 0) { w = mkval(V_CON); w->n = v->n; w->lvl = v->lvl; }
+    else if (v->k == V_PAIR) { w = mkval(V_PAIR); w->irr = v->irr; w->n = v->n; }
+    else { *ret = v; return 0; }
+    NFrame fr = { v, w, 0 }; STACK_PUSH(&nfst, NFrame, fr);
+    return 1;
 }
-Term *quote(int depth, Val *v) {
-    stack_guard("quote");
+Val *nf_force(Val *v0) {
+    size_t base = nnfs; Val *ret = NULL; int have = 0;
+    if (!nf_open(v0, &ret)) return ret;
+    while (nnfs > base) {
+        NFrame *fr = &nfs[nnfs - 1];
+        if (fr->v->k == V_CON) {   /* a constructor's arguments, so a deferred elimination under suc prints as the number */
+            if (fr->i < fr->v->args.n) {
+                Arg a = fr->v->args.a[fr->i];
+                if (!a.irr) {
+                    if (!have) { if (nf_open(a.v, &ret)) continue; }
+                    a.v = ret; have = 0;
+                }
+                fr = &nfs[nnfs - 1]; fr->w = vapply_arg(fr->w, &a); fr->i++;
+                continue;
+            }
+        } else {   /* a pair: its first component, then (relevant) its second */
+            if (fr->i == 0) {
+                if (!have) { if (nf_open(fr->v->a, &ret)) continue; }
+                fr = &nfs[nnfs - 1]; fr->w->a = ret; have = 0; fr->i = 1;
+                continue;
+            }
+            if (fr->i == 1 && !fr->v->irr) {
+                if (!have) { if (nf_open(pair_snd(fr->v), &ret)) continue; }
+                fr = &nfs[nnfs - 1]; fr->w->b = ret; have = 0; fr->i = 2;
+                continue;
+            }
+        }
+        ret = fr->w; have = 1; nnfs--;   /* this frame is done: its value goes to the parent */
+    }
+    return ret;
+}
+/* Quoting: an explicit machine like conversion. Each node is made with its children's slots empty, and a task per
+   slot fills it, in the order the recursion visited them (left to right, depth first). */
+typedef struct { int depth; Val *v; Term **dst; } QTask;
+static Stack qst = { NULL, 0, 0, sizeof(QTask) };   /* a Stack of the memory layer */
+#define qs ((QTask *)qst.p)
+#define nqs (qst.n)
+static void qpush(int depth, Val *v, Term **dst) { QTask q = { depth, v, dst }; STACK_PUSH(&qst, QTask, q); }
+static Term *quote_node(int depth, Val *v) {
+    size_t from = nqs;
+    Term *t = NULL;
     v = fmeta(v);   /* metas only: a rigid definition application quotes as the application (printing forces first) */
     switch (v->k) {
-    case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); Term *t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
+    case V_U: { int n; if (lv_is_const(v->lvl, &n)) return v->pre ? mk_upre(n) : mk_u(n); t = mk_u(0); t->pre = v->pre; t->a = quote_level(depth, v->lvl); return t; }
     case V_L: return quote_level(depth, v->lvl);
     case V_LEVEL: return mk_term(T_LEVEL, NULL, NULL, NULL, NULL);
     case V_INTERVAL: return mk(T_INTERVAL);
     case V_I: return quote_iv(depth, v->iv);
     case V_LAM: {
         Val *x = v->isi ? vivar(depth) : vvar(depth);
-        Term *t = mk_lam(v->name ? v->name : "x", quote(depth + 1, inst(&v->clo, x)), v->irr); t->isi = v->isi; t->imp = v->imp; return t;
+        t = mk(T_LAM); t->name = v->name ? v->name : "x"; t->irr = v->irr; t->isi = v->isi; t->imp = v->imp;
+        qpush(depth + 1, inst(&v->clo, x), &t->a);
+        break;
     }
     case V_PI: {
         Val *x = v->isi ? vivar(depth) : vvar(depth);
-        Term *t = mk_pi(v->name ? v->name : "_", quote(depth, v->dom), quote(depth + 1, inst(&v->clo, x)), v->irr); t->isi = v->isi; t->imp = v->imp; return t;
+        t = mk(T_PI); t->name = v->name ? v->name : "_"; t->irr = v->irr; t->isi = v->isi; t->imp = v->imp;
+        qpush(depth, v->dom, &t->a); qpush(depth + 1, inst(&v->clo, x), &t->b);
+        break;
     }
-    case V_PATHP: return mk_term(T_PATHP, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
-    case V_PARTIAL: return mk_term(T_PARTIAL, quote(depth, v->a), quote(depth, v->b), NULL, NULL);
-    case V_SUB: return mk_term(T_SUB, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
-    case V_INS: return mk_term(T_INS, quote(depth, v->a), NULL, NULL, NULL);
-    case V_SIGMA: { Term *t = mk_term(T_SIGMA, quote(depth, v->dom), quote(depth + 1, inst(&v->clo, vvar(depth))), NULL, NULL); t->name = v->name ? v->name : "_"; t->irr = v->irr; return t; }
-    case V_PAIR: {   /* an irrelevant component is elided from the normal form */
-        Term *t = mk_term(T_PAIR, quote(depth, v->a), v->irr ? mk_term(T_IRR, NULL, NULL, NULL, NULL) : quote(depth, v->b), NULL, NULL);
-        t->irr = v->irr; t->n = v->n; return t;
-    }
+    case V_PATHP: t = mk_term(T_PATHP, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); qpush(depth, v->c, &t->c); break;
+    case V_PARTIAL: t = mk_term(T_PARTIAL, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); break;
+    case V_SUB: t = mk_term(T_SUB, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); qpush(depth, v->c, &t->c); break;
+    case V_INS: t = mk_term(T_INS, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); break;
+    case V_SIGMA:
+        t = mk_term(T_SIGMA, NULL, NULL, NULL, NULL); t->name = v->name ? v->name : "_"; t->irr = v->irr;
+        qpush(depth, v->dom, &t->a); qpush(depth + 1, inst(&v->clo, vvar(depth)), &t->b);
+        break;
+    case V_PAIR:   /* an irrelevant component is elided from the normal form */
+        t = mk_term(T_PAIR, NULL, v->irr ? mk_term(T_IRR, NULL, NULL, NULL, NULL) : NULL, NULL, NULL); t->irr = v->irr; t->n = v->n;
+        qpush(depth, v->a, &t->a); if (!v->irr) qpush(depth, v->b, &t->b);
+        break;
     case V_IRR: return mk_term(T_IRR, NULL, NULL, NULL, NULL);
-    case V_GLUE: { Term *t = mk_term(T_GLUE, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL); if (!lv_is_const(v->lvl, &t->n)) t->d = quote_level(depth, v->lvl); return t; }
-    case V_GLUEEL: return mk_term(T_GLUEEL, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
-    case V_SYS: {
-        Term *t = mk(T_SYS); t->nbr = v->nbr; t->br = xalloc((v->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < v->nbr; i++) { t->br[i].face = quote(depth, v->br[i].phi); t->br[i].body = quote(depth, v->br[i].v); }
-        return t;
-    }
+    case V_GLUE:
+        t = mk_term(T_GLUE, NULL, NULL, NULL, NULL); if (!lv_is_const(v->lvl, &t->n)) t->d = quote_level(depth, v->lvl);
+        qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); qpush(depth, v->c, &t->c);
+        break;
+    case V_GLUEEL: t = mk_term(T_GLUEEL, NULL, NULL, NULL, NULL); qpush(depth, v->a, &t->a); qpush(depth, v->b, &t->b); qpush(depth, v->c, &t->c); break;
+    case V_SYS:
+        t = mk(T_SYS); t->nbr = v->nbr; t->br = xalloc((v->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < v->nbr; i++) { qpush(depth, v->br[i].phi, &t->br[i].face); qpush(depth, v->br[i].v, &t->br[i].body); }
+        break;
     case V_NUM: return mk_num(v->n, quote_level(depth, v->lvl), v->num);
     case V_NEU: case V_DATA: case V_CON: {
         Term *h;
         if (v->k == V_DATA) h = mk_ref_l(T_DATA, v->n, quote_level(depth, v->lvl));
         else if (v->k == V_CON) h = mk_ref_l(T_CON, v->n, quote_level(depth, v->lvl));
         else if (v->h == H_ELIM) h = mk_ref_l(T_ELIM, v->n, quote_level(depth, v->lvl));
-        else if (v->h == H_TRANSP) h = mk_term(T_TRANSP, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), NULL);
-        else if (v->h == H_HCOMP) h = mk_term(T_HCOMP, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
-        else if (v->h == H_OUTS) h = mk_term(T_OUTS, quote(depth, v->a), quote(depth, v->b), quote(depth, v->c), quote(depth, v->dom));
-        else if (v->h == H_UNGLUE) h = mk_term(T_UNGLUE, quote(depth, v->dom), quote(depth, v->a), quote(depth, v->b), quote(depth, v->c));
+        else if (v->h == H_TRANSP) { h = mk_term(T_TRANSP, NULL, NULL, NULL, NULL); qpush(depth, v->a, &h->a); qpush(depth, v->b, &h->b); qpush(depth, v->c, &h->c); }
+        else if (v->h == H_HCOMP) { h = mk_term(T_HCOMP, NULL, NULL, NULL, NULL); qpush(depth, v->a, &h->a); qpush(depth, v->b, &h->b); qpush(depth, v->c, &h->c); qpush(depth, v->dom, &h->d); }
+        else if (v->h == H_OUTS) { h = mk_term(T_OUTS, NULL, NULL, NULL, NULL); qpush(depth, v->a, &h->a); qpush(depth, v->b, &h->b); qpush(depth, v->c, &h->c); qpush(depth, v->dom, &h->d); }
+        else if (v->h == H_UNGLUE) { h = mk_term(T_UNGLUE, NULL, NULL, NULL, NULL); qpush(depth, v->dom, &h->a); qpush(depth, v->a, &h->b); qpush(depth, v->b, &h->c); qpush(depth, v->c, &h->d); }
         else if (v->h == H_META) { h = mk_term(T_META, NULL, NULL, NULL, NULL); h->n = v->n; }
         else if (v->h == H_DEF) h = mk_ref_l(T_DEF, v->n, quote_level(depth, v->lvl));
         else h = mk_var(depth - 1 - v->n);
         for (int i = 0; i < v->args.n; i++) {
             Arg *a = &v->args.a[i];
             if (a->proj) h = mk_term(a->proj == 1 ? T_FST : T_SND, h, NULL, NULL, NULL);
-            else if (a->papp) h = mk_term(T_PAPP, h, quote(depth, a->v), quote(depth, a->x), quote(depth, a->y));
-            else h = mk_app(h, quote(depth, a->v), a->irr);
+            else if (a->papp) { h = mk_term(T_PAPP, h, NULL, NULL, NULL); qpush(depth, a->v, &h->b); qpush(depth, a->x, &h->c); qpush(depth, a->y, &h->d); }
+            else { h = mk_app(h, NULL, a->irr); qpush(depth, a->v, &h->b); }
         }
-        return h;
+        t = h;
+        break;
     }
+    default: return NULL;
     }
-    return NULL;
+    if (nqs > from) for (size_t i = from, j = nqs - 1; i < j; i++, j--) { QTask x = qs[i]; qs[i] = qs[j]; qs[j] = x; }
+    return t;
+}
+Term *quote(int depth, Val *v) {
+    Term *root = NULL; size_t base = nqs;
+    qpush(depth, v, &root);
+    while (nqs > base) { QTask q = qs[--nqs]; *q.dst = quote_node(q.depth, q.v); }
+    return root;
 }
 int val_mentions_ivar(int depth, Val *v, int level) { return term_mentions_var(quote(depth, v), depth - 1 - level); }
 
-/* ---- conversion ---- */
-static int conv_spine(int depth, VList *a, VList *b) {
-    if (a->n != b->n) return 0;
-    for (int i = 0; i < a->n; i++) {
-        if (a->a[i].proj != b->a[i].proj) return 0;   /* path and plain application to an interval coincide */
-        if (a->a[i].proj) continue;
-        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;   /* the argument of an irrelevant binder */
-        if (!conv(depth, a->a[i].v, b->a[i].v)) return 0;
-    }
-    return 1;
+/* ---- conversion ----
+   An explicit machine, not C recursion: the goals left to prove sit on a heap stack in the order the recursive
+   definition visited them (depth first, left to right), so a comparison's depth is bounded by memory alone
+   (Order_Lev_EezottIterative). Conversion is a conjunction of goals except at three speculative points - the same
+   definition's spines, the same deferred elimination's spines, the same meta's spines - where a failure is recovered:
+   a frame there holds the rollback marks, the goal stack's height, and the fallback (unfold both, force both,
+   postpone). A failure rolls back to the innermost frame and resumes its fallback; with none left, the whole
+   comparison fails and is rolled back (conversion is transactional). A conversion nested inside a step (unify_meta,
+   eval) runs its own machine above the outer one's goals and leaves the stacks as it found them. */
+typedef enum { G_PLAIN, G_PROJ2, G_CLO, G_FACE, G_SPEC_END, G_RESUME } GKind;
+typedef enum { FB_DEF, FB_ELIM, FB_META } FbKind;
+typedef struct { GKind k; int depth; Val *a, *b; int isi; FbKind fb; Face face; } Goal;
+typedef struct { LMark lm; MMark mm; int height; FbKind fb; int depth; Val *a, *b; } Spec;
+static Stack gst = { NULL, 0, 0, sizeof(Goal) }, sst = { NULL, 0, 0, sizeof(Spec) };   /* Stacks of the memory layer */
+#define gs ((Goal *)gst.p)
+#define ngs (gst.n)
+#define ss ((Spec *)sst.p)
+#define nss (sst.n)
+static void gpush(Goal g) { STACK_PUSH(&gst, Goal, g); }
+static void gpush2(GKind k, int depth, Val *a, Val *b) { Goal g = {0}; g.k = k; g.depth = depth; g.a = a; g.b = b; gpush(g); }
+/* a speculative block: the marks were taken before anything it may undo; its goals go above the end marker */
+static void spec_open(LMark lm, MMark mm, FbKind fb, int depth, Val *a, Val *b) {
+    Spec s = { lm, mm, (int)ngs, fb, depth, a, b }; STACK_PUSH(&sst, Spec, s);
+    gpush2(G_SPEC_END, depth, NULL, NULL);
 }
-static int conv_sys(int depth, Val *a, Val *b) {   /* partial elements agree on every face of their (common) support */
+/* a spine's argument pairs, left to right: path and plain application to an interval coincide; the argument of an
+   irrelevant binder is not compared. 0 refuted, 2 pushed. */
+static int push_spine(int depth, VList *a, VList *b) {
+    if (a->n != b->n) return 0;
+    for (int i = 0; i < a->n; i++) if (a->a[i].proj != b->a[i].proj) return 0;
+    for (int i = a->n - 1; i >= 0; i--) {
+        if (a->a[i].proj) continue;
+        if ((a->a[i].irr & 2) && (b->a[i].irr & 2)) continue;
+        gpush2(G_PLAIN, depth, a->a[i].v, b->a[i].v);
+    }
+    return 2;
+}
+/* partial elements agree on every face of their (common) support */
+static int push_sys(int depth, Val *a, Val *b) {
     Val *s = a->k == V_SYS ? a : b;
     IVal phi = iv_zero();
     for (int i = 0; i < s->nbr; i++) phi = iv_or(phi, s->br[i].phi->iv);
     Face *fs; int nf = iv_faces(phi, &fs);
-    for (int i = 0; i < nf; i++) {
-        Val *x = vsys_at(a, &fs[i]), *y = vsys_at(b, &fs[i]);
-        if (!x || !y || !conv(depth, x, y)) return 0;
-    }
-    return 1;
+    for (int i = nf - 1; i >= 0; i--) { Goal g = {0}; g.k = G_FACE; g.depth = depth; g.a = a; g.b = b; g.face = fs[i]; gpush(g); }
+    return 2;
 }
-static int conv1(int depth, Val *a, Val *b);
 /* the levels of two occurrences of a global agree (only polymorphic globals take one) */
 static int lvl_conv(TKind k, int id, LVal a, LVal b) { return !ref_poly(k, id) || lv_enforce_eq(a, b) == 1; }
-/* conversion is transactional: level constraints added by a comparison that fails are rolled back */
-int conv(int depth, Val *a, Val *b) {
-    LMark m = lstore_mark(); MMark mm = meta_mark();
-    int r = conv1(depth, a, b);
-    if (!r) { lstore_rollback(m); meta_rollback(mm); }
-    return r;
-}
-static int conv1_b(int depth, Val *a, Val *b);
-static int conv_fail_logged;
-int conv_depth_now;
-static int conv1(int depth, Val *a, Val *b) {
-    conv_depth_now++;
-    int r = conv1_b(depth, a, b);
-    conv_depth_now--;
-    if (!r && conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE")) {
-        conv_fail_logged++;
-        fprintf(stderr, "[conv] #%d depth %d call-depth %d: ", conv_fail_logged, depth, conv_depth_now);
-        const char *nm[2048] = {0};
-        term_print(stderr, quote(0, a), nm, 0); fputs("   !=   ", stderr);
-        term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr);
-        if ((a->k == V_I || b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
-    }
-    return r;
-}
-static int conv1_b(int depth, Val *a, Val *b) {
+/* one step on a goal: 1 proved, 0 refuted, 2 its subgoals pushed. skip: the head phase is done (a fallback found
+   nothing left to unfold) */
+static int conv_step(int depth, Val *a, Val *b, int skip) {
     a = fmeta(a); b = fmeta(b);
     /* definition applications stay rigid: the same definition compares by spine congruence, and the spine's arguments
        at .() binders (irr bit 2) are skipped - proofs differing only there are equal by construction (compareIrrelevant
        in Agda; the H_DEF plan). Different definitions (or a rigid against something else): unfold and continue. */
-    for (;;) {
+    while (!skip) {
         int ad = a->k == V_NEU && a->h == H_DEF, bd = b->k == V_NEU && b->h == H_DEF;
         int ae = a->k == V_NEU && a->h == H_ELIM && a->defer, be = b->k == V_NEU && b->h == H_ELIM && b->defer;
         /* a metavariable is solved by the other side as written - a rigid definition application, a deferred
@@ -2066,10 +2128,13 @@ static int conv1_b(int depth, Val *a, Val *b) {
           }
           if (am && bm) break; }
         if (ad && bd) {
-            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence.
-               Otherwise fall back to unfolding both, as if the spine comparison had never happened. */
-            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_DEF, a->n, a->lvl, b->lvl)
-                && conv_spine(depth, &a->args, &b->args)) return 1;
+            /* the fast path: the same definition, spines convertible (the .() arguments skipped) - equal by congruence;
+               speculative: on failure everything it did is rolled back and both sides unfold (FB_DEF) */
+            if (a->n == b->n && a->args.n == b->args.n) {
+                LMark lm = lstore_mark(); MMark mm = meta_mark();
+                if (lvl_conv(T_DEF, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_DEF, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                lstore_rollback(lm); meta_rollback(mm);
+            }
             /* Two different definitions: unfold ONE side, the later-declared one first (Coq's and Agda's definition
                height). A wrapper's body usually reaches the other definition's own head, and the congruence fast path
                then settles it; unfolding both at once turns the other side into its evaluated body - an elimination on
@@ -2087,14 +2152,14 @@ static int conv1_b(int depth, Val *a, Val *b) {
         }
         if (ad) { Val *u = fmeta(unfold_def(a)); if (u != a) { a = u; continue; } }
         if (bd) { Val *u = fmeta(unfold_def(b)); if (u != b) { b = u; continue; } }
-        /* deferred eliminations: the same one by spine congruence, else reduced (a stuck one drops its flag) */
+        /* deferred eliminations: the same one by spine congruence (speculative, FB_ELIM), else reduced (a stuck one
+           drops its flag) */
         if (ae && be) {
-            if (a->n == b->n && a->args.n == b->args.n && lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)
-                && conv_spine(depth, &a->args, &b->args)) return 1;
-            { static const char *dt = NULL; static int dtc = 0; if (!dt) { dt = getenv("EEZOTT_DEFER_TRACE"); if (!dt) dt = ""; }
-              if (*dt && cur_decl_name && !strcmp(cur_decl_name, dt) && dtc < 12) { dtc++; const char *nm[2048] = {0};
-                fprintf(stderr, "[defer] same=%d nargs %d/%d: ", a->n == b->n, a->args.n, b->args.n);
-                term_print(stderr, quote(0, a), nm, 0); fputs("   vs   ", stderr); term_print(stderr, quote(0, b), nm, 0); fputc('\n', stderr); } }
+            if (a->n == b->n && a->args.n == b->args.n) {
+                LMark lm = lstore_mark(); MMark mm = meta_mark();
+                if (lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)) { spec_open(lm, mm, FB_ELIM, depth, a, b); return push_spine(depth, &a->args, &b->args); }
+                lstore_rollback(lm); meta_rollback(mm);
+            }
             a = fmeta(elim_force(a)); b = fmeta(elim_force(b)); continue;
         }
         if (ae) { a = fmeta(elim_force(a)); continue; }
@@ -2105,12 +2170,13 @@ static int conv1_b(int depth, Val *a, Val *b) {
     if (a->k == V_L && b->k == V_NEU && b->h == H_VAR && b->args.n == 0) return lv_enforce_eq(a->lvl, lv_var(b->n)) == 1;
     if (b->k == V_L && a->k == V_NEU && a->h == H_VAR && a->args.n == 0) return lv_enforce_eq(b->lvl, lv_var(a->n)) == 1;
     if (a == b) return 1;
-    {   /* a meta: solved by pattern unification, or the constraint is postponed */
+    {   /* a meta: solved by pattern unification, or the constraint is postponed (the same meta: its spines,
+           speculatively - on failure the constraint is postponed, FB_META) */
         int am = a->k == V_NEU && a->h == H_META, bm = b->k == V_NEU && b->h == H_META;
         if (am && bm && a->n == b->n) {
-            LMark m = lstore_mark(); MMark mm = meta_mark();
-            if (conv_spine(depth, &a->args, &b->args)) return 1;
-            lstore_rollback(m); meta_rollback(mm); meta_postpone(depth, a, b); return 1;
+            LMark lm = lstore_mark(); MMark mm = meta_mark();
+            spec_open(lm, mm, FB_META, depth, a, b);
+            return push_spine(depth, &a->args, &b->args);
         }
         if (am) return unify_meta(depth, a, b);
         if (bm) return unify_meta(depth, b, a);
@@ -2119,19 +2185,20 @@ static int conv1_b(int depth, Val *a, Val *b) {
     if (a->k == V_NUM && b->k == V_NUM) return a->n == b->n && lvl_conv(T_DATA, a->n, a->lvl, b->lvl) && bn_cmp(a->num, b->num) == 0;
     if (a->k == V_NUM && b->k == V_CON) a = num_view(a);
     if (b->k == V_NUM && a->k == V_CON) b = num_view(b);
-    if (a->k == V_SYS || b->k == V_SYS) return conv_sys(depth, a, b);
+    if (a->k == V_SYS || b->k == V_SYS) return push_sys(depth, a, b);
     if (a->k == V_LAM || b->k == V_LAM) {          /* eta */
         int isi = (a->k == V_LAM ? a->isi : b->isi);
         Val *x = isi ? vivar(depth) : vvar(depth);
         /* a neutral applied to an interval is the same application whether it was formed as a path or as a function of I */
         Val *fa = a->k == V_LAM ? inst(&a->clo, x) : vapp(a, x, 0);
         Val *fb = b->k == V_LAM ? inst(&b->clo, x) : vapp(b, x, 0);
-        return conv(depth + 1, fa, fb);
+        gpush2(G_PLAIN, depth + 1, fa, fb); return 2;
     }
     if (a->k == V_IRR || b->k == V_IRR) die("internal: an elided irrelevant value reached conversion");
     if (a->k == V_PAIR || b->k == V_PAIR) {   /* eta; an irrelevant second component is not compared */
         int irr = (a->k == V_PAIR && a->irr) || (b->k == V_PAIR && b->irr);
-        return conv(depth, vproj(a, 1), vproj(b, 1)) && (irr || conv(depth, vproj(a, 2), vproj(b, 2)));
+        if (!irr) gpush2(G_PROJ2, depth, a, b);
+        gpush2(G_PLAIN, depth, vproj(a, 1), vproj(b, 1)); return 2;
     }
     if (a->k != b->k) return 0;
     switch (a->k) {
@@ -2139,31 +2206,83 @@ static int conv1_b(int depth, Val *a, Val *b) {
     case V_L: return lv_enforce_eq(a->lvl, b->lvl) == 1;
     case V_LEVEL: return 1;
     case V_SIGMA: {
-        if (a->irr != b->irr || !conv(depth, a->dom, b->dom)) return 0;
-        Val *x = vvar(depth);
-        return conv(depth + 1, inst(&a->clo, x), inst(&b->clo, x));
+        if (a->irr != b->irr) return 0;
+        Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = 0; gpush(g);
+        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
     }
     case V_INTERVAL: return 1;
     case V_I: return iv_eq(a->iv, b->iv);
     case V_PI: {
-        if (!conv(depth, a->dom, b->dom)) return 0;
-        Val *x = a->isi ? vivar(depth) : vvar(depth);
-        return conv(depth + 1, inst(&a->clo, x), inst(&b->clo, x));
+        Goal g = {0}; g.k = G_CLO; g.depth = depth; g.a = a; g.b = b; g.isi = a->isi; gpush(g);
+        gpush2(G_PLAIN, depth, a->dom, b->dom); return 2;
     }
-    case V_PATHP: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_PARTIAL: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b);
-    case V_SUB: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_INS: return conv(depth, a->a, b->a);
-    case V_GLUE: return conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c);
-    case V_GLUEEL: return conv(depth, a->b, b->b) && conv(depth, a->a, b->a);
+    case V_PATHP: case V_SUB: case V_GLUE:
+        gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_PARTIAL: gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_INS: gpush2(G_PLAIN, depth, a->a, b->a); return 2;
+    case V_GLUEEL: gpush2(G_PLAIN, depth, a->a, b->a); gpush2(G_PLAIN, depth, a->b, b->b); return 2;
     case V_NEU:
         if (a->h != b->h) return 0;
-        if (a->h == H_TRANSP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c))) return 0; }
-        else if (a->h == H_HCOMP) { if (!(conv(depth, a->a, b->a) && conv(depth, a->b, b->b) && conv(depth, a->c, b->c) && conv(depth, a->dom, b->dom))) return 0; }
-        else if (a->h == H_OUTS || a->h == H_UNGLUE) { if (!conv(depth, a->dom, b->dom)) return 0; }
-        else if (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl))) return 0;   /* a variable's n is its level, not a global id */
-        return conv_spine(depth, &a->args, &b->args);
-    case V_DATA: case V_CON: return a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl) && conv_spine(depth, &a->args, &b->args);
+        if (a->h != H_TRANSP && a->h != H_HCOMP && a->h != H_OUTS && a->h != H_UNGLUE
+            && (a->n != b->n || (a->h != H_VAR && !lvl_conv(T_ELIM, a->n, a->lvl, b->lvl)))) return 0;   /* a variable's n is its level, not a global id */
+        if (!push_spine(depth, &a->args, &b->args)) return 0;   /* the spine after the head's own parts */
+        if (a->h == H_TRANSP) { gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
+        else if (a->h == H_HCOMP) { gpush2(G_PLAIN, depth, a->dom, b->dom); gpush2(G_PLAIN, depth, a->c, b->c); gpush2(G_PLAIN, depth, a->b, b->b); gpush2(G_PLAIN, depth, a->a, b->a); }
+        else if (a->h == H_OUTS || a->h == H_UNGLUE) gpush2(G_PLAIN, depth, a->dom, b->dom);
+        return 2;
+    case V_DATA: case V_CON:
+        if (!(a->n == b->n && lvl_conv(a->k == V_DATA ? T_DATA : T_CON, a->n, a->lvl, b->lvl))) return 0;
+        return push_spine(depth, &a->args, &b->args);
     default: return 0;
     }
+}
+/* a speculative block failed (its marks already rolled back): its fallback */
+static int conv_resume(Goal g) {
+    switch (g.fb) {
+    case FB_DEF: {
+        Val *ua = fmeta(unfold_def(g.a)), *ub = fmeta(unfold_def(g.b));
+        if (ua == g.a && ub == g.b) return conv_step(g.depth, g.a, g.b, 1);
+        return conv_step(g.depth, ua, ub, 0);
+    }
+    case FB_ELIM: return conv_step(g.depth, fmeta(elim_force(g.a)), fmeta(elim_force(g.b)), 0);
+    case FB_META: meta_postpone(g.depth, g.a, g.b); return 1;
+    }
+    return 0;
+}
+static int conv_fail_logged;
+/* conversion is transactional: level constraints and meta solutions added by a comparison that fails are rolled back */
+int conv(int depth, Val *a, Val *b) {
+    LMark m = lstore_mark(); MMark mm = meta_mark();
+    size_t gbase = ngs, sbase = nss;
+    gpush2(G_PLAIN, depth, a, b);
+    while (ngs > gbase) {
+        Goal g = gs[--ngs];
+        int r = 0;
+        switch (g.k) {
+        case G_SPEC_END: nss--; continue;   /* the speculative spines all held: the goal that opened the block is proved */
+        case G_PLAIN: r = conv_step(g.depth, g.a, g.b, 0); break;
+        case G_PROJ2: r = conv_step(g.depth, vproj(g.a, 2), vproj(g.b, 2), 0); break;
+        case G_CLO: { Val *x = g.isi ? vivar(g.depth) : vvar(g.depth); r = conv_step(g.depth + 1, inst(&g.a->clo, x), inst(&g.b->clo, x), 0); break; }
+        case G_FACE: { Val *x = vsys_at(g.a, &g.face), *y = vsys_at(g.b, &g.face); r = x && y ? conv_step(g.depth, x, y, 0) : 0; break; }
+        case G_RESUME: r = conv_resume(g); break;
+        }
+        if (r) continue;
+        if (conv_fail_logged < 20 && getenv("EEZOTT_CONV_TRACE") && (g.k == G_PLAIN)) {
+            conv_fail_logged++;
+            fprintf(stderr, "[conv] #%d depth %d goals %zu: ", conv_fail_logged, g.depth, ngs - gbase);
+            const char *nm[2048] = {0};
+            term_print(stderr, quote(0, g.a), nm, 0); fputs("   !=   ", stderr);
+            term_print(stderr, quote(0, g.b), nm, 0); fputc('\n', stderr);
+            if ((g.a->k == V_I || g.b->k == V_I) && getenv("EEZOTT_CONV_TRAP")) __builtin_trap();
+        }
+        if (nss > sbase) {   /* recovered: roll the innermost speculative block back and take its fallback */
+            Spec s = ss[--nss];
+            lstore_rollback(s.lm); meta_rollback(s.mm); ngs = s.height;
+            Goal rg = {0}; rg.k = G_RESUME; rg.fb = s.fb; rg.depth = s.depth; rg.a = s.a; rg.b = s.b; gpush(rg);
+            continue;
+        }
+        ngs = gbase; nss = sbase; lstore_rollback(m); meta_rollback(mm);
+        return 0;
+    }
+    return 1;
 }

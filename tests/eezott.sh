@@ -227,6 +227,7 @@ case "$out" in "huge = pow 3 18446744073709551616")
     pass "big_pow.tt: an unholdable power is stated, not refused";;
   *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = pow 3 18446744073709551616" "$out";; esac
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
+checkNF deep_nf.tt       main 200000   # a constructor chain 200000 deep, forced, quoted and printed off the C stack
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")
