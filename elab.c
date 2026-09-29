@@ -666,9 +666,63 @@ bad:
 static Val *eret_ty;   /* infer's type */
 static LVal eret_lvl;  /* a sort's level */
 static int eret_pre;   /* a sort is a pretype */
+/* The value of a term an application (or pair) frame just elaborated, as a recipe: the head term's value, then the
+   spine's steps applied - each argument's value already known when it was checked. An enclosing application takes its
+   argument's value from the recipe instead of evaluating the argument again, so a nest of n applications costs n, not
+   n^2 (eval re-walked every argument's whole subtree). The recipe is what eval of the term does, minus that walk: it
+   is built only when a consumer asks (nothing is computed that eval would not compute then) and kept. Tagged with its
+   term and environment: a consumer takes it only for exactly that term in exactly that environment, else it evaluates. */
+typedef struct ERec ERec;
+struct ERec {
+    int pair;                 /* a pair: its first component's value, its second's term (a relevant one's value from its own recipe) */
+    Term *h0; ERec *base;     /* the head: a term evaluated, or another recipe (a spine extended by trailing implicit arguments) */
+    int n, cap; Val **av; int *irr; Term **papp;   /* the steps: an argument's value (irr), or a path application (its T_PAPP node) */
+    Val *first; Term *second; ERec *second_rec; int pirr, pn;
+    Val *memo;
+};
+static Term *eret_vt; static Env *eret_venv; static ERec *eret_rec;
+static Val *rec_value(Env *env, ERec *r);
+static Val *eval_known(Env *env, Term *t) { return (t == eret_vt && env == eret_venv && eret_rec) ? rec_value(env, eret_rec) : eval(env, t); }
+static ERec *rec_known(Env *env, Term *t) { return (t == eret_vt && env == eret_venv) ? eret_rec : NULL; }
+static void rec_step(ERec *r, Val *v, int irr, Term *papp) {
+    if (r->n == r->cap) {
+        int nc = r->cap ? 2 * r->cap : 4;
+        Val **av = xalloc(nc * sizeof(Val *)); int *ir = xalloc(nc * sizeof(int)); Term **pp = xalloc(nc * sizeof(Term *));
+        if (r->n) { memcpy(av, r->av, r->n * sizeof(Val *)); memcpy(ir, r->irr, r->n * sizeof(int)); memcpy(pp, r->papp, r->n * sizeof(Term *)); }
+        r->av = av; r->irr = ir; r->papp = pp; r->cap = nc;
+    }
+    r->av[r->n] = v; r->irr[r->n] = irr; r->papp[r->n] = papp; r->n++;
+}
+/* the recipe's value: a chain of recipes (bases, relevant second components) is forced from its innermost unbuilt end, on
+   the memory layer's stack, so no chain recurses on the C stack */
+static Stack recst = { NULL, 0, 0, sizeof(ERec *) };
+static Val *rec_value(Env *env, ERec *r0) {
+    if (r0->memo) return r0->memo;
+    size_t base = recst.n;
+    STACK_PUSH(&recst, ERec *, r0);
+    while (recst.n > base) {
+        ERec *r = STACK_TOP(&recst, ERec *);
+        if (r->memo) { recst.n--; continue; }
+        ERec *need = r->pair ? (r->second_rec && !r->second_rec->memo ? r->second_rec : NULL) : (r->base && !r->base->memo ? r->base : NULL);
+        if (need) { STACK_PUSH(&recst, ERec *, need); continue; }
+        if (r->pair) {
+            Val *pv = mkval(V_PAIR); pv->irr = r->pirr; pv->n = r->pn; pv->a = r->first;
+            if (r->pirr) { pv->b = NULL; pv->clo.env = env; pv->clo.t = r->second; }   /* lazy: forced by snd only, as eval */
+            else pv->b = r->second_rec ? r->second_rec->memo : eval(env, r->second);
+            r->memo = pv;
+        } else {
+            Val *v = r->base ? r->base->memo : eval(env, r->h0);
+            for (int i = 0; i < r->n; i++)
+                v = r->papp[i] ? vpapp(v, eval(env, r->papp[i]->b), eval(env, r->papp[i]->c), eval(env, r->papp[i]->d)) : vapp(v, r->av[i], r->irr[i]);
+            r->memo = v;
+        }
+        recst.n--;
+    }
+    return r0->memo;
+}
 typedef struct {
     MHdr h;
-    Ctx *c; STerm *s; Val *ty;
+    Ctx *c; STerm *s; Val *ty; ERec *rec;
     STerm **args, *hs, *ms; int n, ai, i, j, nb, depth, nf, d, np, m0, d0, pa, pb, irr, all, isl;
     Term *t, *a, *b, *u, *line, *phi, *head, *tst, *rt, **pt, *dlt;
     Val *v, *x, *got, *hty, *lv, *pv, *Av, *uv, *u0v, *tsv, **psi, **pvv, **iv;
@@ -757,11 +811,12 @@ static void resolve_step(size_t off) {
 static void app_spine_step(size_t off) {
     MSTART
     { __typeof__(F->hty) st_ = force(F->hty); F->hty = st_; }
+    F->rec = xalloc(sizeof(ERec)); F->rec->h0 = F->head;
     for (F->i = 0; F->i < F->n; F->i++) {
         { Ctx *c = F->c; STerm *ai = F->args[F->i]; Val *hty = force(F->hty); Term *head = F->head;
           while (hty->k == V_PI && hty->imp && !ai->imp) {   /* an implicit argument not written: a meta */
-              Term *m = fresh_meta(c, hty->dom, ai->line);
-              head = mk_app(head, m, hty->irr); hty = force(inst(&hty->clo, eval(c->env, m)));
+              Term *m = fresh_meta(c, hty->dom, ai->line); Val *mv = eval(c->env, m);
+              head = mk_app(head, m, hty->irr); rec_step(F->rec, mv, hty->irr, NULL); hty = force(inst(&hty->clo, mv));
           }
           hty = refine_to_pi(c, hty, ai->line);
           F->hty = hty; F->head = head;
@@ -771,7 +826,8 @@ static void app_spine_step(size_t off) {
                   int id = meta_new(dom, c->n, c->names, c->tys, ai->line); Term *m = meta_term(id, c->n); tmetas[id].deferred = 1;
                   dnums = rrealloc(dnums, (ndnums + 1) * sizeof(Deferred));
                   dnums[ndnums].term = ai; dnums[ndnums].dom = dom; dnums[ndnums].meta = id; ndnums++;
-                  { __typeof__(F->head) st_ = mk_app(head, m, hty->irr); F->head = st_; } { __typeof__(F->hty) st_ = inst(&hty->clo, eval(c->env, m)); F->hty = st_; }
+                  Val *mv = eval(c->env, m);
+                  { __typeof__(F->head) st_ = mk_app(head, m, hty->irr); F->head = st_; } rec_step(F->rec, mv, hty->irr, NULL); { __typeof__(F->hty) st_ = inst(&hty->clo, mv); F->hty = st_; }
                   continue;
               }
           }
@@ -779,17 +835,19 @@ static void app_spine_step(size_t off) {
         if (F->hty->k == V_PATHP) {
             MCALL(mpush_check(F->c, F->args[F->i], vinterval()));
             { Term *r = MTERM(); Ctx *c = F->c; Val *hty = F->hty;
-              { __typeof__(F->head) st_ = mk_term(T_PAPP, F->head, r, quote(c->n, hty->b), quote(c->n, hty->c)); F->head = st_; }
+              { __typeof__(F->head) st_ = mk_term(T_PAPP, F->head, r, quote(c->n, hty->b), quote(c->n, hty->c)); F->head = st_; } rec_step(F->rec, NULL, 0, F->head);
               { __typeof__(F->hty) st_ = vapp(hty->a, eval(c->env, r), 0); F->hty = st_; } }
             continue;
         }
         if (F->hty->irr & 2) { F->c->irrpos++; F->c->irrlen++; }   /* the argument of an irrelevant binder */
         MCALL(mpush_check(F->c, F->args[F->i], F->hty->dom));
         if (F->hty->irr & 2) { F->c->irrpos--; F->c->irrlen--; }
-        { Term *a = MTERM();
+        { Term *a = MTERM(); Val *av = eval_known(F->c->env, a);
+          rec_step(F->rec, av, F->hty->irr, NULL);
           F->head = mk_app(F->head, a, F->hty->irr);
-          { __typeof__(F->hty) st_ = inst(&F->hty->clo, eval(F->c->env, a)); F->hty = st_; } }
+          { __typeof__(F->hty) st_ = inst(&F->hty->clo, av); F->hty = st_; } }
     }
+    eret_vt = F->head; eret_venv = F->c->env; eret_rec = F->rec;
     eret_ty = F->hty; MRETT(F->head);
     MFINISH
 }
@@ -1293,13 +1351,16 @@ static void check1_step(size_t off) {
     }
     if (F->s->k == S_PAIR) {
         if (F->ty->k != V_SIGMA) die("line %d: pair checked against %s, expected a Sigma type", F->s->line, show(F->c, F->ty));
-        MCALL(mpush_check(F->c, F->s->a, F->ty->dom)); F->a = MTERM();
+        MCALL(mpush_check(F->c, F->s->a, F->ty->dom)); { __typeof__(F->a) st_ = MTERM(); F->a = st_; } { __typeof__(F->x) st_ = eval_known(F->c->env, F->a); F->x = st_; }
         if (F->ty->irr) { F->c->irrpos++; F->c->irrlen++; }
-        MCALL(mpush_check(F->c, F->s->b, inst(&F->ty->clo, eval(F->c->env, F->a))));
+        MCALL(mpush_check(F->c, F->s->b, inst(&F->ty->clo, F->x)));
         if (F->ty->irr) { F->c->irrpos--; F->c->irrlen--; }
-        { Term *t = mk_term(T_PAIR, F->a, MTERM(), NULL, NULL); t->irr = F->ty->irr;
-          if (is_word_type(F->c, F->ty)) t->n = 1;
-          MRETT(t); }
+        {   Term *b = MTERM(), *t = mk_term(T_PAIR, F->a, b, NULL, NULL); t->irr = F->ty->irr;
+            if (is_word_type(F->c, F->ty)) t->n = 1;
+            ERec *r = xalloc(sizeof *r); r->pair = 1; r->first = F->x; r->second = b; r->pirr = t->irr; r->pn = t->n;
+            r->second_rec = t->irr ? NULL : rec_known(F->c->env, b);
+            eret_vt = t; eret_venv = F->c->env; eret_rec = r;
+            MRETT(t); }
     }
     if (F->s->k == S_SYS) {
         if (F->ty->k != V_PARTIAL) die("line %d: a system must be checked against a Partial type, not %s", F->s->line, show(F->c, F->ty));
@@ -1307,9 +1368,12 @@ static void check1_step(size_t off) {
     }
     MCALL(mpush_infer(F->c, F->s)); { __typeof__(F->t) st_ = MTERM(); F->t = st_; } { __typeof__(F->got) st_ = force(eret_ty); F->got = st_; }
     {   Ctx *c = F->c; STerm *s = F->s; Val *ty = F->ty, *got = F->got; Term *t = F->t;
-        while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied */
-            Term *m = fresh_meta(c, got->dom, s->line);
-            t = mk_app(t, m, got->irr); got = force(inst(&got->clo, eval(c->env, m)));
+        while (got->k == V_PI && got->imp) {   /* trailing implicit arguments are supplied (the recipe extended) */
+            Term *m = fresh_meta(c, got->dom, s->line); Val *mv = eval(c->env, m);
+            ERec *known = rec_known(c->env, t);
+            t = mk_app(t, m, got->irr);
+            if (known) { ERec *r = xalloc(sizeof *r); r->base = known; rec_step(r, mv, got->irr, NULL); eret_vt = t; eret_rec = r; }
+            got = force(inst(&got->clo, mv));
         }
         F->t = t;
         if (got->k == V_U && ty->k == V_NEU && ty->h == H_META) {

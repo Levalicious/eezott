@@ -249,6 +249,22 @@ for f in parens negs meets lams imports; do
         if [ $rc -eq 0 ]; then pass "$name"; else fail "$name" "rc 0" "rc $rc: $(printf '%s' "$out" | head -1)"; fi
     done
 done
+# nested elaboration is linear (the value of a checked argument is built from its parts, not evaluated again): nests 20000
+# deep of applications, implicit applications, pairs and a let-bound function's applications check within 2 GB and give
+# their normal form (quadratic, each needed ~135 GB)
+python3 - "$deep" <<'PYEOF'
+import sys
+d = sys.argv[1]; n = 20000
+open(d + "/napp.tt", "w").write("def g (x : Nat) : Nat := x\ndef main : Nat := " + "g (" * n + "zero" + ")" * n + "\n")
+open(d + "/nimp.tt", "w").write("def idd {A : U} (x : A) : A := x\ndef main : Nat := " + "idd (" * n + "zero" + ")" * n + "\n")
+open(d + "/npair.tt", "w").write("def T : U := Sigma Nat (\\_ -> Nat)\ndef g (p : T) : Nat := fst p\ndef main : Nat := " + "g (" * n + "zero" + " , zero)" * n + "\n")
+open(d + "/nlet.tt", "w").write("def main : Nat := let f : Nat -> Nat := \\x -> x in " + "f (" * n + "zero" + ")" * n + "\n")
+PYEOF
+for f in napp nimp npair nlet; do
+    name="nested elaboration $f.tt 20000 deep within 2 GB"
+    out=$( (ulimit -s 256 -v 2000000; tt -c -n main "$deep/$f.tt") 2>&1 ); rc=$?
+    if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q '^main = 0$'; then pass "$name"; else fail "$name" "main = 0" "rc $rc: $(printf '%s' "$out" | head -1)"; fi
+done
 rm -rf "$deep"
 
 for f in "$TT"/bad/*.tt; do
