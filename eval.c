@@ -675,23 +675,17 @@ typedef struct { int code; int i1, i2, i3; VList cap;  LVal l;
 typedef struct { int n; Val *v[8]; LVal l; } Caps;
 
 static Val *native_apply(Native *nt, Val *arg);
-static Val *native_step(Native *nt, Val *arg);
 typedef struct { Val *psi, *forall, *ungl, *Teg, *tf, *i; int F; } TrSides;
 typedef struct { Val *phi1, *psi, *alphas, *ts, *Te1, *a1, *j; } A1pData;
 typedef struct { Val *Te, *psi, *u, *u0, *i; } HfData;
 typedef struct { Val *Ab, *phi, *Te, *psi, *u, *tfs, *i; } HcData;
 typedef Val *(*SysBody)(int k, const Face *f, void *data);
-static Val *vsys_faces(int nb, Val **phis, SysBody body, void *data);
 static Val *glue_tr_body(int k, const Face *f, void *data);
 static Val *glue_a1p_body(int k, const Face *f, void *data);
 static Val *glue_hf_body(int k, const Face *f, void *data);
 static Val *glue_hc_body(int k, const Face *f, void *data);
 static Val *gcomp_body(int k, const Face *f, void *data);
-static Val *transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv);
-static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0);
 static Val *hcompU_body(int k, const Face *f, void *data);
-static Val *builtin_at(const char *name, LVal L);
-static Val *vfwd(Val *line, Val *r, Val *u);
 static Val *vtfill(Val *line, Val *phi, Val *u0);
 static Val *nfn(void *data, Val *arg) { return native_apply(data, arg); }
 static Val *vnative(int code, int i1, int i2, int i3, int ncap, ...) {
@@ -749,41 +743,7 @@ void fallback_report(void) {
     for (int c = 1; c <= 10; c++) if (fb_count[c]) fprintf(stderr, "    code %d: %ld  first: arg1 = %s; arg2 = %s\n", c, fb_count[c], fb_first[c][0], fb_first[c][1]);
 }
 typedef struct { int code, d, def; Val *fallback, *arg1; } NatNative;   /* def: the native's definition (the head of its guard neutral) */
-static Val *natfn(void *data, Val *arg) {
-    NatNative *nn = data;
-    if (!nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *nn; m->arg1 = arg; return vlam_native("n", natfn, m); }
-    Val *a = force(nn->arg1), *b = force(arg);
-    if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) {
-        /* pow is the one native whose result may be a number no limb list can hold (M17). When it is, the
-           kernel does not compute it and does not unfold it either: the native application itself stands, a
-           rigid neutral whose unfolding is itself - canonical enough for force, opaque to conversion (the same
-           power compares by its spine), and the laws (pow_add, pow_mul) prove what it cannot compute. Lean's
-           pow guard (S2). An elimination on it, or a native over it, stays a neutral: no canonical form exists. */
-        if (nn->code == 6 && !bn_fits_pow(a->num, b->num)) {
-            Val *v = mkval(V_NEU); v->h = H_DEF; v->n = nn->def; v->lvl = a->lvl;
-            Arg x = {0}; x.v = nn->arg1; v = neu_app(v, x); x.v = arg; v = neu_app(v, x);
-            v->unf = v; v->unf_n = v->args.n; v->unf_stable = 1;
-            return v;
-        }
-        return vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num));
-    }
-    static int diag = -1; if (diag < 0) diag = getenv("EEZOTT_TRIPWIRE_METHODS") != NULL;
-    if (diag) {   /* the last native that fell back to its body, for the tripwire's diagnostic */
-        fb_count[nn->code]++;
-        Val *x[2] = { a, b };
-        for (int i = 0; i < 2; i++) {
-            Val *v = x[i]; int k = 0; char *d = NULL;
-            while (v->k == V_CON && v->args.n == 1 && k < 100000) { v = force(v->args.a[0].v); k++; }
-            if (v->k == V_NUM) d = bn_to_dec(v->num);
-            snprintf(last_fallback[i], 64, "%s%s+%d sucs, core kind %d%s%s", d ? "lit " : "", d ? d : "", k, v->k,
-                     v->k == V_NEU ? " head " : "", v->k == V_NEU ? (v->h == H_DEF ? defs[v->n].name : v->h == H_VAR ? "var" : v->h == H_ELIM ? "elim" : "other") : "");
-            free(d);
-        }
-        last_fallback_code = nn->code;
-        if (!fb_first[nn->code][0][0]) { snprintf(fb_first[nn->code][0], 64, "%s", last_fallback[0]); snprintf(fb_first[nn->code][1], 64, "%s", last_fallback[1]); }
-    }
-    return vapp(vapp(nn->fallback, nn->arg1, 0), arg, 0);
-}
+static Val *natfn(void *data, Val *arg);
 Val *native_wrapper(int code, int d, Val *fallback, int def) {
     NatNative *nn = xalloc(sizeof *nn); nn->code = code; nn->d = d; nn->def = def; nn->fallback = fallback; nn->arg1 = NULL;
     return vlam_native("m", natfn, nn);
@@ -792,8 +752,6 @@ static Val *elim_apply_list(int data, VList *args);
 
 /* ---- induction hypotheses (native closure N_IH) ----
    cap = base (params, motive, methods), tele (params, previous args), ys, aj; i1=data i2=con i3=j; ys count = cap.n - nb - nt - 1 */
-static Val *ih_apply(Native *c, Val *y);
-static Val *motive_applied(int data, VList *pre, Val **idx);
 
 /* iota: the eliminator's full spine ends in a constructor */
 static int elim_data_cur;
@@ -830,23 +788,8 @@ static Val *elim_of_branch(Val *b, void *data) { VList a2 = vl_copy((VList *)dat
 
 /* the eliminator through a formal composition (a normal form on indexed families, and on HITs later):
      elim D p P m idx (hcomp A phi u u0) = comp (\k. P idx (hfill A phi u u0 k)) phi (\k. elim .. (u k)) (elim .. u0)   */
-static Val *vcomp(Val *line, Val *phi, Val *u, Val *u0);
 static Val *apply_to(Val *b, void *E) { return vapp((Val *)E, b, 0); }
-static Val *elim_hcomp(int data, VList *args) {
-    Data *D = &datas[data];
-    int np = D->nparams, nb = D->nblock, K = block_ncons(data), m = D->nidx;
-    Val *t = force(args->a[args->n - 1].v);
-    if (t->k != V_NEU || t->h != H_HCOMP || t->a->k != V_DATA || t->a->n != data) return NULL;
-    Val *E = mkval(V_NEU); E->h = H_ELIM; E->n = data; E->lvl = elim_lvl;
-    for (int i = 0; i < args->n - 1; i++) E = vapp(E, args->a[i].v, args->a[i].irr);
-    Native *nt = xalloc(sizeof *nt); nt->code = N_ELIM_MOTIVE_LINE; nt->i1 = 0;   /* the motive at the indices (and their images), then the filler */
-    Val **iv = xalloc((m + 1) * sizeof(Val *));
-    for (int j = 0; j < m; j++) iv[j] = args->a[np + nb + K + j].v;
-    vl_push(&nt->cap, motive_applied(data, args, iv), 0);
-    vl_push(&nt->cap, vnative(N_FILL, 1, 0, 0, 4, t->a, t->b, t->c, t->dom), 0);
-    Val *line = mkval(V_LAM); line->clo.fn = nfn; line->clo.data = nt; line->isi = 1; line->name = "k";
-    return vcomp(line, t->b, vnative(N_ELIM_SIDES, 0, 0, 0, 2, E, t->c), vapp(E, t->dom, 0));
-}
+static Val *elim_hcomp(int data, VList *args);
 /* ---- systems (partial elements) ---- */
 static Val *vsys(VBranch *br, int n) {
     for (int i = 0; i < n; i++) if (iv_is_one(br[i].phi->iv)) return br[i].v;   /* a total branch: the element itself */
@@ -854,30 +797,6 @@ static Val *vsys(VBranch *br, int n) {
     for (int i = 0; i < n; i++) if (!iv_is_zero(br[i].phi->iv)) v->br[v->nbr++] = br[i];
     return v;
 }
-Val *vsys_at(Val *sys, const Face *f) {
-    if (sys->k != V_SYS) return sys;                     /* total element, or a neutral partial element */
-    for (int i = 0; i < sys->nbr; i++) {
-        IVal p = f ? iv_restrict(sys->br[i].phi->iv, f) : sys->br[i].phi->iv;
-        if (iv_is_one(p)) return f ? restrict_val(sys->br[i].v, f) : sys->br[i].v;
-    }
-    return NULL;
-}
-/* apply a function to every branch of a partial element (or to the element itself if it is total / neutral) */
-static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data) {
-    if (sys->k != V_SYS) return fn(sys, data);
-    VBranch *br = xalloc((sys->nbr + 1) * sizeof(VBranch));
-    for (int i = 0; i < sys->nbr; i++) { br[i].phi = sys->br[i].phi; br[i].v = fn(sys->br[i].v, data); }
-    return vsys(br, sys->nbr);
-}
-
-/* cubical subtypes: outS (inS x) = x, and outS s = u when phi holds */
-Val *vouts(Val *A, Val *phi, Val *u, Val *s) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(u, NULL); if (t) return t; }
-    s = force(s);   /* through a rigid definition application (the H_DEF plan): outS s with s := inS a is a, not a normal form (M20 F4 found it) */
-    if (s->k == V_INS) return s->a;
-    Val *v = mkval(V_NEU); v->h = H_OUTS; v->a = A; v->b = phi; v->c = u; v->dom = s; return v;
-}
-
 /* ---- application ---- */
 static long *unf_count;   /* diagnostic: how many times each definition's body was evaluated (EEZOTT_UNFOLD_COUNTS) */
 void unfold_counts_report(void) {
@@ -946,6 +865,13 @@ static void mpush_vproj(Val *p, int which);
 static void mpush_pair_snd(Val *p);
 static void mpush_ih_apply(Native *c, Val *y);
 static void mpush_subst_env(Env *e, Env **dst, int lv, IVal s);
+static void mpush_clofn(Val *(*fn)(void *, Val *), void *data, Val *arg);
+static void mpush_subst(Val *v, int lv, IVal s);
+static void mpush_restrict(Val *v, const Face *f);
+static void mpush_motive_applied(int data, VList pre, Val **idx);
+static void mpush_elim_apply_list(int data, VList args);
+static Val *proj1(Val *v, void *d);
+static Val *proj2(Val *v, void *d);
 static void mpush_apply_arg(Val *f, Arg *a) {
     if (a->proj) mpush_vproj(f, a->proj);
     else if (a->papp) mpush_vpapp(f, a->v, a->x, a->y);
@@ -966,9 +892,7 @@ static void inst_step(size_t off) {
     { Clo *c = F->c;
       if (c->ires && c->iarg == F->v && (c->imv == metas_version || c->istable)) MRET(c->ires); }
     F->save = meta_blocked; meta_blocked = 0;
-    if (F->c->fn == nfn && ((Native *)F->c->data)->code == N_IH && !((Native *)F->c->data)->mon) {
-        MCALL(mpush_ih_apply(F->c->data, F->v));   /* an induction hypothesis on the machine (the memo is native_apply's: first use) */
-    } else if (F->c->fn) mret = F->c->fn(F->c->data, F->v);
+    if (F->c->fn) MCALL(mpush_clofn(F->c->fn, F->c->data, F->v));   /* a native closure, on the machine */
     else MCALL(mpush_eval(env_push(F->c->env, F->v), F->c->t));
     { Clo *c = F->c; Val *r = mret;
       c->iarg = F->v; c->ires = r; c->imv = metas_version; c->istable = !meta_blocked;
@@ -1074,7 +998,7 @@ static void mpush_pair_snd(Val *p) { PairSndF *f = mpush(sizeof *f, pair_snd_ste
 static void pair_snd_step(size_t off) {
     MSTART
     if (F->p->b) MRET(F->p->b);
-    if (F->p->clo.fn) mret = F->p->clo.fn(F->p->clo.data, NULL);
+    if (F->p->clo.fn) MCALL(mpush_clofn(F->p->clo.fn, F->p->clo.data, NULL));
     else MCALL(mpush_eval(F->p->clo.env, F->p->clo.t));
     F->p->b = mret;
     MRET(F->p->b);
@@ -1437,7 +1361,6 @@ static void motive_applied_step(size_t off) {
     MFINISH
 }
 #undef F
-static Val *motive_applied(int data, VList *pre, Val **idx) { mpush_motive_applied(data, *pre, idx); return mrun(); }
 
 /* The literal-elimination tripwire (see below) and iota. */
 typedef struct { MHdr h; int data; VList *args; Val *target; } EreduceF;
@@ -1612,7 +1535,6 @@ static void ih_apply_step(size_t off) {
     MFINISH
 }
 #undef F
-static Val *ih_apply(Native *c, Val *y) { mpush_ih_apply(c, y); return mrun(); }
 
 /* ---- restriction to a face (the machine's) ----
    A value with an interval variable substituted, rebuilt bottom up by frames: its parts in the order the recursion
@@ -1805,11 +1727,6 @@ static Val *izero(void) { return vi(iv_zero()); }
 #define CAP(nt, i) ((nt)->cap.a[i].v)
 
 /* forward transport: fwd line r u = transp (λi. line (i ∨ r)) r u */
-static Val *vfwd(Val *line, Val *r, Val *u) { return vtransp(vnative(N_LINE_IOR, 0, 0, 0, 2, line, r), r, u); }
-/* heterogeneous composition: comp line phi u u0 = hcomp (line i1) phi (λi. fwd line i (u i)) (fwd line i0 u0) */
-static Val *vcomp(Val *line, Val *phi, Val *u, Val *u0) {
-    return vhcomp(vapp(line, ione(), 0), phi, vnative(N_FWD_SIDES, 0, 0, 0, 2, line, u), vfwd(line, izero(), u0));
-}
 /* fillers */
 static Val *vtfill(Val *line, Val *phi, Val *u0) { return vnative(N_TFILL, 0, 0, 0, 3, line, phi, u0); }     /* λi. transp (λj. line (i∧j)) (φ ∨ ~i) u0 */
 static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL, 0, 0, 0, 4, line, phi, u, u0); } /* λi. comp (λj. line (i∧j)) (φ ∨ ~i) [..] u0 */
@@ -1817,523 +1734,967 @@ static Val *vfill(Val *line, Val *phi, Val *u, Val *u0) { return vnative(N_FILL,
 static Val *transp_branch(Val *b, void *data) { Native *nt = data; return vtransp(nt->cap.a[0].v, nt->cap.a[1].v, b); }
 static Val *proj_arg(Val *v, void *data) { int k = *(int *)data; v = force(v); if (k < 0) return vproj(v, -k); if (v->k == V_NUM) v = num_view(v); if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor"); return v->args.a[k].v; }
 
-/* Every native closure application is memoized the same way - a pure step, keyed on the argument value, tagged by the
-   metas generation. An eliminator's induction hypothesis applied to the same value again is the same value, and branch
-   bodies do apply the same closure to the same value repeatedly (baddGo's column uses its IH three times). */
-static Val *native_apply(Native *nt, Val *arg) {
-    if (nt->mon && nt->marg == arg && (nt->mmv == metas_version || nt->mstable)) return nt->mres;
-    int save = meta_blocked; meta_blocked = 0;
-    Val *r = native_step(nt, arg);
-    nt->marg = arg; nt->mres = r; nt->mmv = metas_version; nt->mon = 1; nt->mstable = !meta_blocked;
-    meta_blocked |= save;
-    return r;
+/* ---- callbacks and natives on the machine (S3d) ----
+   A closure's C function, a system map's function and a face system's body run as frames: each known callback has
+   its frame, pushed by the dispatchers below. A callback without one runs as a C call in a frame of its own. The Kan
+   operations not yet on the machine are C calls in such frames too (mpush_c4). */
+static void mpush_vtransp(Val *line, Val *phi, Val *u0);
+static void mpush_vhcomp(Val *A, Val *phi, Val *u, Val *u0);
+static void mpush_vcomp(Val *line, Val *phi, Val *u, Val *u0);
+static void mpush_vunglue(Val *A, Val *phi, Val *Te, Val *b);
+static void mpush_def_at(int id, LVal L);
+static void mpush_vfwd(Val *line, Val *r, Val *u);
+
+typedef Val *(*CloFn)(void *, Val *);
+typedef struct { MHdr h; CloFn fn; void *data; Val *arg; } CcallF;
+static void ccall_step(size_t off) { CcallF *f = (CcallF *)(mst.p + off); CloFn fn = f->fn; void *d = f->data; Val *a = f->arg; Val *r = fn(d, a); mret = r; mpop(off); }
+typedef Val *(*MapFn)(Val *, void *);
+typedef struct { MHdr h; MapFn fn; Val *v; void *data; } McallF;
+static void mcall_step(size_t off) { McallF *f = (McallF *)(mst.p + off); MapFn fn = f->fn; Val *v = f->v; void *d = f->data; Val *r = fn(v, d); mret = r; mpop(off); }
+static void mpush_native_apply(Native *nt, Val *arg);
+static void mpush_natfn(void *data, Val *arg);
+static void mpush_mapfn(MapFn fn, Val *v, void *data);
+static void mpush_vsys_map(Val *sys, MapFn fn, void *data);
+static void mpush_vsys_faces(int nb, Val **phis, SysBody body, void *data);
+
+/* system maps: a function over every branch of a partial element (or the element itself, total or neutral) */
+typedef struct { MHdr h; Val *sys; MapFn fn; void *data; int i; VBranch *br; } VsysMapF;
+static void vsys_map_step(size_t off);
+static void mpush_vsys_map(Val *sys, MapFn fn, void *data) { VsysMapF *f = mpush(sizeof *f, vsys_map_step); f->sys = sys; f->fn = fn; f->data = data; }
+#define F ((VsysMapF *)(mst.p + off))
+static void vsys_map_step(size_t off) {
+    MSTART
+    if (F->sys->k != V_SYS) { Val *v = F->sys; MapFn fn = F->fn; void *d = F->data; MTAIL(mpush_mapfn(fn, v, d)); }
+    F->br = xalloc((F->sys->nbr + 1) * sizeof(VBranch));
+    for (F->i = 0; F->i < F->sys->nbr; F->i++) {
+        F->br[F->i].phi = F->sys->br[F->i].phi;
+        MCALL(mpush_mapfn(F->fn, F->sys->br[F->i].v, F->data));
+        F->br[F->i].v = mret;
+    }
+    MRET(vsys(F->br, F->sys->nbr));
+    MFINISH
 }
-static Val *native_step(Native *nt, Val *arg) {
-    switch (nt->code) {
-    case N_IH: return ih_apply(nt, arg);
-    case N_CONST: return CAP(nt, 0);
-    case N_LINE_DOM: { Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: domain of a non-function line"); return pi->dom; }
-    case N_LINE_COD_V: {    /* λi. B_i (v i), cap: line, vfn */
-        Val *pi = force(vapp(CAP(nt, 0), arg, 0)); if (pi->k != V_PI && pi->k != V_SIGMA) die("internal: codomain of a non-function line");
-        return inst(&pi->clo, vapp(CAP(nt, 1), arg, 0));
+#undef F
+static Val *vsys_map(Val *sys, Val *(*fn)(Val *, void *), void *data) { mpush_vsys_map(sys, fn, data); return mrun(); }
+
+/* a system at a face: the first branch that holds there, restricted to it */
+typedef struct { MHdr h; Val *sys; const Face *f; } VsysAtF;
+static void vsys_at_step(size_t off);
+static void mpush_vsys_at(Val *sys, const Face *f) { VsysAtF *x = mpush(sizeof *x, vsys_at_step); x->sys = sys; x->f = f; }
+#define F ((VsysAtF *)(mst.p + off))
+static void vsys_at_step(size_t off) {
+    Val *sys = F->sys; const Face *f = F->f;
+    if (sys->k != V_SYS) MRET(sys);                     /* total element, or a neutral partial element */
+    for (int i = 0; i < sys->nbr; i++) {
+        IVal p = f ? iv_restrict(sys->br[i].phi->iv, f) : sys->br[i].phi->iv;
+        if (iv_is_one(p)) { if (!f) MRET(sys->br[i].v); Val *v = sys->br[i].v; MTAIL(mpush_restrict(v, f)); }
     }
-    case N_TRANSP_V: {      /* v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1, cap: Aline, phi, u1 */
-        Val *inner = vnative(N_LINE_IOR, 1, 0, 0, 2, CAP(nt, 0), arg);
-        return vtransp(inner, ior(CAP(nt, 1), arg), CAP(nt, 2));
+    MRET(NULL);
+}
+#undef F
+Val *vsys_at(Val *sys, const Face *f) { mpush_vsys_at(sys, f); return mrun(); }
+
+/* cubical subtypes: outS (inS x) = x, and outS s = u when phi holds */
+typedef struct { MHdr h; Val *A, *phi, *u, *s; } VoutsF;
+static void vouts_step(size_t off);
+static void mpush_vouts(Val *A, Val *phi, Val *u, Val *s) { VoutsF *f = mpush(sizeof *f, vouts_step); f->A = A; f->phi = phi; f->u = u; f->s = s; }
+#define F ((VoutsF *)(mst.p + off))
+static void vouts_step(size_t off) {
+    MSTART
+    if (iv_is_one(F->phi->iv)) { Val *t = vsys_at(F->u, NULL); if (t) MRET(t); }
+    MFORCE(F->s);   /* through a rigid definition application (the H_DEF plan): outS s with s := inS a is a, not a normal form (M20 F4 found it) */
+    if (F->s->k == V_INS) MRET(F->s->a);
+    { Val *v = mkval(V_NEU); v->h = H_OUTS; v->a = F->A; v->b = F->phi; v->c = F->u; v->dom = F->s; MRET(v); }
+    MFINISH
+}
+#undef F
+Val *vouts(Val *A, Val *phi, Val *u, Val *s) { mpush_vouts(A, phi, u, s); return mrun(); }
+
+/* the eliminator through a formal composition (a normal form on indexed families, and on HITs later):
+     elim D p P m idx (hcomp A phi u u0) = comp (\k. P idx (hfill A phi u u0 k)) phi (\k. elim .. (u k)) (elim .. u0)   */
+typedef struct { MHdr h; int data, i; VList args; Val *t, *E; Native *nt; } EhcompF;
+static void elim_hcomp_step(size_t off);
+static void mpush_elim_hcomp(int data, VList args) { EhcompF *f = mpush(sizeof *f, elim_hcomp_step); f->data = data; f->args = args; }
+#define F ((EhcompF *)(mst.p + off))
+static void elim_hcomp_step(size_t off) {
+    MSTART
+    F->t = F->args.a[F->args.n - 1].v; MFORCE(F->t);
+    if (F->t->k != V_NEU || F->t->h != H_HCOMP || F->t->a->k != V_DATA || F->t->a->n != F->data) MRET(NULL);
+    F->E = mkval(V_NEU); F->E->h = H_ELIM; F->E->n = F->data; F->E->lvl = elim_lvl;
+    for (F->i = 0; F->i < F->args.n - 1; F->i++) { MCALL(mpush_vapp(F->E, F->args.a[F->i].v, F->args.a[F->i].irr)); F->E = mret; }
+    F->nt = xalloc(sizeof *F->nt); F->nt->code = N_ELIM_MOTIVE_LINE; F->nt->i1 = 0;   /* the motive at the indices (and their images), then the filler */
+    { Data *D = &datas[F->data]; int np = D->nparams, nb = D->nblock, K = block_ncons(F->data), m = D->nidx;
+      Val **iv = xalloc((m + 1) * sizeof(Val *));
+      for (int j = 0; j < m; j++) iv[j] = F->args.a[np + nb + K + j].v;
+      MCALL(mpush_motive_applied(F->data, F->args, iv)); }
+    vl_push(&F->nt->cap, mret, 0);
+    vl_push(&F->nt->cap, vnative(N_FILL, 1, 0, 0, 4, F->t->a, F->t->b, F->t->c, F->t->dom), 0);
+    MCALL(mpush_vapp(F->E, F->t->dom, 0));
+    { Val *line = mkval(V_LAM); line->clo.fn = nfn; line->clo.data = F->nt; line->isi = 1; line->name = "k";
+      Val *phi = F->t->b, *sides = vnative(N_ELIM_SIDES, 0, 0, 0, 2, F->E, F->t->c), *base = mret;
+      MTAIL(mpush_vcomp(line, phi, sides, base)); }
+    MFINISH
+}
+#undef F
+static Val *elim_hcomp(int data, VList *args) { mpush_elim_hcomp(data, *args); return mrun(); }
+
+/* the natives on numbers (natfn) */
+typedef struct { MHdr h; NatNative *nn; Val *arg, *a, *b; } NatfnF;
+static void natfn_step(size_t off);
+static void mpush_natfn(void *data, Val *arg) { NatfnF *f = mpush(sizeof *f, natfn_step); f->nn = data; f->arg = arg; }
+#define F ((NatfnF *)(mst.p + off))
+static void natfn_step(size_t off) {
+    MSTART
+    if (!F->nn->arg1) { NatNative *m = xalloc(sizeof *m); *m = *F->nn; m->arg1 = F->arg; MRET(vlam_native("n", natfn, m)); }
+    F->a = F->nn->arg1; MFORCE(F->a);
+    F->b = F->arg; MFORCE(F->b);
+    { NatNative *nn = F->nn; Val *a = F->a, *b = F->b;
+      if (a->k == V_NUM && b->k == V_NUM && a->n == nn->d && b->n == nn->d) {
+        /* pow is the one native whose result may be a number no limb list can hold (M17). When it is, the
+           kernel does not compute it and does not unfold it either: the native application itself stands, a
+           rigid neutral whose unfolding is itself - canonical enough for force, opaque to conversion (the same
+           power compares by its spine), and the laws (pow_add, pow_mul) prove what it cannot compute. Lean's
+           pow guard (S2). An elimination on it, or a native over it, stays a neutral: no canonical form exists. */
+        if (nn->code == 6 && !bn_fits_pow(a->num, b->num)) {
+            Val *v = mkval(V_NEU); v->h = H_DEF; v->n = nn->def; v->lvl = a->lvl;
+            Arg x = {0}; x.v = nn->arg1; v = neu_app(v, x); x.v = F->arg; v = neu_app(v, x);
+            v->unf = v; v->unf_n = v->args.n; v->unf_stable = 1;
+            MRET(v);
+        }
+        MRET(vnum(nn->d, a->lvl, nat_op(nn->code, a->num, b->num)));
+      }
+      static int diag = -1; if (diag < 0) diag = getenv("EEZOTT_TRIPWIRE_METHODS") != NULL;
+      if (diag) {   /* the last native that fell back to its body, for the tripwire's diagnostic (C forces: diagnostics only) */
+        fb_count[nn->code]++;
+        Val *x[2] = { a, b };
+        for (int i = 0; i < 2; i++) {
+            Val *v = x[i]; int k = 0; char *d = NULL;
+            while (v->k == V_CON && v->args.n == 1 && k < 100000) { v = force(v->args.a[0].v); k++; }
+            if (v->k == V_NUM) d = bn_to_dec(v->num);
+            snprintf(last_fallback[i], 64, "%s%s+%d sucs, core kind %d%s%s", d ? "lit " : "", d ? d : "", k, v->k,
+                     v->k == V_NEU ? " head " : "", v->k == V_NEU ? (v->h == H_DEF ? defs[v->n].name : v->h == H_VAR ? "var" : v->h == H_ELIM ? "elim" : "other") : "");
+            free(d);
+        }
+        last_fallback_code = nn->code;
+        if (!fb_first[nn->code][0][0]) { snprintf(fb_first[nn->code][0], 64, "%s", last_fallback[0]); snprintf(fb_first[nn->code][1], 64, "%s", last_fallback[1]); }
+      } }
+    MCALL(mpush_vapp(F->nn->fallback, F->nn->arg1, 0));
+    { Val *g = mret, *arg = F->arg; MTAIL(mpush_vapp(g, arg, 0)); }
+    MFINISH
+}
+#undef F
+static Val *natfn(void *data, Val *arg) { mpush_natfn(data, arg); return mrun(); }
+
+/* Every native closure application is memoized the same way - a pure step, keyed on the argument value, tagged by
+   the metas generation (native_apply's frame). An eliminator's induction hypothesis applied to the same value again is
+   the same value, and branch bodies do apply the same closure to the same value repeatedly (baddGo's column uses its
+   IH three times). */
+typedef struct { MHdr h; Native *nt; Val *arg; int save; } NapF;
+static void native_apply_step(size_t off);
+static void native_step_step(size_t off);
+static void mpush_native_step(Native *nt, Val *arg);
+static void mpush_native_apply(Native *nt, Val *arg) { NapF *f = mpush(sizeof *f, native_apply_step); f->nt = nt; f->arg = arg; }
+#define F ((NapF *)(mst.p + off))
+static void native_apply_step(size_t off) {
+    MSTART
+    { Native *nt = F->nt; if (nt->mon && nt->marg == F->arg && (nt->mmv == metas_version || nt->mstable)) MRET(nt->mres); }
+    F->save = meta_blocked; meta_blocked = 0;
+    MCALL(mpush_native_step(F->nt, F->arg));
+    { Native *nt = F->nt; Val *r = mret;
+      nt->marg = F->arg; nt->mres = r; nt->mmv = metas_version; nt->mon = 1; nt->mstable = !meta_blocked;
+      meta_blocked |= F->save;
+      MRET(r); }
+    MFINISH
+}
+#undef F
+static Val *native_apply(Native *nt, Val *arg) { mpush_native_apply(nt, arg); return mrun(); }
+
+/* one native closure's step, by its code; the codes that call nothing return at once, the others run in order */
+typedef struct { MHdr h; Native *nt; Val *arg, *t, *u; int i, n; VBranch br[3]; VBranch *bp; Env *e; VList a2; Native *sq; } NstF;
+static void mpush_native_step(Native *nt, Val *arg) { NstF *f = mpush(sizeof *f, native_step_step); f->nt = nt; f->arg = arg; }
+#define F ((NstF *)(mst.p + off))
+#define NC(i) (F->nt->cap.a[i].v)
+static void native_step_step(size_t off) {
+    MSTART
+    if (F->nt->code == N_IH) { Native *nt = F->nt; Val *a = F->arg; MTAIL(mpush_ih_apply(nt, a)); }
+    if (F->nt->code == N_CONST) MRET(NC(0));
+    if (F->nt->code == N_LINE_DOM || F->nt->code == N_LINE_COD_V || F->nt->code == N_HCOMP_PI_SIDES || F->nt->code == N_PATH_HCOMP_SIDES
+        || F->nt->code == N_LINE_PATH_AT || F->nt->code == N_PATH_TRANSP_SIDES || F->nt->code == N_DATA_ARG_LINE || F->nt->code == N_SYS_PROJ) {
+        /* these begin with the line (or the element) at the argument, forced */
+        MCALL(mpush_vapp(NC(0), F->arg, 0)); F->t = mret; MFORCE(F->t);
+        if (F->nt->code == N_LINE_DOM) { if (F->t->k != V_PI && F->t->k != V_SIGMA) die("internal: domain of a non-function line"); MRET(F->t->dom); }
+        if (F->nt->code == N_LINE_COD_V) {    /* λi. B_i (v i), cap: line, vfn */
+            if (F->t->k != V_PI && F->t->k != V_SIGMA) die("internal: codomain of a non-function line");
+            MCALL(mpush_vapp(NC(1), F->arg, 0));
+            { Clo *c = &F->t->clo; Val *x = mret; MTAIL(mpush_inst(c, x)); }
+        }
+        if (F->nt->code == N_HCOMP_PI_SIDES) { Val *g = F->t, *x = NC(1); int irr = F->nt->i1; MTAIL(mpush_vapp(g, x, irr)); }   /* λi. (u i) x */
+        if (F->nt->code == N_PATH_HCOMP_SIDES) {   /* λi. [φ ↦ (u i) @ j, j ↦ y, ~j ↦ x], cap: u, phi, j, x, y */
+            MCALL(mpush_vpapp(F->t, NC(2), NC(3), NC(4)));
+            F->br[0].phi = NC(1); F->br[0].v = mret;
+            F->br[1].phi = NC(2); F->br[1].v = NC(4);
+            F->br[2].phi = ineg(NC(2)); F->br[2].v = NC(3);
+            MRET(vsys(F->br, 3));
+        }
+        if (F->nt->code == N_LINE_PATH_AT) {       /* λi. (line i).line @ j, cap: line, j */
+            if (F->t->k != V_PATHP) die("internal: path line expected");
+            { Val *g = F->t->a, *j = NC(1); MTAIL(mpush_vapp(g, j, 0)); }
+        }
+        if (F->nt->code == N_PATH_TRANSP_SIDES) {  /* λi. [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i], cap: line, phi, p, j */
+            if (F->t->k != V_PATHP) die("internal: path line expected");
+            MCALL(mpush_vapp(NC(0), izero(), 0)); F->u = mret;
+            MCALL(mpush_vpapp(NC(2), NC(3), F->u->b, F->u->c));
+            F->br[0].phi = NC(1); F->br[0].v = mret;
+            F->br[1].phi = ineg(NC(3)); F->br[1].v = F->t->b;
+            F->br[2].phi = NC(3); F->br[2].v = F->t->c;
+            MRET(vsys(F->br, 3));
+        }
+        if (F->nt->code == N_DATA_ARG_LINE) {      /* λi. A_j at (params of line i, fills k<j at i); cap: line, fill_0..; i1=con, i2=j */
+            if (F->t->k != V_DATA) die("internal: data line expected");
+            { Con *C = con_at(F->nt->i1, F->t->lvl); int np = datas[C->data].nparams;
+              F->e = NULL; for (int i = 0; i < np; i++) F->e = env_push(F->e, F->t->args.a[i].v); }
+            for (F->i = 0; F->i < F->nt->i2; F->i++) { MCALL(mpush_vapp(NC(1 + F->i), F->arg, 0)); F->e = env_push(F->e, mret); }
+            { Env *e = F->e; Term *ty = con_at(F->nt->i1, F->t->lvl)->args[F->nt->i2].ty; MTAIL(mpush_eval(e, ty)); }
+        }
+        /* N_SYS_PROJ: λi. proj_k (u i) over the partial element; cap: u; i1 = k */
+        { int *k = xalloc(sizeof *k); *k = F->nt->i1; Val *ui = F->t; MTAIL(mpush_vsys_map(ui, proj_arg, k)); }
     }
-    case N_LINE_IOR: {      /* i1==0: λj. line (j ∨ r); i1==1: λj. line (r ∨ ~j) */
-        Val *r = CAP(nt, 1);
-        return vapp(CAP(nt, 0), nt->i1 ? ior(r, ineg(arg)) : ior(arg, r), 0);
+    if (F->nt->code == N_TRANSP_V) {      /* v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1, cap: Aline, phi, u1 */
+        Val *inner = vnative(N_LINE_IOR, 1, 0, 0, 2, NC(0), F->arg), *phi = ior(NC(1), F->arg), *u1 = NC(2);
+        MTAIL(mpush_vtransp(inner, phi, u1));
     }
-    case N_LINE_IAND: return vapp(CAP(nt, 0), iand(CAP(nt, 1), arg), 0);   /* λj. line (i ∧ j) */
-    case N_HCOMP_PI_SIDES: return vapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 1), nt->i1);   /* λi. (u i) x */
-    case N_PATH_HCOMP_SIDES: {   /* λi. [φ ↦ (u i) @ j, j ↦ y, ~j ↦ x], cap: u, phi, j, x, y */
-        VBranch br[3];
-        br[0].phi = CAP(nt, 1); br[0].v = vpapp(force(vapp(CAP(nt, 0), arg, 0)), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4));
-        br[1].phi = CAP(nt, 2); br[1].v = CAP(nt, 4);
-        br[2].phi = ineg(CAP(nt, 2)); br[2].v = CAP(nt, 3);
-        return vsys(br, 3);
+    if (F->nt->code == N_LINE_IOR) {      /* i1==0: λj. line (j ∨ r); i1==1: λj. line (r ∨ ~j) */
+        Val *r = NC(1), *x = F->nt->i1 ? ior(r, ineg(F->arg)) : ior(F->arg, r), *g = NC(0);
+        MTAIL(mpush_vapp(g, x, 0));
     }
-    case N_LINE_PATH_AT: {       /* λi. (line i).line @ j  (the type of paths at i, applied to j), cap: line, j */
-        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
-        return vapp(pt->a, CAP(nt, 1), 0);
+    if (F->nt->code == N_LINE_IAND) { Val *g = NC(0), *x = iand(NC(1), F->arg); MTAIL(mpush_vapp(g, x, 0)); }   /* λj. line (i ∧ j) */
+    if (F->nt->code == N_FWD_SIDES) {     /* λi. fwd line i (u i), mapped over the partial element */
+        MCALL(mpush_vapp(NC(1), F->arg, 0)); F->t = mret;
+        if (F->t->k != V_SYS) { Val *line = NC(0), *i = F->arg, *ui = F->t; MTAIL(mpush_vfwd(line, i, ui)); }
+        F->bp = xalloc((F->t->nbr + 1) * sizeof(VBranch));
+        for (F->i = 0; F->i < F->t->nbr; F->i++) {
+            F->bp[F->i].phi = F->t->br[F->i].phi;
+            MCALL(mpush_vfwd(NC(0), F->arg, F->t->br[F->i].v));
+            F->bp[F->i].v = mret;
+        }
+        MRET(vsys(F->bp, F->t->nbr));
     }
-    case N_PATH_TRANSP_SIDES: {  /* λi. [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i], cap: line, phi, p, j */
-        Val *pt = force(vapp(CAP(nt, 0), arg, 0)); if (pt->k != V_PATHP) die("internal: path line expected");
-        Val *p0 = vapp(CAP(nt, 0), izero(), 0);
-        VBranch br[3];
-        br[0].phi = CAP(nt, 1); br[0].v = vpapp(CAP(nt, 2), CAP(nt, 3), p0->b, p0->c);
-        br[1].phi = ineg(CAP(nt, 3)); br[1].v = pt->b;
-        br[2].phi = CAP(nt, 3); br[2].v = pt->c;
-        return vsys(br, 3);
+    if (F->nt->code == N_FILL_SIDES) {    /* λj. [φ ↦ u (i∧j), ~i ↦ u0], cap: u, u0, i, phi */
+        MCALL(mpush_vapp(NC(0), iand(NC(2), F->arg), 0));
+        F->br[0].phi = NC(3); F->br[0].v = mret;
+        F->br[1].phi = ineg(NC(2)); F->br[1].v = NC(1);
+        MRET(vsys(F->br, 2));
     }
-    case N_FWD_SIDES: {          /* λi. fwd line i (u i), mapped over the partial element */
-        Val *ui = vapp(CAP(nt, 1), arg, 0);
-        struct { Val *line, *i; } d = { CAP(nt, 0), arg };
-        Val *(*fn)(Val *, void *) = NULL; (void)fn;
-        if (ui->k != V_SYS) return vfwd(d.line, d.i, ui);
-        VBranch *br = xalloc((ui->nbr + 1) * sizeof(VBranch));
-        for (int k = 0; k < ui->nbr; k++) { br[k].phi = ui->br[k].phi; br[k].v = vfwd(d.line, d.i, ui->br[k].v); }
-        return vsys(br, ui->nbr);
+    if (F->nt->code == N_FILL) {          /* i1==1: hfill (cap: A, phi, u, u0); i1==0: fill (cap: line, phi, u, u0) */
+        Val *sides = vnative(N_FILL_SIDES, 0, 0, 0, 4, NC(2), NC(3), F->arg, NC(1));
+        Val *phi2 = ior(NC(1), ineg(F->arg)), *u0 = NC(3);
+        if (F->nt->i1) { Val *A = NC(0); MTAIL(mpush_vhcomp(A, phi2, sides, u0)); }
+        { Val *line = vnative(N_LINE_IAND, 0, 0, 0, 2, NC(0), F->arg); MTAIL(mpush_vcomp(line, phi2, sides, u0)); }
     }
-    case N_FILL_SIDES: {         /* λj. [φ ↦ u (i∧j), ~i ↦ u0], cap: u, u0, i, phi */
-        VBranch br[2];
-        br[0].phi = CAP(nt, 3); br[0].v = vapp(CAP(nt, 0), iand(CAP(nt, 2), arg), 0);
-        br[1].phi = ineg(CAP(nt, 2)); br[1].v = CAP(nt, 1);
-        return vsys(br, 2);
+    if (F->nt->code == N_TFILL) {
+        Val *line = vnative(N_LINE_IAND, 0, 0, 0, 2, NC(0), F->arg), *phi = ior(NC(1), ineg(F->arg)), *u0 = NC(2);
+        MTAIL(mpush_vtransp(line, phi, u0));
     }
-    case N_FILL: {               /* i1==1: hfill (cap: A, phi, u, u0); i1==0: fill (cap: line, phi, u, u0) */
-        Val *sides = vnative(N_FILL_SIDES, 0, 0, 0, 4, CAP(nt, 2), CAP(nt, 3), arg, CAP(nt, 1));
-        Val *phi2 = ior(CAP(nt, 1), ineg(arg));
-        if (nt->i1) return vhcomp(CAP(nt, 0), phi2, sides, CAP(nt, 3));
-        return vcomp(vnative(N_LINE_IAND, 0, 0, 0, 2, CAP(nt, 0), arg), phi2, sides, CAP(nt, 3));
+    if (F->nt->code == N_ELIM_MOTIVE_LINE) {   /* λk. P idx (fill k); cap: P, idx.., fill; i1 = #idx */
+        F->t = NC(0);
+        for (F->i = 0; F->i < F->nt->i1; F->i++) { MCALL(mpush_vapp(F->t, NC(1 + F->i), 1)); F->t = mret; }
+        MCALL(mpush_vapp(NC(1 + F->nt->i1), F->arg, 0));
+        { Val *P = F->t, *x = mret; MTAIL(mpush_vapp(P, x, 0)); }
     }
-    case N_TFILL: return vtransp(vnative(N_LINE_IAND, 0, 0, 0, 2, CAP(nt, 0), arg), ior(CAP(nt, 1), ineg(arg)), CAP(nt, 2));
-    case N_DATA_ARG_LINE: {      /* λi. A_j evaluated at (params of line i, fills k<j at i); cap: line, fill_0..fill_{j-1}; i1=con, i2=j */
-        Val *Di = force(vapp(CAP(nt, 0), arg, 0)); if (Di->k != V_DATA) die("internal: data line expected");
-        Con *C = con_at(nt->i1, Di->lvl); int np = datas[C->data].nparams;
-        Env *e = NULL;
-        for (int i = 0; i < np; i++) e = env_push(e, Di->args.a[i].v);
-        for (int k = 0; k < nt->i2; k++) e = env_push(e, vapp(CAP(nt, 1 + k), arg, 0));
-        return eval(e, C->args[nt->i2].ty);
+    if (F->nt->code == N_ELIM_SIDES) {    /* λk. elim .. (u k) */
+        MCALL(mpush_vapp(NC(1), F->arg, 0));
+        { Val *w = mret; void *E = NC(0); MTAIL(mpush_vsys_map(w, apply_to, E)); }
     }
-    case N_ELIM_MOTIVE_LINE: {   /* λk. P idx (fill k); cap: P, idx.., fill; i1 = #idx */
-        Val *P = CAP(nt, 0);
-        for (int j = 0; j < nt->i1; j++) P = vapp(P, CAP(nt, 1 + j), 1);
-        return vapp(P, vapp(CAP(nt, 1 + nt->i1), arg, 0), 0);
+    if (F->nt->code == N_SUBST) { Val *v = NC(0); int lv = F->nt->i1; IVal iv = F->arg->iv; MTAIL(mpush_subst(v, lv, iv)); }   /* λi. v[F := i] */
+    if (F->nt->code == N_GLUE_T) {        /* λi. fst (Te_i), total on its face */
+        MCALL(mpush_subst(NC(0), F->nt->i1, F->arg->iv));
+        { Val *Te = vsys_at(mret, NULL);
+          if (!Te) die("internal: Glue: the glued type is used outside its face");
+          MTAIL(mpush_vproj(Te, 1)); }
     }
-    case N_ELIM_SIDES: return vsys_map(vapp(CAP(nt, 1), arg, 0), apply_to, CAP(nt, 0));   /* λk. elim .. (u k) */
-    case N_SUBST: return subst_val(CAP(nt, 0), nt->i1, arg->iv);                    /* λi. v[F := i] */
-    case N_GLUE_T: {                                                                  /* λi. fst (Te_i), total on its face */
-        Val *Te = vsys_at(subst_val(CAP(nt, 0), nt->i1, arg->iv), NULL);
-        if (!Te) die("internal: Glue: the glued type is used outside its face");
-        return vproj(Te, 1);
+    if (F->nt->code == N_UNGLUE_U0) {
+        MCALL(mpush_subst(NC(0), F->nt->i1, F->arg->iv)); F->t = mret;
+        MCALL(mpush_subst(NC(1), F->nt->i1, F->arg->iv)); F->u = mret;
+        MCALL(mpush_subst(NC(2), F->nt->i1, F->arg->iv));
+        { Val *A = F->t, *phi = F->u, *Te = mret, *b = NC(3); MTAIL(mpush_vunglue(A, phi, Te, b)); }
     }
-    case N_UNGLUE_U0: return vunglue(subst_val(CAP(nt, 0), nt->i1, arg->iv), subst_val(CAP(nt, 1), nt->i1, arg->iv), subst_val(CAP(nt, 2), nt->i1, arg->iv), CAP(nt, 3));
-    case N_GLUE_TR_SIDES: {
-        TrSides d = { CAP(nt, 0), CAP(nt, 1), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4), arg, nt->i1 };
-        Val *phis[2] = { CAP(nt, 0), CAP(nt, 1) };
-        return vsys_faces(2, phis, glue_tr_body, &d);
+    if (F->nt->code == N_GLUE_TR_SIDES) {
+        TrSides *d = xalloc(sizeof *d); *d = (TrSides){ NC(0), NC(1), NC(2), NC(3), NC(4), F->arg, F->nt->i1 };
+        Val **phis = xalloc(2 * sizeof(Val *)); phis[0] = NC(0); phis[1] = NC(1);
+        MTAIL(mpush_vsys_faces(2, phis, glue_tr_body, d));
     }
-    case N_GLUE_A1P_SIDES: {
-        A1pData d = { CAP(nt, 0), CAP(nt, 1), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4), CAP(nt, 5), arg };
-        Val *phis[2] = { CAP(nt, 0), CAP(nt, 1) };
-        return vsys_faces(2, phis, glue_a1p_body, &d);
+    if (F->nt->code == N_GLUE_A1P_SIDES) {
+        A1pData *d = xalloc(sizeof *d); *d = (A1pData){ NC(0), NC(1), NC(2), NC(3), NC(4), NC(5), F->arg };
+        Val **phis = xalloc(2 * sizeof(Val *)); phis[0] = NC(0); phis[1] = NC(1);
+        MTAIL(mpush_vsys_faces(2, phis, glue_a1p_body, d));
     }
-    case N_GLUE_HF: {
-        HfData d = { CAP(nt, 0), CAP(nt, 1), CAP(nt, 2), CAP(nt, 3), arg };
-        Val *phis[1] = { CAP(nt, 4) };
-        return vsys_faces(1, phis, glue_hf_body, &d);
+    if (F->nt->code == N_GLUE_HF) {
+        HfData *d = xalloc(sizeof *d); *d = (HfData){ NC(0), NC(1), NC(2), NC(3), F->arg };
+        Val **phis = xalloc(sizeof(Val *)); phis[0] = NC(4);
+        MTAIL(mpush_vsys_faces(1, phis, glue_hf_body, d));
     }
-    case N_GLUE_HC_SIDES: {
-        HcData d = { CAP(nt, 0), CAP(nt, 1), CAP(nt, 2), CAP(nt, 3), CAP(nt, 4), CAP(nt, 5), arg };
-        Val *phis[2] = { CAP(nt, 3), CAP(nt, 1) };
-        return vsys_faces(2, phis, glue_hc_body, &d);
+    if (F->nt->code == N_GLUE_HC_SIDES) {
+        HcData *d = xalloc(sizeof *d); *d = (HcData){ NC(0), NC(1), NC(2), NC(3), NC(4), NC(5), F->arg };
+        Val **phis = xalloc(2 * sizeof(Val *)); phis[0] = NC(3); phis[1] = NC(1);
+        MTAIL(mpush_vsys_faces(2, phis, glue_hc_body, d));
     }
-    case N_GCOMP_SIDES: {
-        Caps c = { 5, { CAP(nt, 0), CAP(nt, 1), CAP(nt, 2), CAP(nt, 3), arg } };
-        Val *phis[2] = { CAP(nt, 1), ineg(CAP(nt, 1)) };
-        return vsys_faces(2, phis, gcomp_body, &c);
+    if (F->nt->code == N_GCOMP_SIDES) {
+        Caps *c = xalloc(sizeof *c); *c = (Caps){ 5, { NC(0), NC(1), NC(2), NC(3), F->arg } };
+        Val **phis = xalloc(2 * sizeof(Val *)); phis[0] = NC(1); phis[1] = ineg(NC(1));
+        MTAIL(mpush_vsys_faces(2, phis, gcomp_body, c));
     }
-    case N_HITTR_SIDES: {        /* λj. [ psi_k -> squeeze of the boundary at stage ~j, phi -> u0 ]; cap: line, phi, u0, fills..; i1 = con */
-        int np = datas[cons[nt->i1].data].nparams;
-        Val *line = CAP(nt, 0), *phi = CAP(nt, 1), *u0 = CAP(nt, 2);
-        Val *stage = ineg(arg);
-        Val *Dst = vapp(line, stage, 0);   /* the type at the stage: its parameters */
-        Con *C = con_at(nt->i1, Dst->lvl);
-        Env *env = NULL;
-        for (int i = 0; i < np; i++) env = env_push(env, Dst->args.a[i].v);
-        for (int j = 0; j < C->nargs; j++) env = env_push(env, vapp(CAP(nt, 3 + j), stage, 0));
-        for (int q = 0; q < C->nint; q++) env = env_push(env, u0->args.a[np + C->nargs + q].v);
-        Val *bsys = eval(env, C->boundary);
-        Native *sq = xalloc(sizeof *sq); sq->code = 0;
-        vl_push(&sq->cap, vnative(N_LINE_IOR, 0, 0, 0, 2, line, stage), 0); vl_push(&sq->cap, ior(stage, phi), 0);
-        Val *sqz = vsys_map(bsys, transp_branch, sq);
-        VBranch br[2]; int n = 0;
-        if (sqz->k == V_SYS) { VBranch *b2 = xalloc((sqz->nbr + 2) * sizeof(VBranch)); memcpy(b2, sqz->br, sqz->nbr * sizeof(VBranch)); n = sqz->nbr; b2[n].phi = phi; b2[n].v = u0; return vsys(b2, n + 1); }
-        br[n].phi = ione(); br[n].v = sqz; n++;
-        br[n].phi = phi; br[n].v = u0; n++;
-        return vsys(br, n);
+    if (F->nt->code == N_HITTR_SIDES) {   /* λj. [ psi_k -> squeeze of the boundary at stage ~j, phi -> u0 ]; cap: line, phi, u0, fills..; i1 = con */
+        F->t = ineg(F->arg);   /* the stage */
+        MCALL(mpush_vapp(NC(0), F->t, 0)); F->u = mret;   /* the type at the stage: its parameters */
+        { int np = datas[cons[F->nt->i1].data].nparams;
+          F->e = NULL; for (int i = 0; i < np; i++) F->e = env_push(F->e, F->u->args.a[i].v); }
+        for (F->i = 0; F->i < con_at(F->nt->i1, F->u->lvl)->nargs; F->i++) { MCALL(mpush_vapp(NC(3 + F->i), F->t, 0)); F->e = env_push(F->e, mret); }
+        { Con *C = con_at(F->nt->i1, F->u->lvl); int np = datas[cons[F->nt->i1].data].nparams; Val *u0 = NC(2);
+          for (int q = 0; q < C->nint; q++) F->e = env_push(F->e, u0->args.a[np + C->nargs + q].v);
+          MCALL(mpush_eval(F->e, C->boundary)); }
+        F->sq = xalloc(sizeof *F->sq); F->sq->code = 0;
+        vl_push(&F->sq->cap, vnative(N_LINE_IOR, 0, 0, 0, 2, NC(0), F->t), 0); vl_push(&F->sq->cap, ior(F->t, NC(1)), 0);
+        MCALL(mpush_vsys_map(mret, transp_branch, F->sq));
+        { Val *sqz = mret, *phi = NC(1), *u0 = NC(2);
+          if (sqz->k == V_SYS) { VBranch *b2 = xalloc((sqz->nbr + 2) * sizeof(VBranch)); memcpy(b2, sqz->br, sqz->nbr * sizeof(VBranch)); int n = sqz->nbr; b2[n].phi = phi; b2[n].v = u0; MRET(vsys(b2, n + 1)); }
+          F->br[0].phi = ione(); F->br[0].v = sqz;
+          F->br[1].phi = phi; F->br[1].v = u0;
+          MRET(vsys(F->br, 2)); }
     }
-    case N_ELIM_PATH_IH: {       /* λk. elim base.. idx.. (p @ k); cap: base (np+1+ncons values), idx.., p, x, y; i1 = data */
-        int nb = nt->cap.n - 3;
-        VList a2 = {0}; for (int i = 0; i < nb; i++) vl_push(&a2, CAP(nt, i), nt->cap.a[i].irr);
-        vl_push(&a2, vpapp(CAP(nt, nb), arg, CAP(nt, nb + 1), CAP(nt, nb + 2)), 0);
-        return elim_apply_list(nt->i1, &a2);
+    if (F->nt->code == N_ELIM_PATH_IH) {  /* λk. elim base.. idx.. (p @ k); cap: base (np+1+ncons values), idx.., p, x, y; i1 = data */
+        F->n = F->nt->cap.n - 3;
+        F->a2 = (VList){0}; for (int i = 0; i < F->n; i++) vl_push(&F->a2, NC(i), F->nt->cap.a[i].irr);
+        MCALL(mpush_vpapp(NC(F->n), F->arg, NC(F->n + 1), NC(F->n + 2)));
+        vl_push(&F->a2, mret, 0);
+        { int data = F->nt->i1; VList a = F->a2; MTAIL(mpush_elim_apply_list(data, a)); }
     }
-    case N_TRANSP_MAP: return vsys_map(vapp(CAP(nt, 2), arg, 0), transp_branch, nt);   /* λi. transp line phi (u i) over the partial element; cap: line, phi, u */
-    case N_SYS_PROJ: {           /* λi. proj_k (u i) over the partial element; cap: u; i1 = k */
-        Val *ui = force(vapp(CAP(nt, 0), arg, 0));
-        int k = nt->i1;
-        return vsys_map(ui, proj_arg, &k);
+    if (F->nt->code == N_TRANSP_MAP) {    /* λi. transp line phi (u i) over the partial element; cap: line, phi, u */
+        MCALL(mpush_vapp(NC(2), F->arg, 0));
+        { Val *w = mret; void *nt = F->nt; MTAIL(mpush_vsys_map(w, transp_branch, nt)); }
     }
-    }
-    die("internal: unknown native closure %d", nt->code);
-    return NULL;
+    die("internal: unknown native closure %d", F->nt->code);
+    MFINISH
+}
+#undef NC
+#undef F
+
+/* proj_arg: a constructor's or a pair's component of a system's branch */
+typedef struct { MHdr h; Val *v; int k; } ProjArgF;
+static void proj_arg_step(size_t off);
+static void mpush_proj_arg(Val *v, int k) { ProjArgF *f = mpush(sizeof *f, proj_arg_step); f->v = v; f->k = k; }
+#define F ((ProjArgF *)(mst.p + off))
+static void proj_arg_step(size_t off) {
+    MSTART
+    MFORCE(F->v);
+    if (F->k < 0) { Val *v = F->v; int w = -F->k; MTAIL(mpush_vproj(v, w)); }
+    { Val *v = F->v; if (v->k == V_NUM) v = num_view(v);
+      if (v->k != V_CON && v->k != V_DATA) die("internal: projecting a non-constructor");
+      MRET(v->args.a[F->k].v); }
+    MFINISH
+}
+#undef F
+
+/* the dispatchers */
+static void mpush_mapfn(MapFn fn, Val *v, void *data) {
+    if (fn == transp_branch) { Native *nt = data; mpush_vtransp(nt->cap.a[0].v, nt->cap.a[1].v, v); return; }
+    if (fn == apply_to) { mpush_vapp((Val *)data, v, 0); return; }
+    if (fn == proj_arg) { mpush_proj_arg(v, *(int *)data); return; }
+    if (fn == elim_of_branch) { VList a2 = vl_copy((VList *)data); vl_push(&a2, v, 0); mpush_elim_apply_list(elim_data_cur, a2); return; }
+    if (fn == proj1) { mpush_vproj(v, 1); return; }
+    if (fn == proj2) { mpush_vproj(v, 2); return; }
+    McallF *f = mpush(sizeof *f, mcall_step); f->fn = fn; f->v = v; f->data = data;
 }
 
-/* all branches of the partial element u (at a fresh i) are constructor c? */
-static int sides_all_con(Val *u, int con) {
-    u = force(u);   /* a rigid definition application unfolds to the partial element */
-    Val *ui = vapp(u, fresh_ivar(), 0);
-    if (ui->k == V_NUM) ui = num_view(ui);
-    if (ui->k == V_SYS) {
-        for (int i = 0; i < ui->nbr; i++) { Val *w = ui->br[i].v; if (w->k == V_NUM) w = num_view(w); if (w->k != V_CON || w->n != con) return 0; }
-        return 1;
-    }
-    return ui->k == V_CON && ui->n == con;
+
+
+static void mpush_transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv);
+static void mpush_hcomp_glue(Val *A, Val *psi, Val *u, Val *u0);
+/* ---- transport and composition on the machine (S3d) ---- */
+/* forward transport: fwd line r u = transp (λi. line (i ∨ r)) r u */
+static void mpush_vfwd(Val *line, Val *r, Val *u) { mpush_vtransp(vnative(N_LINE_IOR, 0, 0, 0, 2, line, r), r, u); }
+
+/* heterogeneous composition: comp line phi u u0 = hcomp (line i1) phi (λi. fwd line i (u i)) (fwd line i0 u0);
+   gcomp (gen = 1): the base also propagated on ~phi, so that no empty systems arise (Agda's mkGComp) */
+typedef struct { MHdr h; Val *line, *phi, *u, *u0, *A1; int gen; } VcompF;
+static void vcomp_step(size_t off);
+static void mpush_vcomp_g(Val *line, Val *phi, Val *u, Val *u0, int gen) { VcompF *f = mpush(sizeof *f, vcomp_step); f->line = line; f->phi = phi; f->u = u; f->u0 = u0; f->gen = gen; }
+static void mpush_vcomp(Val *line, Val *phi, Val *u, Val *u0) { mpush_vcomp_g(line, phi, u, u0, 0); }
+#define F ((VcompF *)(mst.p + off))
+static void vcomp_step(size_t off) {
+    MSTART
+    MCALL(mpush_vapp(F->line, ione(), 0)); F->A1 = mret;
+    MCALL(mpush_vfwd(F->line, izero(), F->u0));
+    { Val *A1 = F->A1, *base = mret, *phi, *sides;
+      if (F->gen) { phi = ior(F->phi, ineg(F->phi)); sides = vnative(N_GCOMP_SIDES, 0, 0, 0, 4, F->line, F->phi, F->u, F->u0); }
+      else { phi = F->phi; sides = vnative(N_FWD_SIDES, 0, 0, 0, 2, F->line, F->u); }
+      MTAIL(mpush_vhcomp(A1, phi, sides, base)); }
+    MFINISH
 }
+#undef F
+
+/* all branches of the partial element u (at a fresh i) are constructor c? (a non-NULL value for yes) */
+typedef struct { MHdr h; Val *u; int con; } SidesF;
+static void sides_step(size_t off);
+static void mpush_sides_all_con(Val *u, int con) { SidesF *f = mpush(sizeof *f, sides_step); f->u = u; f->con = con; }
+#define F ((SidesF *)(mst.p + off))
+static void sides_step(size_t off) {
+    MSTART
+    MFORCE(F->u);   /* a rigid definition application unfolds to the partial element */
+    MCALL(mpush_vapp(F->u, fresh_ivar(), 0));
+    { Val *ui = mret; int con = F->con;
+      if (ui->k == V_NUM) ui = num_view(ui);
+      if (ui->k == V_SYS) {
+          for (int i = 0; i < ui->nbr; i++) { Val *w = ui->br[i].v; if (w->k == V_NUM) w = num_view(w); if (w->k != V_CON || w->n != con) MRET(NULL); }
+          MRET(ione());
+      }
+      MRET(ui->k == V_CON && ui->n == con ? ione() : NULL); }
+    MFINISH
+}
+#undef F
 
 /* the lazily transported / composed irrelevant component of a pair (M16a); the argument is unused */
-static Val *transp_snd_thunk(void *data, Val *unused) {
-    (void)unused; Caps *cp = data; Val *line = cp->v[0], *phi = cp->v[1], *u0 = cp->v[2], *aline = cp->v[3];
-    Val *fst = vproj(u0, 1);
-    return vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, fst)), phi, vproj(u0, 2));
+typedef struct { MHdr h; Caps *cp; Val *fst; int comp; } SndF;
+static void snd_thunk_step(size_t off);
+static void mpush_snd_thunk(Caps *cp, int comp) { SndF *f = mpush(sizeof *f, snd_thunk_step); f->cp = cp; f->comp = comp; }
+#define F ((SndF *)(mst.p + off))
+static void snd_thunk_step(size_t off) {
+    MSTART
+    MCALL(mpush_vproj(F->comp ? F->cp->v[3] : F->cp->v[2], 1)); F->fst = mret;
+    MCALL(mpush_vproj(F->comp ? F->cp->v[3] : F->cp->v[2], 2));
+    if (!F->comp) {   /* transp: line, phi, u0, aline */
+        Val *line = F->cp->v[0], *phi = F->cp->v[1], *aline = F->cp->v[3], *snd = mret;
+        Val *bline = vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, F->fst));
+        MTAIL(mpush_vtransp(bline, phi, snd));
+    }
+    { /* hcomp: A, phi, u, u0, ufst */
+      Val *A = F->cp->v[0], *phi = F->cp->v[1], *u = F->cp->v[2], *ufst = F->cp->v[4], *snd = mret;
+      Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
+      Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, F->fst);
+      Val *line = vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill);
+      MTAIL(mpush_vcomp(line, phi, usnd, snd)); }
+    MFINISH
 }
-static Val *hcomp_snd_thunk(void *data, Val *unused) {
-    (void)unused; Caps *cp = data; Val *A = cp->v[0], *phi = cp->v[1], *u = cp->v[2], *u0 = cp->v[3], *ufst = cp->v[4];
-    Val *fst = vproj(u0, 1);
-    Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
-    Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, fst);
-    return vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill), phi, usnd, vproj(u0, 2));
+#undef F
+static Val *transp_snd_thunk(void *data, Val *unused) { (void)unused; mpush_snd_thunk(data, 0); return mrun(); }
+static Val *hcomp_snd_thunk(void *data, Val *unused) { (void)unused; mpush_snd_thunk(data, 1); return mrun(); }
+
+/* the closures transport and composition build at Pi and PathP types, applied */
+typedef struct { MHdr h; Caps *cp; Val *x, *t, *v; int kind; } KanAppF;
+enum { KA_TRANSP_PI, KA_TRANSP_PATH, KA_HCOMP_PI, KA_HCOMP_PATH };
+static void kan_apply_step(size_t off);
+static void mpush_kan_apply(int kind, Caps *cp, Val *x) { KanAppF *f = mpush(sizeof *f, kan_apply_step); f->kind = kind; f->cp = cp; f->x = x; }
+#define F ((KanAppF *)(mst.p + off))
+static void kan_apply_step(size_t off) {
+    MSTART
+    if (F->kind == KA_TRANSP_PI) {   /* λu1. transp (λi. B_i (v i)) φ (f (v i0)), v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1 (u1 for an interval domain) */
+        Val *line = F->cp->v[0], *phi = F->cp->v[1];
+        if (iv_is_one(F->cp->v[3]->iv)) F->v = vnative(N_CONST, 0, 0, 0, 1, F->x);
+        else F->v = vnative(N_TRANSP_V, 0, 0, 0, 3, vnative(N_LINE_DOM, 0, 0, 0, 1, line), phi, F->x);
+        MCALL(mpush_vapp(F->v, izero(), 0));
+        MCALL(mpush_vapp(F->cp->v[2], mret, 0));
+        { Val *bline = vnative(N_LINE_COD_V, 0, 0, 0, 2, F->cp->v[0], F->v), *phi2 = F->cp->v[1], *base = mret;
+          MTAIL(mpush_vtransp(bline, phi2, base)); }
+    }
+    if (F->kind == KA_TRANSP_PATH) {   /* λj. comp (λi. A_i @ j) (φ ∨ j ∨ ~j) [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i] (p @ j) */
+        MCALL(mpush_vapp(F->cp->v[0], izero(), 0)); F->t = mret;
+        MCALL(mpush_vpapp(F->cp->v[2], F->x, F->t->b, F->t->c));
+        { Val *line = F->cp->v[0], *phi = F->cp->v[1], *p = F->cp->v[2], *j = F->x, *base = mret;
+          Val *aline = vnative(N_LINE_PATH_AT, 0, 0, 0, 2, line, j);
+          Val *sides = vnative(N_PATH_TRANSP_SIDES, 0, 0, 0, 4, line, phi, p, j);
+          MTAIL(mpush_vcomp(aline, ior(phi, ior(j, ineg(j))), sides, base)); }
+    }
+    if (F->kind == KA_HCOMP_PI) {   /* λx. hcomp (B x) φ (λi. (u i) x) (u0 x) */
+        MCALL(mpush_inst(&F->cp->v[0]->clo, F->x)); F->t = mret;
+        MCALL(mpush_vapp(F->cp->v[3], F->x, F->cp->v[0]->irr));
+        { Val *A = F->cp->v[0], *B = F->t, *phi = F->cp->v[1], *u = F->cp->v[2], *base = mret;
+          MTAIL(mpush_vhcomp(B, phi, vnative(N_HCOMP_PI_SIDES, A->irr, 0, 0, 2, u, F->x), base)); }
+    }
+    /* KA_HCOMP_PATH: λj. hcomp (A @ j) (φ ∨ j ∨ ~j) [..] (u0 @ j) */
+    MCALL(mpush_vapp(F->cp->v[0]->a, F->x, 0)); F->t = mret;
+    MCALL(mpush_vpapp(F->cp->v[3], F->x, F->cp->v[0]->b, F->cp->v[0]->c));
+    { Val *A = F->cp->v[0], *phi = F->cp->v[1], *u = F->cp->v[2], *j = F->x, *base = mret;
+      Val *sides = vnative(N_PATH_HCOMP_SIDES, 0, 0, 0, 5, u, phi, j, A->b, A->c);
+      MTAIL(mpush_vhcomp(F->t, ior(phi, ior(j, ineg(j))), sides, base)); }
+    MFINISH
 }
-Val *vtransp(Val *line, Val *phi, Val *u0) {
-    if (iv_is_one(phi->iv)) return u0;
-    u0 = force(u0);
-    Val *fi = fresh_ivar();
-    Val *Ai = force(vapp(line, fi, 0));
-    if (Ai->k == V_NEU && Ai->h == H_META) die("transport along a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
-    switch (Ai->k) {
-    case V_U: return u0;
-    case V_PI: {
-        if (Ai->isi) {   /* (i : I) -> B i x : no transport of the argument */
-            Val *(*fn)(void *, Val *) = NULL; (void)fn;
-            /* λu1. transp (λi. B_i u1) φ (f u1) */
-            struct Lam2 { Val *line, *phi, *f; }; (void)sizeof(struct Lam2);
-        }
+#undef F
+Val *transp_pi_apply(void *data, Val *u1) { mpush_kan_apply(KA_TRANSP_PI, data, u1); return mrun(); }
+Val *transp_path_apply(void *data, Val *j) { mpush_kan_apply(KA_TRANSP_PATH, data, j); return mrun(); }
+Val *hcomp_pi_apply(void *data, Val *x) { mpush_kan_apply(KA_HCOMP_PI, data, x); return mrun(); }
+Val *hcomp_path_apply(void *data, Val *j) { mpush_kan_apply(KA_HCOMP_PATH, data, j); return mrun(); }
+
+/* transport along a line of types */
+typedef struct { MHdr h; Val *line, *phi, *u0, *fi, *Ai, *res, *aline, *fst, *D1, *r, *bsys, *sides; Data *D; Con *C;
+                 Val **fills; int j, np; Env *e; IVal psi; } VtrF;
+static void vtransp_step(size_t off);
+static void mpush_vtransp(Val *line, Val *phi, Val *u0) { VtrF *f = mpush(sizeof *f, vtransp_step); f->line = line; f->phi = phi; f->u0 = u0; }
+#define F ((VtrF *)(mst.p + off))
+static void vtransp_step(size_t off) {
+    MSTART
+    if (iv_is_one(F->phi->iv)) MRET(F->u0);
+    MFORCE(F->u0);
+    F->fi = fresh_ivar();
+    MCALL(mpush_vapp(F->line, F->fi, 0)); F->Ai = mret; MFORCE(F->Ai);
+    if (F->Ai->k == V_NEU && F->Ai->h == H_META) die("transport along a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
+    if (F->Ai->k == V_U) MRET(F->u0);
+    if (F->Ai->k == V_PI) {
         /* λu1. transp (λi. B_i (v i)) φ (f (v i0)) with v i = transp (λj. A (i ∨ ~j)) (φ ∨ i) u1  (v i = u1 for an interval domain) */
         Val *res = mkval(V_LAM); res->name = "x";
-        Native *nt = xalloc(sizeof *nt); nt->code = N_CONST; /* placeholder, replaced below */
-        (void)nt;
-        /* build as a native closure of code N_TRANSP_PI: implemented inline via a small trampoline */
-        Caps *tp = xalloc(sizeof *tp); tp->n = 3; tp->v[0] = line; tp->v[1] = phi; tp->v[2] = u0; tp->v[3] = Ai->isi ? vi(iv_one()) : vi(iv_zero());
-        extern Val *transp_pi_apply(void *, Val *);
+        Caps *tp = xalloc(sizeof *tp); tp->n = 3; tp->v[0] = F->line; tp->v[1] = F->phi; tp->v[2] = F->u0; tp->v[3] = F->Ai->isi ? vi(iv_one()) : vi(iv_zero());
         res->clo.fn = transp_pi_apply; res->clo.data = tp;
-        return res;
+        MRET(res);
     }
-    case V_PATHP: {
+    if (F->Ai->k == V_PATHP) {
         /* λj. comp (λi. A_i @ j) (φ ∨ j ∨ ~j) [φ ↦ p @ j, ~j ↦ x_i, j ↦ y_i] (p @ j) */
-        Caps *tp = xalloc(sizeof *tp); tp->n = 3; tp->v[0] = line; tp->v[1] = phi; tp->v[2] = u0;
-        extern Val *transp_path_apply(void *, Val *);
+        Caps *tp = xalloc(sizeof *tp); tp->n = 3; tp->v[0] = F->line; tp->v[1] = F->phi; tp->v[2] = F->u0;
         Val *res = mkval(V_LAM); res->name = "j"; res->isi = 1; res->clo.fn = transp_path_apply; res->clo.data = tp;
-        return res;
+        MRET(res);
     }
-    case V_GLUE: return transp_glue(line, phi, u0, Ai, fi);
-    case V_SIGMA: {
+    if (F->Ai->k == V_GLUE) { Val *line = F->line, *phi = F->phi, *u0 = F->u0, *Ai = F->Ai, *fi = F->fi; MTAIL(mpush_transp_glue(line, phi, u0, Ai, fi)); }
+    if (F->Ai->k == V_SIGMA) {
         /* (transp A φ (fst p), transp (λi. B_i (fill i)) φ (snd p)) with fill the transport filler of the first component */
-        Val *aline = vnative(N_LINE_DOM, 0, 0, 0, 1, line);
-        Val *fst = vproj(u0, 1);
-        Val *res = mkval(V_PAIR); res->irr = u0->irr; res->n = u0->n;
-        res->a = vtransp(aline, phi, fst);
-        if (u0->irr) {   /* lazily: the proof is transported only if it is ever projected */
-            Caps *cp = xalloc(sizeof *cp); cp->n = 4; cp->v[0] = line; cp->v[1] = phi; cp->v[2] = u0; cp->v[3] = aline;
-            res->b = NULL; res->clo.fn = transp_snd_thunk; res->clo.data = cp;
-        } else res->b = vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, line, vtfill(aline, phi, fst)), phi, vproj(u0, 2));
-        return res;
+        F->aline = vnative(N_LINE_DOM, 0, 0, 0, 1, F->line);
+        MCALL(mpush_vproj(F->u0, 1)); F->fst = mret;
+        F->res = mkval(V_PAIR); F->res->irr = F->u0->irr; F->res->n = F->u0->n;
+        MCALL(mpush_vtransp(F->aline, F->phi, F->fst)); F->res->a = mret;
+        if (F->u0->irr) {   /* lazily: the proof is transported only if it is ever projected */
+            Caps *cp = xalloc(sizeof *cp); cp->n = 4; cp->v[0] = F->line; cp->v[1] = F->phi; cp->v[2] = F->u0; cp->v[3] = F->aline;
+            F->res->b = NULL; F->res->clo.fn = transp_snd_thunk; F->res->clo.data = cp;
+            MRET(F->res);
+        }
+        MCALL(mpush_vproj(F->u0, 2));
+        MCALL(mpush_vtransp(vnative(N_LINE_COD_V, 0, 0, 0, 2, F->line, vtfill(F->aline, F->phi, F->fst)), F->phi, mret));
+        F->res->b = mret;
+        MRET(F->res);
     }
-    case V_DATA: {
-        Data *D = data_at(Ai->n, Ai->lvl);
-        if (D->nparams + D->nidx == 0) return u0;
-        if (D->hit && u0->k == V_NEU && u0->h == H_HCOMP && u0->a->k == V_DATA) {   /* transp of a formal composition: the composition of the transports */
-            Val *D1 = vapp(line, ione(), 0);
-            return vhcomp(D1, u0->b, vnative(N_TRANSP_MAP, 0, 0, 0, 3, line, phi, u0->c), vtransp(line, phi, u0->dom));
-        }
-        if (u0->k != V_CON) return neu_transp(line, phi, u0);
-        Con *C = con_at(u0->n, u0->lvl);
-        int np = D->nparams;
-        /* transport each argument along its own line, with fillers for the earlier ones */
-        Val **fills = xalloc((C->nargs + 1) * sizeof(Val *));
-        Val *res = mkval(V_CON); res->n = u0->n; res->lvl = u0->lvl;
-        Val *D1 = vapp(line, ione(), 0);
-        for (int i = 0; i < np; i++) vl_push(&res->args, D1->args.a[i].v, 1);
-        for (int j = 0; j < C->nargs; j++) {
-            Native *nt = xalloc(sizeof *nt); nt->code = N_DATA_ARG_LINE; nt->i1 = u0->n; nt->i2 = j;
-            vl_push(&nt->cap, line, 0); for (int k = 0; k < j; k++) vl_push(&nt->cap, fills[k], 0);
-            Val *aline = mkval(V_LAM); aline->clo.fn = nfn; aline->clo.data = nt; aline->isi = 1; aline->name = "i";
-            Val *aj = u0->args.a[np + j].v;
-            vl_push(&res->args, vtransp(aline, phi, aj), C->args[j].irr);
-            fills[j] = vtfill(aline, phi, aj);
-        }
-        if (C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r) */
-            Val *r = mkval(V_CON); r->n = res->n; r->lvl = res->lvl;
-            for (int i = 0; i < res->args.n; i++) vl_push_arg(&r->args, res->args.a[i]);
-            for (int q = 0; q < C->nint; q++) vl_push(&r->args, u0->args.a[np + C->nargs + q].v, 0);
-            res = r;
-            if (C->bparams) {
-                /* the boundary mentions the parameters (CHM 3.3.5, pushouts): the naive result's boundary b(p1, a', r) is not the
-                   transported boundary; correct it with a composition whose sides squeeze the boundary at every stage:
-                     hcomp^j (D p1) [ psi_k -> transp (i. D (p (i \/ ~j))) (~j \/ phi) (b_k (p (~j), fill_a (~j), r)),  phi -> c a r ] (c a' r) */
-                Native *nt = xalloc(sizeof *nt); nt->code = N_HITTR_SIDES; nt->i1 = u0->n;
-                vl_push(&nt->cap, line, 0); vl_push(&nt->cap, phi, 0); vl_push(&nt->cap, u0, 0);
-                for (int j = 0; j < C->nargs; j++) vl_push(&nt->cap, fills[j], 0);
-                Val *sides = mkval(V_LAM); sides->clo.fn = nfn; sides->clo.data = nt; sides->isi = 1; sides->name = "j";
-                Env *env = NULL; for (int i = 0; i < u0->args.n; i++) env = env_push(env, u0->args.a[i].v);
-                Val *bsys = eval(env, C->boundary);
-                IVal psi = iv_zero();
-                if (bsys->k == V_SYS) { for (int i = 0; i < bsys->nbr; i++) psi = iv_or(psi, bsys->br[i].phi->iv); } else psi = iv_one();
-                if (D->nidx > 0) {   /* the composition lives at the line's index, which the transported constructor must reach */
-                    Env *e2 = NULL; for (int i = 0; i < res->args.n; i++) e2 = env_push(e2, res->args.a[i].v);
-                    for (int j = 0; j < D->nidx; j++)
-                        if (!conv(fresh_level, eval(e2, C->ridx[j]), D1->args.a[np + j].v)) return neu_transp(line, phi, u0);
+    if (F->Ai->k != V_DATA) MRET(neu_transp(F->line, F->phi, F->u0));
+    F->D = data_at(F->Ai->n, F->Ai->lvl);
+    if (F->D->nparams + F->D->nidx == 0) MRET(F->u0);
+    if (F->D->hit && F->u0->k == V_NEU && F->u0->h == H_HCOMP && F->u0->a->k == V_DATA) {   /* transp of a formal composition: the composition of the transports */
+        MCALL(mpush_vapp(F->line, ione(), 0)); F->D1 = mret;
+        MCALL(mpush_vtransp(F->line, F->phi, F->u0->dom));
+        { Val *D1 = F->D1, *psi = F->u0->b, *sides = vnative(N_TRANSP_MAP, 0, 0, 0, 3, F->line, F->phi, F->u0->c), *base = mret;
+          MTAIL(mpush_vhcomp(D1, psi, sides, base)); }
+    }
+    if (F->u0->k != V_CON) MRET(neu_transp(F->line, F->phi, F->u0));
+    F->C = con_at(F->u0->n, F->u0->lvl);
+    F->np = F->D->nparams;
+    /* transport each argument along its own line, with fillers for the earlier ones */
+    F->fills = xalloc((F->C->nargs + 1) * sizeof(Val *));
+    F->res = mkval(V_CON); F->res->n = F->u0->n; F->res->lvl = F->u0->lvl;
+    MCALL(mpush_vapp(F->line, ione(), 0)); F->D1 = mret;
+    for (int i = 0; i < F->np; i++) vl_push(&F->res->args, F->D1->args.a[i].v, 1);
+    for (F->j = 0; F->j < F->C->nargs; F->j++) {
+        { Native *nt = xalloc(sizeof *nt); nt->code = N_DATA_ARG_LINE; nt->i1 = F->u0->n; nt->i2 = F->j;
+          vl_push(&nt->cap, F->line, 0); for (int k = 0; k < F->j; k++) vl_push(&nt->cap, F->fills[k], 0);
+          F->aline = mkval(V_LAM); F->aline->clo.fn = nfn; F->aline->clo.data = nt; F->aline->isi = 1; F->aline->name = "i"; }
+        MCALL(mpush_vtransp(F->aline, F->phi, F->u0->args.a[F->np + F->j].v));
+        vl_push(&F->res->args, mret, F->C->args[F->j].irr);
+        F->fills[F->j] = vtfill(F->aline, F->phi, F->u0->args.a[F->np + F->j].v);
+    }
+    if (F->C->nint > 0) {   /* a path constructor keeps its interval arguments (CHM 3.3: merid (transp a) r) */
+        { Val *r = mkval(V_CON); r->n = F->res->n; r->lvl = F->res->lvl;
+          for (int i = 0; i < F->res->args.n; i++) vl_push_arg(&r->args, F->res->args.a[i]);
+          for (int q = 0; q < F->C->nint; q++) vl_push(&r->args, F->u0->args.a[F->np + F->C->nargs + q].v, 0);
+          F->res = r; }
+        if (F->C->bparams) {
+            /* the boundary mentions the parameters (CHM 3.3.5, pushouts): the naive result's boundary b(p1, a', r) is not the
+               transported boundary; correct it with a composition whose sides squeeze the boundary at every stage:
+                 hcomp^j (D p1) [ psi_k -> transp (i. D (p (i \/ ~j))) (~j \/ phi) (b_k (p (~j), fill_a (~j), r)),  phi -> c a r ] (c a' r) */
+            { Native *nt = xalloc(sizeof *nt); nt->code = N_HITTR_SIDES; nt->i1 = F->u0->n;
+              vl_push(&nt->cap, F->line, 0); vl_push(&nt->cap, F->phi, 0); vl_push(&nt->cap, F->u0, 0);
+              for (int j = 0; j < F->C->nargs; j++) vl_push(&nt->cap, F->fills[j], 0);
+              F->sides = mkval(V_LAM); F->sides->clo.fn = nfn; F->sides->clo.data = nt; F->sides->isi = 1; F->sides->name = "j"; }
+            { Env *env = NULL; for (int i = 0; i < F->u0->args.n; i++) env = env_push(env, F->u0->args.a[i].v);
+              MCALL(mpush_eval(env, F->C->boundary)); }
+            F->bsys = mret;
+            F->psi = iv_zero();
+            if (F->bsys->k == V_SYS) { for (int i = 0; i < F->bsys->nbr; i++) F->psi = iv_or(F->psi, F->bsys->br[i].phi->iv); } else F->psi = iv_one();
+            if (F->D->nidx > 0) {   /* the composition lives at the line's index, which the transported constructor must reach */
+                F->e = NULL; for (int i = 0; i < F->res->args.n; i++) F->e = env_push(F->e, F->res->args.a[i].v);
+                for (F->j = 0; F->j < F->D->nidx; F->j++) {
+                    MCALL(mpush_eval(F->e, F->C->ridx[F->j]));
+                    if (!conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v)) MRET(neu_transp(F->line, F->phi, F->u0));
                 }
-                return vhcomp(D1, vi(iv_or(psi, phi->iv)), sides, res);
             }
+            { Val *D1 = F->D1, *phi = vi(iv_or(F->psi, F->phi->iv)), *sides = F->sides, *res = F->res; MTAIL(mpush_vhcomp(D1, phi, sides, res)); }
         }
-        if (D->nidx > 0) {   /* the transported constructor's indices must agree with the line's */
-            Env *e = NULL; for (int i = 0; i < res->args.n; i++) e = env_push(e, res->args.a[i].v);
-            for (int j = 0; j < D->nidx; j++)
-                if (!conv(fresh_level, eval(e, C->ridx[j]), D1->args.a[np + j].v)) return neu_transp(line, phi, u0);
+    }
+    if (F->D->nidx > 0) {   /* the transported constructor's indices must agree with the line's */
+        F->e = NULL; for (int i = 0; i < F->res->args.n; i++) F->e = env_push(F->e, F->res->args.a[i].v);
+        for (F->j = 0; F->j < F->D->nidx; F->j++) {
+            MCALL(mpush_eval(F->e, F->C->ridx[F->j]));
+            if (!conv(fresh_level, mret, F->D1->args.a[F->np + F->j].v)) MRET(neu_transp(F->line, F->phi, F->u0));
         }
-        return res;
     }
-    default: return neu_transp(line, phi, u0);
-    }
+    MRET(F->res);
+    MFINISH
 }
-Val *transp_pi_apply(void *data, Val *u1) {
-    Caps *tp = data; Val *line = tp->v[0], *phi = tp->v[1], *f = tp->v[2]; int isi = iv_is_one(tp->v[3]->iv);
-    Val *v;
-    if (isi) v = vnative(N_CONST, 0, 0, 0, 1, u1);
-    else v = vnative(N_TRANSP_V, 0, 0, 0, 3, vnative(N_LINE_DOM, 0, 0, 0, 1, line), phi, u1);
-    Val *bline = vnative(N_LINE_COD_V, 0, 0, 0, 2, line, v);
-    return vtransp(bline, phi, vapp(f, vapp(v, izero(), 0), 0));
-}
-Val *transp_path_apply(void *data, Val *j) {
-    Caps *tp = data; Val *line = tp->v[0], *phi = tp->v[1], *p = tp->v[2];
-    Val *p0 = vapp(line, izero(), 0);
-    Val *aline = vnative(N_LINE_PATH_AT, 0, 0, 0, 2, line, j);
-    Val *sides = vnative(N_PATH_TRANSP_SIDES, 0, 0, 0, 4, line, phi, p, j);
-    return vcomp(aline, ior(phi, ior(j, ineg(j))), sides, vpapp(p, j, p0->b, p0->c));
-}
+#undef F
+Val *vtransp(Val *line, Val *phi, Val *u0) { mpush_vtransp(line, phi, u0); return mrun(); }
 
-Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(force(vapp(u, ione(), 0)), NULL); if (!t) die("internal: total system without a total branch"); return t; }
-    A = force(A); u0 = force(u0);
-    if (A->k == V_NEU && A->h == H_META) die("hcomp at a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
-    switch (A->k) {
-    case V_PI: {
-        Caps *hp = xalloc(sizeof *hp); hp->n = 4; hp->v[0] = A; hp->v[1] = phi; hp->v[2] = u; hp->v[3] = u0;
-        extern Val *hcomp_pi_apply(void *, Val *);
-        Val *res = mkval(V_LAM); res->name = "x"; res->isi = A->isi; res->clo.fn = hcomp_pi_apply; res->clo.data = hp;
-        return res;
+/* homogeneous composition at a type */
+typedef struct { MHdr h; Val *A, *phi, *u, *u0, *ufst, *fst, *res, *cline; Data *D; Con *C; Val **fills; int j, np; } VhcF;
+static void vhcomp_step(size_t off);
+static void mpush_vhcomp(Val *A, Val *phi, Val *u, Val *u0) { VhcF *f = mpush(sizeof *f, vhcomp_step); f->A = A; f->phi = phi; f->u = u; f->u0 = u0; }
+#define F ((VhcF *)(mst.p + off))
+static void vhcomp_step(size_t off) {
+    MSTART
+    if (iv_is_one(F->phi->iv)) {
+        MCALL(mpush_vapp(F->u, ione(), 0)); F->res = mret; MFORCE(F->res);
+        { Val *t = vsys_at(F->res, NULL); if (!t) die("internal: total system without a total branch"); MRET(t); }
     }
-    case V_PATHP: {
-        Caps *hp = xalloc(sizeof *hp); hp->n = 4; hp->v[0] = A; hp->v[1] = phi; hp->v[2] = u; hp->v[3] = u0;
-        extern Val *hcomp_path_apply(void *, Val *);
-        Val *res = mkval(V_LAM); res->name = "j"; res->isi = 1; res->clo.fn = hcomp_path_apply; res->clo.data = hp;
-        return res;
+    MFORCE(F->A); MFORCE(F->u0);
+    if (F->A->k == V_NEU && F->A->h == H_META) die("hcomp at a type that is not known yet (an implicit argument still to be inferred); write it, f {e} ..");
+    if (F->A->k == V_PI || F->A->k == V_PATHP) {
+        Caps *hp = xalloc(sizeof *hp); hp->n = 4; hp->v[0] = F->A; hp->v[1] = F->phi; hp->v[2] = F->u; hp->v[3] = F->u0;
+        Val *res = mkval(V_LAM);
+        if (F->A->k == V_PI) { res->name = "x"; res->isi = F->A->isi; res->clo.fn = hcomp_pi_apply; }
+        else { res->name = "j"; res->isi = 1; res->clo.fn = hcomp_path_apply; }
+        res->clo.data = hp;
+        MRET(res);
     }
-    case V_SIGMA: {
+    if (F->A->k == V_SIGMA) {
         /* (hcomp A φ (fst u) (fst u0), comp (λi. B (hfill A φ (fst u) (fst u0) i)) φ (snd u) (snd u0)) */
-        Val *ufst = vnative(N_SYS_PROJ, -1, 0, 0, 1, u);
-        Val *fst = vproj(u0, 1);
-        Val *res = mkval(V_PAIR); res->irr = u0->irr; res->n = u0->n;
-        res->a = vhcomp(A->dom, phi, ufst, fst);
-        if (u0->irr) {
-            Caps *cp = xalloc(sizeof *cp); cp->n = 5; cp->v[0] = A; cp->v[1] = phi; cp->v[2] = u; cp->v[3] = u0; cp->v[4] = ufst;
-            res->b = NULL; res->clo.fn = hcomp_snd_thunk; res->clo.data = cp;
-        } else {
-            Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, u);
-            Val *fill = vnative(N_FILL, 1, 0, 0, 4, A->dom, phi, ufst, fst);
-            res->b = vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, A), fill), phi, usnd, vproj(u0, 2));
+        F->ufst = vnative(N_SYS_PROJ, -1, 0, 0, 1, F->u);
+        MCALL(mpush_vproj(F->u0, 1)); F->fst = mret;
+        F->res = mkval(V_PAIR); F->res->irr = F->u0->irr; F->res->n = F->u0->n;
+        MCALL(mpush_vhcomp(F->A->dom, F->phi, F->ufst, F->fst)); F->res->a = mret;
+        if (F->u0->irr) {
+            Caps *cp = xalloc(sizeof *cp); cp->n = 5; cp->v[0] = F->A; cp->v[1] = F->phi; cp->v[2] = F->u; cp->v[3] = F->u0; cp->v[4] = F->ufst;
+            F->res->b = NULL; F->res->clo.fn = hcomp_snd_thunk; F->res->clo.data = cp;
+            MRET(F->res);
         }
-        return res;
+        MCALL(mpush_vproj(F->u0, 2));
+        { Val *usnd = vnative(N_SYS_PROJ, -2, 0, 0, 1, F->u);
+          Val *fill = vnative(N_FILL, 1, 0, 0, 4, F->A->dom, F->phi, F->ufst, F->fst);
+          MCALL(mpush_vcomp(vnative(N_LINE_COD_V, 0, 0, 0, 2, vnative(N_CONST, 0, 0, 0, 1, F->A), fill), F->phi, usnd, mret)); }
+        F->res->b = mret;
+        MRET(F->res);
     }
-    case V_GLUE: return hcomp_glue(A, phi, u, u0);
-    case V_U: {   /* hcomp in the universe is the Glue type of the lid, glued along transport back down the sides (CCHM 6) */
-        Caps c = { 0, { u } }; c.l = A->lvl;
-        Val *Te = vsys_faces(1, &phi, hcompU_body, &c);
-        Val *g = vglue(u0, phi, Te); if (g->k == V_GLUE) g->lvl = A->lvl;
-        return g;
+    if (F->A->k == V_GLUE) { Val *A = F->A, *phi = F->phi, *u = F->u, *u0 = F->u0; MTAIL(mpush_hcomp_glue(A, phi, u, u0)); }
+    if (F->A->k == V_U) {   /* hcomp in the universe is the Glue type of the lid, glued along transport back down the sides (CCHM 6) */
+        { Caps *c = xalloc(sizeof *c); *c = (Caps){ 0, { F->u } }; c->l = F->A->lvl;
+          Val **phis = xalloc(sizeof(Val *)); phis[0] = F->phi;
+          MCALL(mpush_vsys_faces(1, phis, hcompU_body, c)); }
+        { Val *g = vglue(F->u0, F->phi, mret); if (g->k == V_GLUE) g->lvl = F->A->lvl; MRET(g); }
     }
-    case V_DATA: {
-        Data *D = data_at(A->n, A->lvl);
-        if (D->nidx > 0 || D->hit) return neu_hcomp(A, phi, u, u0);
-        if (u0->k == V_NUM) u0 = num_view(u0);
-        if (u0->k != V_CON || !sides_all_con(u, u0->n)) return neu_hcomp(A, phi, u, u0);
-        Con *C = con_at(u0->n, u0->lvl); int np = D->nparams;
-        Val *res = mkval(V_CON); res->n = u0->n; res->lvl = u0->lvl;
-        for (int i = 0; i < np; i++) vl_push(&res->args, A->args.a[i].v, 1);
-        Val **fills = xalloc((C->nargs + 1) * sizeof(Val *));
-        Val *cline = vnative(N_CONST, 0, 0, 0, 1, A);
-        for (int j = 0; j < C->nargs; j++) {
-            Native *nt = xalloc(sizeof *nt); nt->code = N_DATA_ARG_LINE; nt->i1 = u0->n; nt->i2 = j;
-            vl_push(&nt->cap, cline, 0); for (int k = 0; k < j; k++) vl_push(&nt->cap, fills[k], 0);
-            Val *aline = mkval(V_LAM); aline->clo.fn = nfn; aline->clo.data = nt; aline->isi = 1; aline->name = "i";
-            Val *sides = vnative(N_SYS_PROJ, np + j, 0, 0, 1, u);
-            Val *aj = u0->args.a[np + j].v;
-            vl_push(&res->args, vcomp(aline, phi, sides, aj), C->args[j].irr);
-            fills[j] = vfill(aline, phi, sides, aj);
-        }
-        return res;
+    if (F->A->k != V_DATA) MRET(neu_hcomp(F->A, F->phi, F->u, F->u0));
+    F->D = data_at(F->A->n, F->A->lvl);
+    if (F->D->nidx > 0 || F->D->hit) MRET(neu_hcomp(F->A, F->phi, F->u, F->u0));
+    if (F->u0->k == V_NUM) F->u0 = num_view(F->u0);
+    if (F->u0->k != V_CON) MRET(neu_hcomp(F->A, F->phi, F->u, F->u0));
+    MCALL(mpush_sides_all_con(F->u, F->u0->n));
+    if (!mret) MRET(neu_hcomp(F->A, F->phi, F->u, F->u0));
+    F->C = con_at(F->u0->n, F->u0->lvl); F->np = F->D->nparams;
+    F->res = mkval(V_CON); F->res->n = F->u0->n; F->res->lvl = F->u0->lvl;
+    for (int i = 0; i < F->np; i++) vl_push(&F->res->args, F->A->args.a[i].v, 1);
+    F->fills = xalloc((F->C->nargs + 1) * sizeof(Val *));
+    F->cline = vnative(N_CONST, 0, 0, 0, 1, F->A);
+    for (F->j = 0; F->j < F->C->nargs; F->j++) {
+        { Native *nt = xalloc(sizeof *nt); nt->code = N_DATA_ARG_LINE; nt->i1 = F->u0->n; nt->i2 = F->j;
+          vl_push(&nt->cap, F->cline, 0); for (int k = 0; k < F->j; k++) vl_push(&nt->cap, F->fills[k], 0);
+          Val *aline = mkval(V_LAM); aline->clo.fn = nfn; aline->clo.data = nt; aline->isi = 1; aline->name = "i";
+          Val *sides = vnative(N_SYS_PROJ, F->np + F->j, 0, 0, 1, F->u);
+          Val *aj = F->u0->args.a[F->np + F->j].v;
+          F->fills[F->j] = vfill(aline, F->phi, sides, aj);
+          MCALL(mpush_vcomp(aline, F->phi, sides, aj)); }
+        vl_push(&F->res->args, mret, F->C->args[F->j].irr);
     }
-    default: return neu_hcomp(A, phi, u, u0);
-    }
+    MRET(F->res);
+    MFINISH
 }
-Val *hcomp_pi_apply(void *data, Val *x) {
-    Caps *hp = data; Val *A = hp->v[0], *phi = hp->v[1], *u = hp->v[2], *u0 = hp->v[3];
-    Val *B = inst(&A->clo, x);
-    return vhcomp(B, phi, vnative(N_HCOMP_PI_SIDES, A->irr, 0, 0, 2, u, x), vapp(u0, x, A->irr));
-}
-Val *hcomp_path_apply(void *data, Val *j) {
-    Caps *hp = data; Val *A = hp->v[0], *phi = hp->v[1], *u = hp->v[2], *u0 = hp->v[3];
-    Val *Aj = vapp(A->a, j, 0);
-    Val *sides = vnative(N_PATH_HCOMP_SIDES, 0, 0, 0, 5, u, phi, j, A->b, A->c);
-    return vhcomp(Aj, ior(phi, ior(j, ineg(j))), sides, vpapp(u0, j, A->b, A->c));
+#undef F
+Val *vhcomp(Val *A, Val *phi, Val *u, Val *u0) { mpush_vhcomp(A, phi, u, u0); return mrun(); }
+
+/* the closure dispatcher: every C function a closure may hold, as its frame */
+static void mpush_clofn(Val *(*fn)(void *, Val *), void *data, Val *arg) {
+    if (fn == nfn) { mpush_native_apply(data, arg); return; }
+    if (fn == natfn) { mpush_natfn(data, arg); return; }
+    if (fn == transp_pi_apply) { mpush_kan_apply(KA_TRANSP_PI, data, arg); return; }
+    if (fn == transp_path_apply) { mpush_kan_apply(KA_TRANSP_PATH, data, arg); return; }
+    if (fn == hcomp_pi_apply) { mpush_kan_apply(KA_HCOMP_PI, data, arg); return; }
+    if (fn == hcomp_path_apply) { mpush_kan_apply(KA_HCOMP_PATH, data, arg); return; }
+    if (fn == transp_snd_thunk) { mpush_snd_thunk(data, 0); return; }
+    if (fn == hcomp_snd_thunk) { mpush_snd_thunk(data, 1); return; }
+    CcallF *f = mpush(sizeof *f, ccall_step); f->fn = fn; f->data = data; f->arg = arg;
 }
 
-
-/* ---- Glue types (CCHM section 6; the Kan operations follow Agda's Glue.hs) ---- */
-static Val *builtin_at(const char *name, LVal L) {
-    for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) return def_at(i, L);
+/* ---- Glue types (CCHM section 6; the Kan operations follow Agda's Glue.hs), on the machine (S3d) ----
+   A face body's restrictions (R), projections and applications are frames' calls, in the order the C code made them. */
+static void mpush_builtin_at(const char *name, LVal L) {
+    for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) { mpush_def_at(i, L); return; }
     die("internal: the prelude definition %s is needed", name);
-    return NULL;
 }
-Val *vglue(Val *A, Val *phi, Val *Te) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(Te, NULL); if (t) return vproj(t, 1); }
-    Val *v = mkval(V_GLUE); v->a = A; v->b = phi; v->c = Te; return v;
+
+typedef struct { MHdr h; Val *A, *phi, *Te; } VglueF;
+static void vglue_step(size_t off) {
+    VglueF *f = (VglueF *)(mst.p + off);
+    if (iv_is_one(f->phi->iv)) { Val *t = vsys_at(f->Te, NULL); if (t) { mpop(off); mpush_vproj(t, 1); return; } }
+    Val *v = mkval(V_GLUE); v->a = f->A; v->b = f->phi; v->c = f->Te; mret = v; mpop(off);
 }
+static void mpush_vglue(Val *A, Val *phi, Val *Te) { VglueF *f = mpush(sizeof *f, vglue_step); f->A = A; f->phi = phi; f->Te = Te; }
+Val *vglue(Val *A, Val *phi, Val *Te) { mpush_vglue(A, phi, Te); return mrun(); }
 Val *vglueel(Val *ts, Val *a, Val *G) {
     if (G->k != V_GLUE) { Val *t = vsys_at(ts, NULL); if (!t) die("internal: glue on a total face without a total element"); return t; }
     Val *v = mkval(V_GLUEEL); v->a = ts; v->b = a; v->c = G; return v;
 }
-static Val *equiv_fun(Val *Te_total) { return vproj(vproj(Te_total, 2), 1); }
-Val *vunglue(Val *A, Val *phi, Val *Te, Val *b) {
-    if (iv_is_one(phi->iv)) { Val *t = vsys_at(Te, NULL); if (t) return vapp(equiv_fun(t), b, 0); }
-    b = force(b);   /* through a rigid definition application, as vhcomp forces its type and base: unglue (g i1) with g i1 := glue [] a is a (M20 F4 found it stuck) */
-    if (b->k == V_GLUEEL) return b->b;
-    if (b->k == V_SYS) {
-        VBranch *br = xalloc((b->nbr + 1) * sizeof(VBranch));
-        for (int i = 0; i < b->nbr; i++) { br[i].phi = b->br[i].phi; br[i].v = vunglue(A, phi, Te, b->br[i].v); }
-        return vsys(br, b->nbr);
-    }
-    Val *v = mkval(V_NEU); v->h = H_UNGLUE; v->a = A; v->b = phi; v->c = Te; v->dom = b; return v;
-}
-/* a system whose k-th part lives on the faces of phis[k]; each branch is computed under the restriction to its face,
-   so that partial data (a Glue type's T and e) is total where the branch is used */
-static Val *vsys_faces(int nb, Val **phis, SysBody body, void *data) {
-    int cap = 4, n = 0; VBranch *br = xalloc(cap * sizeof(VBranch));
-    for (int k = 0; k < nb; k++) {
-        Face *fs; int nf = iv_faces(phis[k]->iv, &fs);
-        for (int i = 0; i < nf; i++) {
-            if (n == cap) { cap *= 2; VBranch *b2 = xalloc(cap * sizeof(VBranch)); memcpy(b2, br, n * sizeof(VBranch)); br = b2; }
-            br[n].phi = vi(face_iv(&fs[i])); br[n].v = body(k, &fs[i], data); n++;
+
+/* unglue; an equivalence's function (the second component's first) is equiv_fun */
+typedef struct { MHdr h; Val *A, *phi, *Te, *b; int i; VBranch *br; } VunglueF;
+static void vunglue_step(size_t off);
+static void mpush_vunglue(Val *A, Val *phi, Val *Te, Val *b) { VunglueF *f = mpush(sizeof *f, vunglue_step); f->A = A; f->phi = phi; f->Te = Te; f->b = b; }
+#define F ((VunglueF *)(mst.p + off))
+static void vunglue_step(size_t off) {
+    MSTART
+    if (iv_is_one(F->phi->iv)) {
+        Val *t = vsys_at(F->Te, NULL);
+        if (t) {
+            MCALL(mpush_vproj(t, 2)); MCALL(mpush_vproj(mret, 1));
+            { Val *e = mret, *b = F->b; MTAIL(mpush_vapp(e, b, 0)); }
         }
     }
-    return vsys(br, n);
+    MFORCE(F->b);   /* through a rigid definition application, as vhcomp forces its type and base: unglue (g i1) with g i1 := glue [] a is a (M20 F4 found it stuck) */
+    if (F->b->k == V_GLUEEL) MRET(F->b->b);
+    if (F->b->k == V_SYS) {
+        F->br = xalloc((F->b->nbr + 1) * sizeof(VBranch));
+        for (F->i = 0; F->i < F->b->nbr; F->i++) {
+            F->br[F->i].phi = F->b->br[F->i].phi;
+            MCALL(mpush_vunglue(F->A, F->phi, F->Te, F->b->br[F->i].v));
+            F->br[F->i].v = mret;
+        }
+        MRET(vsys(F->br, F->b->nbr));
+    }
+    { Val *v = mkval(V_NEU); v->h = H_UNGLUE; v->a = F->A; v->b = F->phi; v->c = F->Te; v->dom = F->b; MRET(v); }
+    MFINISH
 }
-#define R(x) restrict_val((x), f)
-static Val *at(Val *v, int F, Val *i) { return subst_val(v, F, i->iv); }
+#undef F
+Val *vunglue(Val *A, Val *phi, Val *Te, Val *b) { mpush_vunglue(A, phi, Te, b); return mrun(); }
 
-/* gcomp: composition whose base is also propagated on ~phi, so that no empty systems arise (Agda's mkGComp) */
-static Val *gcomp_body(int k, const Face *f, void *data) {
-    Caps *c = data; Val *line = R(c->v[0]), *u = R(c->v[2]), *u0 = R(c->v[3]), *i = R(c->v[4]);
-    return k == 0 ? vfwd(line, i, vapp(u, i, 0)) : vfwd(line, izero(), u0);
-}
-static Val *vgcomp(Val *line, Val *phi, Val *u, Val *u0) {
-    return vhcomp(vapp(line, ione(), 0), ior(phi, ineg(phi)), vnative(N_GCOMP_SIDES, 0, 0, 0, 4, line, phi, u, u0), vfwd(line, izero(), u0));
-}
-
-/* transp (λi. Glue A_i φ_i Te_i) ψ u0, with the components given at the fresh interval variable F */
-static Val *glue_tr_body(int k, const Face *f, void *data) {
-    TrSides *d = data; Val *i = R(d->i);
-    if (k == 0) return vapp(R(d->ungl), i, 0);
-    Val *Te_i = vsys_at(at(R(d->Teg), d->F, i), NULL);
-    if (!Te_i) die("internal: Glue transport: the glued type is not total on its face");
-    return vapp(equiv_fun(Te_i), vapp(R(d->tf), i, 0), 0);
-}
 typedef struct { Val *u0, *tf, *a1; } PeData;
-static Val *pe_body(int k, const Face *f, void *data) {
-    PeData *d = data; Val *p = mkval(V_PAIR);
-    p->a = k == 0 ? R(d->u0) : vapp(R(d->tf), ione(), 0);
-    Val *c = vnative(N_CONST, 0, 0, 0, 1, R(d->a1)); p->b = c;
-    return p;
-}
 typedef struct { Val *Te1, *A1, *a1, *psi, *forall, *u0, *tf; LVal lvl; } FibData;
-static Val *glue_fiber_body(int k, const Face *f, void *data) {
-    FibData *d = data; (void)k;
-    Val *Te = vsys_at(R(d->Te1), NULL);
-    if (!Te) die("internal: Glue transport: the glued type is not total at i1 on its face");
-    Val *T1 = vproj(Te, 1), *w = vproj(Te, 2), *A1 = R(d->A1), *a1 = R(d->a1);
-    Val *psi = R(d->psi), *forall = R(d->forall);
-    PeData pd = { R(d->u0), R(d->tf), a1 };
-    Val *phis[2] = { psi, forall };
-    Val *pe = vsys_faces(2, phis, pe_body, &pd);
-    Val *ep = builtin_at("equivProof", d->lvl);
-    Val *fib = vapp(vapp(vapp(vapp(vapp(vapp(ep, T1, 0), A1, 0), w, 0), a1, 0), ior(psi, forall), 0), pe, 0);
-    if (fib->k == V_INS) return fib->a;
-    Val *fiberT = vapp(vapp(vapp(vapp(builtin_at("fiber", d->lvl), T1, 0), A1, 0), vproj(w, 1), 0), a1, 0);
-    return vouts(fiberT, ior(psi, forall), pe, fib);
-}
-static Val *glue_a1p_body(int k, const Face *f, void *data) {
-    A1pData *d = data;
-    if (k == 1) return R(d->a1);
-    Val *alpha = vsys_at(R(d->alphas), NULL), *t1 = vsys_at(R(d->ts), NULL), *Te = vsys_at(R(d->Te1), NULL);
-    if (!alpha || !t1 || !Te) die("internal: Glue transport: partial fibre not total on its face");
-    Val *x = vapp(equiv_fun(Te), t1, 0);
-    return vpapp(alpha, ineg(R(d->j)), x, R(d->a1));
-}
+static Val *pe_body(int k, const Face *f, void *data);
+static Val *glue_fiber_body(int k, const Face *f, void *data);
 static Val *proj1(Val *v, void *d) { (void)d; return vproj(v, 1); }
 static Val *proj2(Val *v, void *d) { (void)d; return vproj(v, 2); }
-static Val *transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv) {
-    (void)line;
-    int F = fiv->iv.c[0].l[0].var;
-    Val *Ab = Ag->a, *phig = Ag->b, *Teg = Ag->c;
-    Val *forall = vi(iv_forall(phig->iv, F));
-    Val *lineA = vnative(N_SUBST, F, 0, 0, 1, Ab);
-    Val *lineT = vnative(N_GLUE_T, F, 0, 0, 1, Teg);
-    Val *ungl = vnative(N_UNGLUE_U0, F, 0, 0, 4, Ab, phig, Teg, u0);
-    Val *tf = vtfill(lineT, psi, u0);
-    Val *sides = vnative(N_GLUE_TR_SIDES, F, 0, 0, 5, psi, forall, ungl, Teg, tf);
-    Val *a1 = vgcomp(lineA, ior(psi, forall), sides, vapp(ungl, izero(), 0));
-    Val *phi1 = vi(iv_subst(phig->iv, F, iv_one()));
-    Val *Te1 = subst_val(Teg, F, iv_one()), *A1 = subst_val(Ab, F, iv_one());
-        FibData fd = { Te1, A1, a1, psi, forall, u0, tf, Ag->lvl };
-    Val *fibsys = vsys_faces(1, &phi1, glue_fiber_body, &fd);
-    Val *ts = vsys_map(fibsys, proj1, NULL), *alphas = vsys_map(fibsys, proj2, NULL);
-    Val *a1p = vhcomp(A1, ior(phi1, psi), vnative(N_GLUE_A1P_SIDES, 0, 0, 0, 6, phi1, psi, alphas, ts, Te1, a1), a1);
-    Val *G1 = subst_val(Ag, F, iv_one()); if (G1->k == V_GLUE) G1->lvl = Ag->lvl;
-    return vglueel(ts, a1p, G1);
+
+static int trsides_var(TrSides *d) { return d->F; }   /* its field F (the fresh variable) is spelt like the frame macro below */
+/* a face body: k is the part (of phis) the face belongs to, f the face (its restriction R), data the body's captures */
+typedef struct { MHdr h; int k; const Face *f; void *data; Val *x[10]; int i; } BodyF;
+#define F ((BodyF *)(mst.p + off))
+#define MR(slot, v) do { MCALL(mpush_restrict((v), F->f)); F->x[slot] = mret; } while (0)
+#define X(i) (F->x[i])
+/* gcomp: composition whose base is also propagated on ~phi, so that no empty systems arise (Agda's mkGComp) */
+static void gcomp_body_step(size_t off) {
+    MSTART
+    { Caps *c = F->data; (void)c; }
+    MR(0, ((Caps *)F->data)->v[0]); MR(1, ((Caps *)F->data)->v[2]); MR(2, ((Caps *)F->data)->v[3]); MR(3, ((Caps *)F->data)->v[4]);   /* line, u, u0, i */
+    if (F->k == 0) { MCALL(mpush_vapp(X(1), X(3), 0)); { Val *line = X(0), *i = X(3), *ui = mret; MTAIL(mpush_vfwd(line, i, ui)); } }
+    { Val *line = X(0), *u0 = X(2); MTAIL(mpush_vfwd(line, izero(), u0)); }
+    MFINISH
+}
+/* transp (λi. Glue A_i φ_i Te_i) ψ u0, with the components given at the fresh interval variable F */
+static void glue_tr_body_step(size_t off) {
+    MSTART
+    MR(0, ((TrSides *)F->data)->i);   /* i */
+    if (F->k == 0) { MR(1, ((TrSides *)F->data)->ungl); { Val *g = X(1), *i = X(0); MTAIL(mpush_vapp(g, i, 0)); } }
+    MR(1, ((TrSides *)F->data)->Teg);
+    MCALL(mpush_subst(X(1), trsides_var(F->data), X(0)->iv));
+    X(2) = vsys_at(mret, NULL);
+    if (!X(2)) die("internal: Glue transport: the glued type is not total on its face");
+    MCALL(mpush_vproj(X(2), 2)); MCALL(mpush_vproj(mret, 1)); X(3) = mret;   /* equiv_fun */
+    MR(4, ((TrSides *)F->data)->tf);
+    MCALL(mpush_vapp(X(4), X(0), 0));
+    { Val *e = X(3), *y = mret; MTAIL(mpush_vapp(e, y, 0)); }
+    MFINISH
+}
+static void pe_body_step(size_t off) {
+    MSTART
+    X(5) = mkval(V_PAIR);
+    if (F->k == 0) { MR(0, ((PeData *)F->data)->u0); X(5)->a = X(0); }
+    else { MR(0, ((PeData *)F->data)->tf); MCALL(mpush_vapp(X(0), ione(), 0)); X(5)->a = mret; }
+    MR(1, ((PeData *)F->data)->a1);
+    X(5)->b = vnative(N_CONST, 0, 0, 0, 1, X(1));
+    MRET(X(5));
+    MFINISH
+}
+static void glue_fiber_body_step(size_t off) {
+    MSTART
+    MR(0, ((FibData *)F->data)->Te1);
+    X(0) = vsys_at(X(0), NULL);
+    if (!X(0)) die("internal: Glue transport: the glued type is not total at i1 on its face");
+    MCALL(mpush_vproj(X(0), 1)); X(1) = mret;                  /* T1 */
+    MCALL(mpush_vproj(X(0), 2)); X(2) = mret;                  /* w */
+    MR(3, ((FibData *)F->data)->A1); MR(4, ((FibData *)F->data)->a1);
+    MR(5, ((FibData *)F->data)->psi); MR(6, ((FibData *)F->data)->forall);
+    { PeData *pd = xalloc(sizeof *pd); F->x[9] = (Val *)pd; }
+    MR(7, ((FibData *)F->data)->u0); ((PeData *)X(9))->u0 = X(7);
+    MR(7, ((FibData *)F->data)->tf); ((PeData *)X(9))->tf = X(7);
+    ((PeData *)X(9))->a1 = X(4);
+    { Val **phis = xalloc(2 * sizeof(Val *)); phis[0] = X(5); phis[1] = X(6);
+      MCALL(mpush_vsys_faces(2, phis, pe_body, X(9))); }
+    X(7) = mret;                                               /* pe */
+    MCALL(mpush_builtin_at("equivProof", ((FibData *)F->data)->lvl));
+    MCALL(mpush_vapp(mret, X(1), 0)); MCALL(mpush_vapp(mret, X(3), 0)); MCALL(mpush_vapp(mret, X(2), 0));
+    MCALL(mpush_vapp(mret, X(4), 0)); MCALL(mpush_vapp(mret, ior(X(5), X(6)), 0)); MCALL(mpush_vapp(mret, X(7), 0));
+    X(8) = mret;                                               /* fib */
+    if (X(8)->k == V_INS) MRET(X(8)->a);
+    MCALL(mpush_builtin_at("fiber", ((FibData *)F->data)->lvl));
+    MCALL(mpush_vapp(mret, X(1), 0)); MCALL(mpush_vapp(mret, X(3), 0)); X(0) = mret;
+    MCALL(mpush_vproj(X(2), 1)); MCALL(mpush_vapp(X(0), mret, 0)); MCALL(mpush_vapp(mret, X(4), 0));
+    { Val *fiberT = mret, *phi = ior(X(5), X(6)), *pe = X(7), *fib = X(8); MTAIL(mpush_vouts(fiberT, phi, pe, fib)); }
+    MFINISH
+}
+static void glue_a1p_body_step(size_t off) {
+    MSTART
+    if (F->k == 1) { Val *a1 = ((A1pData *)F->data)->a1; const Face *f = F->f; MTAIL(mpush_restrict(a1, f)); }
+    MR(0, ((A1pData *)F->data)->alphas); MR(1, ((A1pData *)F->data)->ts); MR(2, ((A1pData *)F->data)->Te1);
+    X(0) = vsys_at(X(0), NULL); X(1) = vsys_at(X(1), NULL); X(2) = vsys_at(X(2), NULL);
+    if (!X(0) || !X(1) || !X(2)) die("internal: Glue transport: partial fibre not total on its face");
+    MCALL(mpush_vproj(X(2), 2)); MCALL(mpush_vproj(mret, 1)); MCALL(mpush_vapp(mret, X(1), 0)); X(3) = mret;   /* x */
+    MR(4, ((A1pData *)F->data)->j); MR(5, ((A1pData *)F->data)->a1);
+    { Val *alpha = X(0), *r = ineg(X(4)), *x = X(3), *a1 = X(5); MTAIL(mpush_vpapp(alpha, r, x, a1)); }
+    MFINISH
 }
 /* hcomp ψ u u0 at Glue A φ Te */
-static Val *glue_hf_body(int k, const Face *f, void *data) {
-    HfData *d = data; (void)k;
-    Val *Te = vsys_at(R(d->Te), NULL); if (!Te) die("internal: Glue hcomp: the glued type is not total on its face");
-    Val *fill = vnative(N_FILL, 1, 0, 0, 4, vproj(Te, 1), R(d->psi), R(d->u), R(d->u0));
-    return vapp(fill, R(d->i), 0);
+static void glue_hf_body_step(size_t off) {
+    MSTART
+    MR(0, ((HfData *)F->data)->Te);
+    X(0) = vsys_at(X(0), NULL); if (!X(0)) die("internal: Glue hcomp: the glued type is not total on its face");
+    MCALL(mpush_vproj(X(0), 1)); X(1) = mret;
+    MR(2, ((HfData *)F->data)->psi); MR(3, ((HfData *)F->data)->u); MR(4, ((HfData *)F->data)->u0);
+    X(5) = vnative(N_FILL, 1, 0, 0, 4, X(1), X(2), X(3), X(4));
+    MR(6, ((HfData *)F->data)->i);
+    { Val *fill = X(5), *i = X(6); MTAIL(mpush_vapp(fill, i, 0)); }
+    MFINISH
 }
-static Val *glue_hc_body(int k, const Face *f, void *data) {
-    HcData *d = data; Val *i = R(d->i);
-    if (k == 0) return vunglue(R(d->Ab), R(d->phi), R(d->Te), vapp(R(d->u), i, 0));
-    Val *Te = vsys_at(R(d->Te), NULL); if (!Te) die("internal: Glue hcomp: the glued type is not total on its face");
-    Val *t = vsys_at(vapp(R(d->tfs), i, 0), NULL); if (!t) die("internal: Glue hcomp: filler not total on its face");
-    return vapp(equiv_fun(Te), t, 0);
+static void glue_hc_body_step(size_t off) {
+    MSTART
+    MR(0, ((HcData *)F->data)->i);
+    if (F->k == 0) {
+        MR(1, ((HcData *)F->data)->Ab); MR(2, ((HcData *)F->data)->phi); MR(3, ((HcData *)F->data)->Te); MR(4, ((HcData *)F->data)->u);
+        MCALL(mpush_vapp(X(4), X(0), 0));
+        { Val *A = X(1), *phi = X(2), *Te = X(3), *b = mret; MTAIL(mpush_vunglue(A, phi, Te, b)); }
+    }
+    MR(1, ((HcData *)F->data)->Te);
+    X(1) = vsys_at(X(1), NULL); if (!X(1)) die("internal: Glue hcomp: the glued type is not total on its face");
+    MR(2, ((HcData *)F->data)->tfs);
+    MCALL(mpush_vapp(X(2), X(0), 0));
+    X(3) = vsys_at(mret, NULL); if (!X(3)) die("internal: Glue hcomp: filler not total on its face");
+    MCALL(mpush_vproj(X(1), 2)); MCALL(mpush_vproj(mret, 1));
+    { Val *e = mret, *t = X(3); MTAIL(mpush_vapp(e, t, 0)); }
+    MFINISH
 }
-static Val *hcompU_body(int k, const Face *f, void *data) {
-    Caps *c = data; Val *u = restrict_val(c->v[0], f);
-    (void)k;
-    Val *p = mkval(V_PAIR);
-    p->a = vapp(u, ione(), 0);                                        /* the type at the lid */
-    p->b = vapp(builtin_at("transpEquiv", c->l), vnative(N_LINE_IOR, 1, 0, 0, 2, u, izero()), 0);   /* λi. u (i0 ∨ ~i) = u (~i): from the lid back to the base */
-    return p;
+static void hcompU_body_step(size_t off) {
+    MSTART
+    MR(0, ((Caps *)F->data)->v[0]);   /* u */
+    X(1) = mkval(V_PAIR);
+    MCALL(mpush_vapp(X(0), ione(), 0)); X(1)->a = mret;                                  /* the type at the lid */
+    MCALL(mpush_builtin_at("transpEquiv", ((Caps *)F->data)->l));
+    MCALL(mpush_vapp(mret, vnative(N_LINE_IOR, 1, 0, 0, 2, X(0), izero()), 0));          /* λi. u (i0 ∨ ~i) = u (~i): from the lid back to the base */
+    X(1)->b = mret;
+    MRET(X(1));
+    MFINISH
 }
-static Val *hcomp_glue(Val *A, Val *psi, Val *u, Val *u0) {
-    Val *Ab = A->a, *phi = A->b, *Te = A->c;
-    Val *tfs = vnative(N_GLUE_HF, 0, 0, 0, 5, Te, psi, u, u0, phi);   /* the filler lives on phi, the Glue's face (M20: the face was read past the captures, a NULL) */
-    Val *sides = vnative(N_GLUE_HC_SIDES, 0, 0, 0, 6, Ab, phi, Te, psi, u, tfs);
-    Val *a1 = vhcomp(Ab, ior(psi, phi), sides, vunglue(Ab, phi, Te, u0));
-    return vglueel(vapp(tfs, ione(), 0), a1, A);
+#undef X
+#undef MR
+#undef F
+static void mpush_body(SysBody body, int k, const Face *f, void *data) {
+    void (*step)(size_t) =
+        body == gcomp_body ? gcomp_body_step : body == glue_tr_body ? glue_tr_body_step : body == pe_body ? pe_body_step
+      : body == glue_fiber_body ? glue_fiber_body_step : body == glue_a1p_body ? glue_a1p_body_step
+      : body == glue_hf_body ? glue_hf_body_step : body == glue_hc_body ? glue_hc_body_step : body == hcompU_body ? hcompU_body_step : NULL;
+    if (!step) die("internal: a face body not on the machine");
+    BodyF *x = mpush(sizeof *x, step); x->k = k; x->f = f; x->data = data;
 }
-#undef R
+/* the bodies as C functions: their identity is what a face system names (and a C caller runs its frame) */
+#define BODY_ENTRY(name) static Val *name(int k, const Face *f, void *data) { mpush_body(name, k, f, data); return mrun(); }
+BODY_ENTRY(gcomp_body)
+BODY_ENTRY(glue_tr_body)
+BODY_ENTRY(pe_body)
+BODY_ENTRY(glue_fiber_body)
+BODY_ENTRY(glue_a1p_body)
+BODY_ENTRY(glue_hf_body)
+BODY_ENTRY(glue_hc_body)
+BODY_ENTRY(hcompU_body)
+#undef BODY_ENTRY
+
+/* a system whose k-th part lives on the faces of phis[k]; each branch is computed under the restriction to its face,
+   so that partial data (a Glue type's T and e) is total where the branch is used */
+typedef struct { MHdr h; int nb; Val **phis; SysBody body; void *data; int k, i, nf, cap, n; Face *fs; VBranch *br; } VsfF;
+static void vsys_faces_step(size_t off);
+static void mpush_vsys_faces(int nb, Val **phis, SysBody body, void *data) { VsfF *f = mpush(sizeof *f, vsys_faces_step); f->nb = nb; f->phis = phis; f->body = body; f->data = data; }
+#define F ((VsfF *)(mst.p + off))
+static void vsys_faces_step(size_t off) {
+    MSTART
+    F->cap = 4; F->n = 0; F->br = xalloc(F->cap * sizeof(VBranch));
+    for (F->k = 0; F->k < F->nb; F->k++) {
+        F->nf = iv_faces(F->phis[F->k]->iv, &F->fs);
+        for (F->i = 0; F->i < F->nf; F->i++) {
+            if (F->n == F->cap) { F->cap *= 2; VBranch *b2 = xalloc(F->cap * sizeof(VBranch)); memcpy(b2, F->br, F->n * sizeof(VBranch)); F->br = b2; }
+            F->br[F->n].phi = vi(face_iv(&F->fs[F->i]));
+            MCALL(mpush_body(F->body, F->k, &F->fs[F->i], F->data));
+            F->br[F->n].v = mret; F->n++;
+        }
+    }
+    MRET(vsys(F->br, F->n));
+    MFINISH
+}
+#undef F
+
+/* transp along Glue */
+typedef struct { MHdr h; Val *line, *psi, *u0, *Ag, *fiv; int Fv; Val *Ab, *phig, *Teg, *forall, *lineA, *ungl, *tf, *sides,
+                 *a1, *phi1, *Te1, *A1, *fibsys, *ts, *alphas, *a1p; } TrGlueF;
+static void transp_glue_step(size_t off);
+static void mpush_transp_glue(Val *line, Val *psi, Val *u0, Val *Ag, Val *fiv) { TrGlueF *f = mpush(sizeof *f, transp_glue_step); f->line = line; f->psi = psi; f->u0 = u0; f->Ag = Ag; f->fiv = fiv; }
+#define F ((TrGlueF *)(mst.p + off))
+static void transp_glue_step(size_t off) {
+    MSTART
+    F->Fv = F->fiv->iv.c[0].l[0].var;
+    F->Ab = F->Ag->a; F->phig = F->Ag->b; F->Teg = F->Ag->c;
+    F->forall = vi(iv_forall(F->phig->iv, F->Fv));
+    F->lineA = vnative(N_SUBST, F->Fv, 0, 0, 1, F->Ab);
+    { Val *lineT = vnative(N_GLUE_T, F->Fv, 0, 0, 1, F->Teg);
+      F->ungl = vnative(N_UNGLUE_U0, F->Fv, 0, 0, 4, F->Ab, F->phig, F->Teg, F->u0);
+      F->tf = vtfill(lineT, F->psi, F->u0); }
+    F->sides = vnative(N_GLUE_TR_SIDES, F->Fv, 0, 0, 5, F->psi, F->forall, F->ungl, F->Teg, F->tf);
+    MCALL(mpush_vapp(F->ungl, izero(), 0));
+    MCALL(mpush_vcomp_g(F->lineA, ior(F->psi, F->forall), F->sides, mret, 1)); F->a1 = mret;
+    F->phi1 = vi(iv_subst(F->phig->iv, F->Fv, iv_one()));
+    MCALL(mpush_subst(F->Teg, F->Fv, iv_one())); F->Te1 = mret;
+    MCALL(mpush_subst(F->Ab, F->Fv, iv_one())); F->A1 = mret;
+    { FibData *fd = xalloc(sizeof *fd); *fd = (FibData){ F->Te1, F->A1, F->a1, F->psi, F->forall, F->u0, F->tf, F->Ag->lvl };
+      Val **phis = xalloc(sizeof(Val *)); phis[0] = F->phi1;
+      MCALL(mpush_vsys_faces(1, phis, glue_fiber_body, fd)); }
+    F->fibsys = mret;
+    MCALL(mpush_vsys_map(F->fibsys, proj1, NULL)); F->ts = mret;
+    MCALL(mpush_vsys_map(F->fibsys, proj2, NULL)); F->alphas = mret;
+    MCALL(mpush_vhcomp(F->A1, ior(F->phi1, F->psi), vnative(N_GLUE_A1P_SIDES, 0, 0, 0, 6, F->phi1, F->psi, F->alphas, F->ts, F->Te1, F->a1), F->a1));
+    F->a1p = mret;
+    MCALL(mpush_subst(F->Ag, F->Fv, iv_one()));
+    { Val *G1 = mret; if (G1->k == V_GLUE) G1->lvl = F->Ag->lvl;
+      MRET(vglueel(F->ts, F->a1p, G1)); }
+    MFINISH
+}
+#undef F
+
+/* hcomp ψ u u0 at Glue A φ Te */
+typedef struct { MHdr h; Val *A, *psi, *u, *u0, *tfs, *sides, *a1; } HcGlueF;
+static void hcomp_glue_step(size_t off);
+static void mpush_hcomp_glue(Val *A, Val *psi, Val *u, Val *u0) { HcGlueF *f = mpush(sizeof *f, hcomp_glue_step); f->A = A; f->psi = psi; f->u = u; f->u0 = u0; }
+#define F ((HcGlueF *)(mst.p + off))
+static void hcomp_glue_step(size_t off) {
+    MSTART
+    { Val *Ab = F->A->a, *phi = F->A->b, *Te = F->A->c;
+      F->tfs = vnative(N_GLUE_HF, 0, 0, 0, 5, Te, F->psi, F->u, F->u0, phi);   /* the filler lives on phi, the Glue's face (M20: the face was read past the captures, a NULL) */
+      F->sides = vnative(N_GLUE_HC_SIDES, 0, 0, 0, 6, Ab, phi, Te, F->psi, F->u, F->tfs);
+      MCALL(mpush_vunglue(Ab, phi, Te, F->u0)); }
+    MCALL(mpush_vhcomp(F->A->a, ior(F->psi, F->A->b), F->sides, mret)); F->a1 = mret;
+    MCALL(mpush_vapp(F->tfs, ione(), 0));
+    MRET(vglueel(mret, F->a1, F->A));
+    MFINISH
+}
+#undef F
 
 /* ---- quoting ---- */
 static Term *quote_iv(int depth, IVal a) {
