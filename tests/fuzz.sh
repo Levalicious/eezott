@@ -10,6 +10,9 @@
 #                  boundary is not a full cube, a literal of a second Peano type); printed with an UNSUPPORTED comment
 #   KNOWN-DIFF     agda rejects for a recorded difference between the theories (a proof of Empty is an irrelevant
 #                  position in eezott, elab.c; Agda allows only the absurd pattern on an irrelevant argument)
+#                  or a known gap of the oracle's: Agda (2.6.4.3) computes no transp/hcomp at a record with an irrelevant
+#                  field (eezott's Sigma A .B, printed as Σᵢ), so a normal-form equation through one stays stuck - filed
+#                  only when the module checks without that equation and cubicaltt accepted the same equation
 #   RESOURCE       agda ran out of memory or time (natives compute in unary there): not a judgement
 #   ORACLE-PANIC   agda hit an internal error (a bug of the oracle's): not a judgement either; reported upstream when minimised
 # Generated programs (F3, tests/fuzz-gen.py; run `fuzz.sh DIR` on a directory of them) carry an 'expect:' line:
@@ -92,6 +95,7 @@ runleg() {   # file label: the run-time leg for a Nat- or Bool-valued main
 }
 cttleg() {   # file label: the cubicaltt leg (F4) - the program as a cubicaltt module, checked by cubical -b
     local f="$1" label="$2" mod erc crc first nfnote
+    CTT_NF_AGREED=0   # set when cubicaltt accepts the module with main's normal-form equation in it (judge reads it)
     [ -n "$CUBICAL" ] || return 0
     mod=$(basename "$f" .tt | tr '-' '_')   # cubicaltt names the module after its file: eezott -C does the same, so the program is copied under that name
     cp "$f" "$OUT/ctt/$mod.tt"
@@ -104,7 +108,9 @@ cttleg() {   # file label: the cubicaltt leg (F4) - the program as a cubicaltt m
     if [ $erc -eq 3 ]; then verdict CTT-INEXPRESSIBLE "$label" "$(grep -oE 'UNSUPPORTED: [^-]*' "$OUT/ctt/$mod.ctt" | head -1)"; return 0; fi
     if [ $erc -ne 0 ]; then verdict CTT-DISAGREE "$label" "eezott -C failed (rc $erc): $(head -c 120 "$OUT/ctt/$mod.err" | tr '\n' ' ')"; return 0; fi
     ( cd "$OUT/ctt" && ulimit -v ${FUZZ_CTT_ULIMIT_KB:-6000000} -f 20000; printf ':q\n' | timeout ${FUZZ_CTT_TIMEOUT:-300} "$CUBICAL" -b "$mod.ctt" > "$mod.out" 2>&1 ); crc=$?   # cubical's exit status is 0 whatever it found: the text is the verdict; on a resolver failure it drops into its REPL, which loops on a closed stdin (14 GB of prompts once): :q on stdin, output capped at 20 MB
-    if grep -q '^File loaded' "$OUT/ctt/$mod.out"; then verdict CTT-AGREE "$label" "${nfnote# }"; return 0; fi
+    if grep -q '^File loaded' "$OUT/ctt/$mod.out"; then
+        grep -q '^nf_' "$OUT/ctt/$mod.ctt" && CTT_NF_AGREED=1
+        verdict CTT-AGREE "$label" "${nfnote# }"; return 0; fi
     if [ $crc -eq 124 ]; then verdict CTT-RESOURCE "$label" "timeout"; return 0; fi
     first=$(grep -vE '^Checking|^\s*$|^cubical, version|^Loading |^Parsed ' "$OUT/ctt/$mod.out" | head -2 | tr '\n' ' ' | cut -c1-160)
     if grep -q '^nf_' "$OUT/ctt/$mod.ctt"; then   # rejected with the normal-form equation: does the program alone load? then only the normal forms differ
@@ -150,6 +156,15 @@ judge() {   # file label: the verdicts for one program
     cttleg "$f" "$label"   # and the cubicaltt leg judges the same core independently of Agda
     if [ $arc -eq 0 ]; then verdict AGREE "$label" "${nfnote# }"; return 0; fi
     first=$(grep -vE '^Checking |^\s*$' "$OUT/$mod.out" | grep -vE "\.agda:[0-9]+,[0-9]+" | head -1 | cut -c1-140)
+    # a known gap of the oracle's: Agda (2.6.4.3) computes no transp or hcomp at a record with an irrelevant field - eezott's
+    # Sigma A .B is Σᵢ - so main's normal-form equation can stay stuck there. Filed as KNOWN-DIFF only when Agda refused
+    # that equation alone (the module without it checks), its stuck term is a Kan operation at Σᵢ, and cubicaltt (no
+    # irrelevance: the component relevant) accepted the same normal-form equation
+    if [ "$CTT_NF_AGREED" = 1 ] && grep -q '^nfˍ' "$OUT/$mod.agda" && grep -qE 'transp|hcomp' "$OUT/$mod.out" && grep -q 'Σᵢ' "$OUT/$mod.out"; then
+        mkdir -p "$OUT/nonf"; grep -v '^nfˍ' "$OUT/$mod.agda" > "$OUT/nonf/$mod.agda"
+        ( cd "$OUT/nonf" && ulimit -v ${FUZZ_AGDA_ULIMIT_KB:-6000000} -f 20000; timeout ${FUZZ_AGDA_TIMEOUT:-300} "$AGDA" --cubical "$mod.agda" > "$mod.out" 2>&1 )
+        if [ $? -eq 0 ]; then verdict KNOWN-DIFF "$label" "Agda computes no Kan operation at a record with an irrelevant field; cubicaltt agrees on the normal form"; return 0; fi
+    fi
     case "$first" in
         *"declared irrelevant, so it cannot be used here"*) verdict KNOWN-DIFF "$label" "Empty-position irrelevance";;
         *"out of memory"*|*"Heap exhausted"*) verdict RESOURCE "$label" "$first";;
