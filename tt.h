@@ -162,6 +162,21 @@ Term *shift2(Term *t, int cut1, int by1, int cut2, int by2); /* vars in [cut1,cu
 int term_eq(Term *a, Term *b);
 void term_print(FILE *f, Term *t, const char **names, int depth);
 int term_mentions_var(Term *t, int idx);
+/* iterative walks over terms (eval.c): no walk recurses on the C stack */
+typedef struct TWDecide TWDecide;
+typedef Term *(*TWPost)(Term *t, Term **rs, int n, void *ctx, void *aux);
+struct TWDecide { Term *r; Term **ks; int nk; TWPost post; int fin; void *aux; };
+/* a node rebuilt from its walked children / the result r / the terms ks walked, then post's term (given aux) walked in the
+   node's place - or, with fin, post's term is the node's result */
+enum { TW_NODE, TW_DONE, TW_SPINE };
+typedef int (*TWPre)(Term *t, int d, void *ctx, TWDecide *out);
+typedef Term *(*TWBuild)(Term *t, Term **kids, void *ctx);
+typedef int (*TAnyPre)(Term *t, int d, void *ctx);   /* 1 found, 0 look inside, -1 nothing inside, 2 its own children pushed (term_any_push) */
+Term *term_walk(Term *t, int d, int all, TWPre pre, TWBuild build, void *ctx);
+int term_any(Term *t, int d, int all, TAnyPre pre, void *ctx);
+void term_any_push(Term *t, int d);   /* for a visitor returning 2: push in reverse of the order they are to be visited */
+int term_nkids(Term *t, int all); Term *term_kid(Term *t, int i); int term_kid_binds(Term *t, int i);
+Term *term_rebuild(Term *t, Term **kids);   /* the node with new children, every other field kept */
 
 /* ---------------- interval values ---------------- */
 
@@ -313,6 +328,10 @@ MMark meta_mark(void); void meta_rollback(MMark m);
 int unify_meta(int depth, Val *m, Val *other);   /* m an unsolved meta neutral: 1 if solved or postponed, 3 if postponed for a variable out of scope, 0 if refused (the meta occurs) */
 void meta_drop_last_post(void);                  /* undo the postponement unify_meta just made */
 void meta_postpone(int depth, Val *a, Val *b);
+int meta_pattern_arg(Val *m, int i, Val *x, int *lv, int *isi);   /* the machine's unification (eval.c) uses these */
+Term *meta_solution_term(Term *body, int k, int *isi);
+void meta_record(int id, Term *solt, Val *sol);
+Term *meta_rename(Term *body, int *lv, int k, int depth, int id, int *occurs, int *scope);
 void metas_finish(const char *what, int line, int m0);   /* retry the postponed constraints; every meta since m0 must be solved */
 int metas_retry(void);                       /* retry them without dying: 1 if none remain (the erasure's law matching) */
 int meta_solved(int id);

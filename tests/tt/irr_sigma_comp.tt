@@ -1,0 +1,6 @@
+-- comp along a line of Sigma types with an irrelevant component: its desugaring shifts the line and substitutes into it,
+-- and the rebuilt Sigma keeps its irrelevance (a shifted Sigma A .B once came back relevant: the Agda export's hcomp was
+-- typed Σ where the transport's line was Σᵢ, and Agda refused the module)
+def T : U := Sigma Nat .(\_ -> Nat)
+def p (x : T) : T := comp (\i -> Sigma Nat .(\_ -> Nat)) i0 (\i -> []) x
+def main : Nat := fst (p (3 , 4))

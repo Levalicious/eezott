@@ -101,6 +101,7 @@ check transp_pi.tt     nat 2
 check hcomp_nat.tt     nat 2
 check implicit_id.tt   nat 9
 check implicit_lam.tt  nat 4
+check irr_sigma_comp.tt nat 3   # a shifted Sigma keeps its irrelevant component
 check implicit_cons.tt nat 3
 check mutual_tree.tt   nat 4
 check mutual_iit.tt    nat 3
@@ -228,6 +229,44 @@ case "$out" in "huge = pow 3 18446744073709551616")
   *) fail "big_pow.tt: an unholdable power is stated, not refused" "huge = pow 3 18446744073709551616" "$out";; esac
 checkNF big_print.tt    big "1$(printf '%012000d' 0)"   # a literal's decimal, in full: the chunk buffer's regression test
 checkNF deep_nf.tt       main 200000   # a constructor chain 200000 deep, forced, quoted and printed off the C stack
+
+# sources nested far deeper than a C stack allows, generated here: parsed, checked, printed for Agda (-A) and cubicaltt (-C) and
+# erased under a 256 KiB stack - nothing in the checker recurses on the C stack (S4), so each must go through
+deep=$(mktemp -d)
+python3 - "$deep" <<'PYEOF'
+import sys
+d = sys.argv[1]; n = 100000; main = "def main : Nat := zero\n"
+open(d + "/parens.tt", "w").write("def t : U 1 := " + "(" * n + "U" + ")" * n + "\n" + main)
+open(d + "/negs.tt", "w").write("def f (A : U) (a : A) (p : Path A a a) : Path A a a := \\i -> p (" + "~ " * n + "i)\n" + main)
+open(d + "/meets.tt", "w").write("def f (A : U) (a : A) (p : Path A a a) : Path A a a := \\i -> p (" + "(i /\\ " * 20000 + "i" + ")" * 20000 + ")\n" + main)
+open(d + "/lams.tt", "w").write("def f : " + "Nat -> " * 20000 + "Nat := \\" + " ".join("x%d" % j for j in range(20000)) + " -> x0\n" + main)
+for k in range(3000): open(d + "/m%d.tt" % k, "w").write(("#import m%d\n" % (k + 1) if k < 2999 else "") + "def d%d : U 1 := U\n" % k)
+open(d + "/imports.tt", "w").write("#import m0\n" + main)
+PYEOF
+for f in parens negs meets lams imports; do
+    for flags in -c -A -C ""; do
+        name="deep source $f.tt [${flags:-erase}] under a 256 KiB stack"
+        out=$( (ulimit -s 256; tt $flags -L "$deep" "$deep/$f.tt") 2>&1 >/dev/null ); rc=$?
+        if [ $rc -eq 0 ]; then pass "$name"; else fail "$name" "rc 0" "rc $rc: $(printf '%s' "$out" | head -1)"; fi
+    done
+done
+# nested elaboration is linear (the value of a checked argument is built from its parts, not evaluated again): nests 20000
+# deep of applications, implicit applications, pairs and a let-bound function's applications check within 2 GB and give
+# their normal form (quadratic, each needed ~135 GB)
+python3 - "$deep" <<'PYEOF'
+import sys
+d = sys.argv[1]; n = 20000
+open(d + "/napp.tt", "w").write("def g (x : Nat) : Nat := x\ndef main : Nat := " + "g (" * n + "zero" + ")" * n + "\n")
+open(d + "/nimp.tt", "w").write("def idd {A : U} (x : A) : A := x\ndef main : Nat := " + "idd (" * n + "zero" + ")" * n + "\n")
+open(d + "/npair.tt", "w").write("def T : U := Sigma Nat (\\_ -> Nat)\ndef g (p : T) : Nat := fst p\ndef main : Nat := " + "g (" * n + "zero" + " , zero)" * n + "\n")
+open(d + "/nlet.tt", "w").write("def main : Nat := let f : Nat -> Nat := \\x -> x in " + "f (" * n + "zero" + ")" * n + "\n")
+PYEOF
+for f in napp nimp npair nlet; do
+    name="nested elaboration $f.tt 20000 deep within 2 GB"
+    out=$( (ulimit -s 256 -v 2000000; tt -c -n main "$deep/$f.tt") 2>&1 ); rc=$?
+    if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q '^main = 0$'; then pass "$name"; else fail "$name" "main = 0" "rc $rc: $(printf '%s' "$out" | head -1)"; fi
+done
+rm -rf "$deep"
 
 for f in "$TT"/bad/*.tt; do
     name=bad/$(basename "$f")

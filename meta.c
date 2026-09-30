@@ -49,32 +49,58 @@ static int peel_universe(int depth, Val *ty, VList *args, Val **tys, LVal *out) 
     if (ty->k != V_U) return 0;
     *out = ty->lvl; return 1;
 }
-static int val_universe(int depth, Val *v, Val **tys, LVal *out) {
-    v = force(v);
-    switch (v->k) {
-    case V_U: *out = lv_add(v->lvl, 1); return 1;
-    case V_PI: case V_SIGMA: {
-        Val *dom = force(v->dom); LVal ld, lc; int hasd = 0;
-        if (v->k == V_SIGMA || (dom->k != V_INTERVAL && dom->k != V_LEVEL)) { if (!val_universe(depth, dom, tys, &ld)) return 0; hasd = 1; }
-        Val **t2 = xalloc((depth + 2) * sizeof(Val *)); for (int i = 0; i < depth; i++) t2[i] = tys ? tys[i] : NULL; t2[depth] = dom;
-        Val *x = dom->k == V_INTERVAL ? vivar(depth) : dom->k == V_LEVEL ? vlvar(depth) : vvar(depth);
-        if (!val_universe(depth + 1, inst(&v->clo, x), t2, &lc)) return 0;
-        *out = hasd ? lv_max(ld, lc) : lc; return 1; }
-    case V_PATHP: return val_universe(depth, vapp(v->a, vi(iv_zero()), 0), tys, out);
-    case V_PARTIAL: return val_universe(depth, v->b, tys, out);
-    case V_SUB: return val_universe(depth, v->a, tys, out);
-    case V_GLUE: *out = v->lvl; return 1;
-    case V_DATA: *out = data_at(v->n, v->lvl)->lvl; return 1;
-    case V_NEU:
-        switch (v->h) {
-        case H_VAR: if (v->n < 0 || v->n >= depth || !tys || !tys[v->n]) return 0; return peel_universe(depth, tys[v->n], &v->args, tys, out);
-        case H_DEF: return peel_universe(depth, def_ty_at(v->n, v->lvl), &v->args, tys, out);
-        case H_TRANSP: { if (v->args.n) return 0; Val *T = force(vapp(v->a, vi(iv_one()), 0)); if (T->k != V_U) return 0; *out = T->lvl; return 1; }
-        case H_HCOMP: case H_OUTS: case H_UNGLUE: { if (v->args.n) return 0; Val *T = force(v->a); if (T->k != V_U) return 0; *out = T->lvl; return 1; }
-        default: return 0;
+/* iterative (the memory layer's stacks): an item is a type to take the universe of, a binder's codomain to instantiate
+   and take, or the maximum of the two results below it; in the recursion's order (the domain's subtree, then the
+   codomain's), so every forcing happens as it did */
+typedef struct { int k, depth, hasd; Val *v, *x; Val **tys; } VuItem;   /* k: 0 a type, 1 a codomain (v the binder, x its variable), 2 a maximum */
+static Stack vust = { NULL, 0, 0, sizeof(VuItem) }, vures = { NULL, 0, 0, sizeof(LVal) };
+static int val_universe(int depth0, Val *v0, Val **tys0, LVal *out) {
+    size_t ib = vust.n, rb = vures.n;
+    VuItem it0 = { 0, depth0, 0, v0, NULL, tys0 }; STACK_PUSH(&vust, VuItem, it0);
+    while (vust.n > ib) {
+        VuItem it = STACK_POP(&vust, VuItem);
+        int depth = it.depth; Val **tys = it.tys; Val *v; LVal r;
+        if (it.k == 2) {
+            LVal lc = STACK_POP(&vures, LVal);
+            if (it.hasd) { LVal ld = STACK_POP(&vures, LVal); lc = lv_max(ld, lc); }
+            STACK_PUSH(&vures, LVal, lc); continue;
         }
-    default: return 0;
+        v = it.k == 1 ? inst(&it.v->clo, it.x) : it.v;
+        v = force(v);
+        switch (v->k) {
+        case V_U: r = lv_add(v->lvl, 1); break;
+        case V_PI: case V_SIGMA: {
+            Val *dom = force(v->dom); int hasd = v->k == V_SIGMA || (dom->k != V_INTERVAL && dom->k != V_LEVEL);
+            Val **t2 = xalloc((depth + 2) * sizeof(Val *)); for (int i = 0; i < depth; i++) t2[i] = tys ? tys[i] : NULL; t2[depth] = dom;
+            Val *x = dom->k == V_INTERVAL ? vivar(depth) : dom->k == V_LEVEL ? vlvar(depth) : vvar(depth);
+            VuItem mx = { 2, depth, hasd, NULL, NULL, NULL }; STACK_PUSH(&vust, VuItem, mx);
+            VuItem cod = { 1, depth + 1, 0, v, x, t2 }; STACK_PUSH(&vust, VuItem, cod);
+            if (hasd) { VuItem d = { 0, depth, 0, dom, NULL, tys }; STACK_PUSH(&vust, VuItem, d); }
+            continue; }
+        case V_PATHP: { VuItem n = { 0, depth, 0, vapp(v->a, vi(iv_zero()), 0), NULL, tys }; STACK_PUSH(&vust, VuItem, n); continue; }
+        case V_PARTIAL: { VuItem n = { 0, depth, 0, v->b, NULL, tys }; STACK_PUSH(&vust, VuItem, n); continue; }
+        case V_SUB: { VuItem n = { 0, depth, 0, v->a, NULL, tys }; STACK_PUSH(&vust, VuItem, n); continue; }
+        case V_GLUE: r = v->lvl; break;
+        case V_DATA: r = data_at(v->n, v->lvl)->lvl; break;
+        case V_NEU: {
+            int ok = 0;
+            switch (v->h) {
+            case H_VAR: ok = !(v->n < 0 || v->n >= depth || !tys || !tys[v->n]) && peel_universe(depth, tys[v->n], &v->args, tys, &r); break;
+            case H_DEF: ok = peel_universe(depth, def_ty_at(v->n, v->lvl), &v->args, tys, &r); break;
+            case H_TRANSP: { if (v->args.n) break; Val *T = force(vapp(v->a, vi(iv_one()), 0)); if (T->k != V_U) break; r = T->lvl; ok = 1; break; }
+            case H_HCOMP: case H_OUTS: case H_UNGLUE: { if (v->args.n) break; Val *T = force(v->a); if (T->k != V_U) break; r = T->lvl; ok = 1; break; }
+            default: break;
+            }
+            if (!ok) goto fail;
+            break; }
+        default: goto fail;
+        }
+        STACK_PUSH(&vures, LVal, r);
     }
+    *out = STACK_POP(&vures, LVal);
+    return 1;
+fail:
+    vust.n = ib; vures.n = rb; return 0;
 }
 /* ?id applied to the context's variables, oldest first: ?id #(n-1) .. #0 */
 Term *meta_term(int id, int ctxn) {
@@ -83,29 +109,8 @@ Term *meta_term(int id, int ctxn) {
     return t;
 }
 int metas_version;   /* see tt.h: the memo on a rigid definition application is valid only at the version it was taken at */
-Val *fmeta(Val *v) {
-    while (v->k == V_NEU && v->h == H_META && tmetas[v->n].sol) {
-        Val *r = tmetas[v->n].sol;
-        for (int i = 0; i < v->args.n; i++) r = vapply_arg(r, &v->args.a[i]);
-        v = r;
-    }
-    return v;
-}
-
 int force_depth;
-static Val *force_go(Val *v);
-Val *force(Val *v) { force_depth++; Val *r = force_go(v); force_depth--; return r; }
-static Val *force_go(Val *v) {
-    v = fmeta(v);
-    for (;;) {
-        /* a rigid definition application unfolds; one that unfolds to itself (a native's guard neutral: a power no limb
-           list holds) is as canonical as it gets */
-        if (v->k == V_NEU && v->h == H_DEF) { Val *u = fmeta(unfold_def(v)); if (u == v) return v; v = u; continue; }
-        /* a deferred elimination reduces; a stuck one comes back as itself, its flag dropped */
-        if (v->k == V_NEU && v->h == H_ELIM && v->defer) { Val *u = fmeta(elim_force(v)); if (u == v) return v; v = u; continue; }
-        return v;
-    }
-}
+/* fmeta and force are the machine's (eval.c) */
 MMark meta_mark(void) { MMark m = { nundo, nposts }; return m; }
 void meta_rollback(MMark m) {
     while (nundo > m.u) { int id = undo[--nundo]; tmetas[id].sol = NULL; tmetas[id].solt = NULL; }
@@ -122,67 +127,77 @@ void meta_postpone(int depth, Val *a, Val *b) {
    context restricted to an endpoint, any other term) is an ignorable position: the solution may not use it, which is sound (it
    is a solution) and incomplete only when the other side needs it, in which case a free variable is out of scope and the
    constraint is postponed. */
-static int pattern_spine(Val *m, int *lv, int *isi) {
-    int ctxn = tmetas[m->n].ctxn;   /* the first ctxn entries are the meta's context; the rest are applications of the meta */
-    for (int i = 0; i < m->args.n; i++) {
-        Arg *a = &m->args.a[i];
-        if (a->proj || a->papp) return 0;
-        Val *x = force(a->v); int l, ii = 0;
-        if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
-        else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
-        else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
-        else if (i < ctxn) { l = -2 - i; ii = x->k == V_I; }   /* a context position that is not a variable: ignorable */
-        else return 0;                                          /* an application to a term: not a pattern */
-        for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
-        lv[i] = l; isi[i] = ii;
-    }
+/* one spine argument, already forced, against the pattern rules (pattern_spine's body): 0 if the spine is not a pattern */
+int meta_pattern_arg(Val *m, int i, Val *x, int *lv, int *isi) {
+    int ctxn = tmetas[m->n].ctxn;
+    Arg *a = &m->args.a[i];
+    if (a->proj || a->papp) return 0;
+    int l, ii = 0;
+    if (x->k == V_NEU && x->h == H_VAR && x->args.n == 0) l = x->n;
+    else if (x->k == V_I && x->iv.n == 1 && x->iv.c[0].n == 1 && !x->iv.c[0].l[0].neg) { l = x->iv.c[0].l[0].var; ii = 1; }
+    else if (x->k == V_L && x->lvl.c == 0 && x->lvl.n == 1 && x->lvl.t[0].off == 0 && !x->lvl.t[0].meta) l = x->lvl.t[0].var;
+    else if (i < ctxn) { l = -2 - i; ii = x->k == V_I; }   /* a context position that is not a variable: ignorable */
+    else return 0;                                          /* an application to a term: not a pattern */
+    for (int j = 0; j < i; j++) if (lv[j] == l) return 0;
+    lv[i] = l; isi[i] = ii;
     return 1;
 }
 typedef struct { int *lv, k, depth, id, occurs, scope; } Ren;
+static Term *ren_vars(Term *t, Ren *r, int d);
 static Term *copy_term(Term *t) { Term *r = xalloc(sizeof *r); *r = *t; return r; }
 /* ren_vars the free variables of a term quoted at depth to the spine's binders; t is under d binders of its own */
-static Term *ren_vars(Term *t, Ren *r, int d) {
-    if (!t) return NULL;
-    Term *c;
+/* the meta walks' node: a copy of the node with its walked children (a binder former's own slots; a system's branches) */
+static Term *copy_build(Term *t, Term **k, void *ctx) {
+    Term *c = copy_term(t); (void)ctx;
+    if (t->k == T_SYS) {
+        c->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { c->br[i].face = k[2 * i]; c->br[i].body = k[2 * i + 1]; }
+        return c;
+    }
+    int n = term_nkids(t, 0);
+    c->a = k[0]; if (n > 1) c->b = k[1]; if (n > 2) c->c = k[2]; if (n > 3) c->d = k[3];
+    return c;
+}
+static int ren_vars_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    Ren *r = ctx;
     switch (t->k) {
     case T_VAR:
-        if (t->n < d) return t;
+        o->r = t;
+        if (t->n < d) return TW_DONE;
         { int level = r->depth - 1 - (t->n - d);
-          for (int j = 0; j < r->k; j++) if (r->lv[j] == level) return mk_var(d + (r->k - 1 - j));
-          r->scope = 1; return t; }
-    case T_META: if (t->n == r->id) r->occurs = 1; return t;
-    case T_PI: case T_SIGMA: c = copy_term(t); c->a = ren_vars(t->a, r, d); c->b = ren_vars(t->b, r, d + 1); return c;
-    case T_LAM: c = copy_term(t); c->a = ren_vars(t->a, r, d + 1); return c;
-    case T_LET: c = copy_term(t); c->a = ren_vars(t->a, r, d); c->b = ren_vars(t->b, r, d); c->c = ren_vars(t->c, r, d + 1); return c;
-    case T_SYS:
-        c = copy_term(t); c->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { c->br[i].face = ren_vars(t->br[i].face, r, d); c->br[i].body = ren_vars(t->br[i].body, r, d); }
-        return c;
-    default:
-        c = copy_term(t); c->a = ren_vars(t->a, r, d); c->b = ren_vars(t->b, r, d); c->c = ren_vars(t->c, r, d); c->d = ren_vars(t->d, r, d); return c;
+          for (int j = 0; j < r->k; j++) if (r->lv[j] == level) { o->r = mk_var(d + (r->k - 1 - j)); return TW_DONE; }
+          r->scope = 1; return TW_DONE; }
+    case T_META: if (t->n == r->id) r->occurs = 1; o->r = t; return TW_DONE;
+    default: return TW_NODE;
     }
 }
-static void solve(int id, Term *body, int k, int *isi) {
+static Term *ren_vars(Term *t, Ren *r, int d) { return term_walk(t, d, 0, ren_vars_pre, copy_build, r); }
+/* the solution: the body abstracted over the spine's binders */
+Term *meta_solution_term(Term *body, int k, int *isi) {
     for (int j = k - 1; j >= 0; j--) { Term *l = mk_lam(xsprintf("x%d", j), body, 0); l->isi = isi[j]; body = l; }
-    tmetas[id].solt = body; tmetas[id].sol = eval(NULL, body);
+    return body;
+}
+void meta_record(int id, Term *solt, Val *sol) {
+    tmetas[id].solt = solt; tmetas[id].sol = sol;
     metas_version++;
     if (nundo == ucap) { ucap = ucap ? 2 * ucap : 64; undo = rrealloc(undo, ucap * sizeof(int)); }
     undo[nundo++] = id;
 }
+static void solve(int id, Term *body, int k, int *isi) {
+    Term *solt = meta_solution_term(body, k, isi);
+    meta_record(id, solt, eval(NULL, solt));
+}
+/* the quoted other side renamed to the spine's binders: *occurs if the meta occurs, *scope if a variable is outside the spine */
+Term *meta_rename(Term *body, int *lv, int k, int depth, int id, int *occurs, int *scope) {
+    Ren r = { lv, k, depth, id, 0, 0 };
+    body = ren_vars(body, &r, 0);
+    *occurs = r.occurs; *scope = r.scope;
+    return body;
+}
 /* Miller pattern unification: the spine must be a pattern (see pattern_spine), the other side is quoted and its free variables renamed to
    the spine's binders; the meta occurring in it is refused, a free variable outside the spine postpones the constraint; anything that is
    not a pattern is postponed. The solution is then the most general one. */
-int unify_meta(int depth, Val *m, Val *other) {
-    int k = m->args.n; int *lv = xalloc((k + 1) * sizeof(int)), *isi = xalloc((k + 1) * sizeof(int));
-    if (!pattern_spine(m, lv, isi)) { meta_postpone(depth, m, other); return 1; }
-    Term *body = quote(depth, other);
-    Ren r = { lv, k, depth, m->n, 0, 0 };
-    body = ren_vars(body, &r, 0);
-    if (r.occurs) return 0;
-    if (r.scope) { meta_postpone(depth, m, other); return 3; }   /* 3: postponed for a variable out of the spine's scope */
-    solve(m->n, body, k, isi);
-    return 1;
-}
+/* unify_meta is the machine's (eval.c) */
 void meta_drop_last_post(void) { if (nposts > 0) nposts--; }
 
 static const char *vshow(int depth, Val *v, const char **names, int nnames) {
@@ -243,56 +258,56 @@ void meta_assign(int id, Term *t, int ctxn) {
     int *isi = xalloc((ctxn + 1) * sizeof(int));
     solve(id, t, ctxn, isi);
 }
-int term_mentions_meta(Term *t, int id) {
-    if (!t) return 0;
-    if (t->k == T_META) return t->n == id;
-    if (t->k == T_SYS) { for (int i = 0; i < t->nbr; i++) if (term_mentions_meta(t->br[i].face, id) || term_mentions_meta(t->br[i].body, id)) return 1; return 0; }
-    return term_mentions_meta(t->a, id) || term_mentions_meta(t->b, id) || term_mentions_meta(t->c, id) || term_mentions_meta(t->d, id);
-}
+static int mentions_meta_pre(Term *t, int d, void *ctx) { (void)d; return t->k == T_META ? (t->n == *(int *)ctx ? 1 : -1) : 0; }
+int term_mentions_meta(Term *t, int id) { return term_any(t, 0, 1, mentions_meta_pre, &id); }
 /* substitute an open term v for the variable idx (v lives in the context outside t's own binders) */
-static Term *subst_open(Term *t, int idx, Term *v, int d) {
-    if (!t) return NULL;
-    Term *r;
-    switch (t->k) {
-    case T_VAR: if (t->n == idx + d) return shift(v, 0, d); if (t->n > idx + d) return mk_var(t->n - 1); return t;
-    case T_PI: case T_SIGMA: r = copy_term(t); r->a = subst_open(t->a, idx, v, d); r->b = subst_open(t->b, idx, v, d + 1); return r;
-    case T_LAM: r = copy_term(t); r->a = subst_open(t->a, idx, v, d + 1); return r;
-    case T_LET: r = copy_term(t); r->a = subst_open(t->a, idx, v, d); r->b = subst_open(t->b, idx, v, d); r->c = subst_open(t->c, idx, v, d + 1); return r;
-    case T_SYS:
-        r = copy_term(t); r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = subst_open(t->br[i].face, idx, v, d); r->br[i].body = subst_open(t->br[i].body, idx, v, d); }
-        return r;
-    default:
-        r = copy_term(t); r->a = subst_open(t->a, idx, v, d); r->b = subst_open(t->b, idx, v, d); r->c = subst_open(t->c, idx, v, d); r->d = subst_open(t->d, idx, v, d); return r;
-    }
+typedef struct { int idx; Term *v; } SubstO;
+static int subst_open_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    SubstO *s = ctx;
+    if (t->k != T_VAR) return TW_NODE;
+    o->r = t->n == s->idx + d ? shift(s->v, 0, d) : t->n > s->idx + d ? mk_var(t->n - 1) : t;
+    return TW_DONE;
 }
+static Term *subst_open(Term *t, int idx, Term *v, int d) { SubstO s = { idx, v }; return term_walk(t, d, 0, subst_open_pre, copy_build, &s); }
 /* replace every meta by its solution applied to its spine (beta-reduced by substitution), structurally */
-Term *zonk(Term *t) {
-    if (!t) return NULL;
-    Term *r;
+/* a solved meta's application: its spine arguments are zonked (outermost first), then the solution applied to them is
+   zonked in its place */
+static Term *zonk_post(Term *t, Term **rs, int n, void *ctx, void *aux) {
+    Term *h = t; (void)ctx; (void)aux;
+    while (h->k == T_APP) h = h->a;
+    Meta *m = &tmetas[h->n];
+    Term **args = xalloc((n + 1) * sizeof(Term *));
+    for (int i = 0; i < n; i++) args[i] = rs[n - 1 - i];
+    Term *body = m->solt; int k = 0;
+    while (k < n && body->k == T_LAM) { body = body->a; k++; }
+    /* innermost binder first; a spine term substituted while j binders remain outside is shifted past them */
+    for (int j = k - 1; j >= 0; j--) body = subst_open(body, 0, shift(args[j], 0, j), 0);
+    for (int j = k; j < n; j++) body = mk_app(body, args[j], 0);
+    return body;
+}
+static int zonk_pre(Term *t, int d, void *ctx, TWDecide *o) {
+    (void)d; (void)ctx;
     if (t->k == T_APP || t->k == T_META) {
         Term *h = t; int n = 0;
         while (h->k == T_APP) { n++; h = h->a; }
         if (h->k == T_META) {
             Meta *m = &tmetas[h->n];
             if (!m->sol) die("line %d: the implicit argument ?%d could not be inferred; write it, f {e} ..", m->line, h->n);
-            Term **args = xalloc((n + 1) * sizeof(Term *)); Term *w = t;
-            for (int i = n - 1; i >= 0; i--) { args[i] = zonk(w->b); w = w->a; }
-            Term *body = m->solt; int k = 0;
-            while (k < n && body->k == T_LAM) { body = body->a; k++; }
-            /* innermost binder first; a spine term substituted while j binders remain outside is shifted past them */
-            for (int j = k - 1; j >= 0; j--) body = subst_open(body, 0, shift(args[j], 0, j), 0);
-            for (int j = k; j < n; j++) body = mk_app(body, args[j], 0);
-            return zonk(body);
+            o->ks = xalloc((n + 1) * sizeof(Term *)); o->nk = n; o->post = zonk_post;
+            Term *w = t; for (int i = 0; i < n; i++) { o->ks[i] = w->b; w = w->a; }
+            return TW_SPINE;
         }
     }
-    switch (t->k) {
-    case T_SYS:
-        r = copy_term(t); r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
-        for (int i = 0; i < t->nbr; i++) { r->br[i].face = zonk(t->br[i].face); r->br[i].body = zonk(t->br[i].body); }
-        return r;
-    default:
-        if (!t->a && !t->b && !t->c && !t->d) return t;
-        r = copy_term(t); r->a = zonk(t->a); r->b = zonk(t->b); r->c = zonk(t->c); r->d = zonk(t->d); return r;
-    }
+    if (t->k != T_SYS && !t->a && !t->b && !t->c && !t->d) { o->r = t; return TW_DONE; }
+    return TW_NODE;
 }
+static Term *zonk_build(Term *t, Term **k, void *ctx) {
+    Term *r = copy_term(t); (void)ctx;
+    if (t->k == T_SYS) {
+        r->br = xalloc((t->nbr + 1) * sizeof(TBranch));
+        for (int i = 0; i < t->nbr; i++) { r->br[i].face = k[2 * i]; r->br[i].body = k[2 * i + 1]; }
+        return r;
+    }
+    r->a = k[0]; r->b = k[1]; r->c = k[2]; r->d = k[3]; return r;
+}
+Term *zonk(Term *t) { return term_walk(t, 0, 1, zonk_pre, zonk_build, NULL); }

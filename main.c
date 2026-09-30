@@ -49,30 +49,42 @@ static char *resolve_import(const char *from, const char *name) {
     die("%s: cannot find the import '%s' (looked in the importing file's directory, -L directories, $EEZOTT_LIB, <eezott>/../stdlib/tt)", from ? from : "<stdin>", name);
     return NULL;
 }
-static void load_source(char *src, const char *path);
-static void load_file(const char *path) {
-    for (size_t i = 0; i < loaded.n; i++) if (!strcmp(STACK_AT(&loaded, char *, i), path)) return;
+/* the files being loaded: each with the point its scan for imports has reached (a Stack of the memory layer, so an import
+   chain is as deep as memory allows). A file's imports load first, in order, then its own declarations are parsed. */
+typedef struct { char *src, *cur; const char *path; } LoadItem;
+static Stack loading = { NULL, 0, 0, sizeof(LoadItem) };
+static int load_begin(const char *path, char *src) {   /* 0: loaded already */
+    for (size_t i = 0; i < loaded.n; i++) if (!strcmp(STACK_AT(&loaded, char *, i), path)) return 0;
     STACK_PUSH(&loaded, char *, xstrdup(path));
-    char *src = read_path(path); if (!src) die("cannot open %s", path);
-    load_source(src, path);
+    if (!src) { src = read_path(path); if (!src) die("cannot open %s", path); }
+    LoadItem it = { src, src, path }; STACK_PUSH(&loading, LoadItem, it);
+    return 1;
 }
-/* the file's imports first (in order), then its own declarations */
-static void load_source(char *src, const char *path) {
-    for (char *line = src; *line; ) {
-        char *p = line; while (*p == ' ' || *p == '\t') p++;
-        if (!strncmp(p, "#import ", 8)) {
-            p += 8; while (*p == ' ' || *p == '\t') p++;
-            char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
-            char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
-            if (*name) load_file(resolve_import(strcmp(path, "<stdin>") ? path : NULL, name));
+static void load_run(void) {
+    while (loading.n) {
+        LoadItem *it = &STACK_TOP(&loading, LoadItem);
+        char *line = it->cur, *import = NULL;
+        while (*line && !import) {
+            char *p = line; while (*p == ' ' || *p == '\t') p++;
+            if (!strncmp(p, "#import ", 8)) {
+                p += 8; while (*p == ' ' || *p == '\t') p++;
+                char *start = p; while (*p && *p != '\n' && *p != ' ' && *p != '\t') p++;
+                char *name = xalloc((size_t)(p - start) + 1); memcpy(name, start, (size_t)(p - start));
+                if (*name) import = name;
+            }
+            while (*line && *line != '\n') line++;
+            if (*line == '\n') line++;
         }
-        while (*line && *line != '\n') line++;
-        if (*line == '\n') line++;
+        it->cur = line;
+        if (import) { const char *from = strcmp(it->path, "<stdin>") ? it->path : NULL; load_begin(resolve_import(from, import), NULL); continue; }
+        LoadItem done = STACK_POP(&loading, LoadItem);
+        SDecl *d = parse_program(done.src, done.path);
+        *decls_tail = d;
+        while (*decls_tail) decls_tail = &(*decls_tail)->next;
     }
-    SDecl *d = parse_program(src, path);
-    *decls_tail = d;
-    while (*decls_tail) decls_tail = &(*decls_tail)->next;
 }
+static void load_file(const char *path) { if (load_begin(path, NULL)) load_run(); }
+static void load_source(char *src, const char *path) { LoadItem it = { src, src, path }; STACK_PUSH(&loading, LoadItem, it); load_run(); }
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s [options] [FILE]\n", prog);
