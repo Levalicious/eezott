@@ -12,6 +12,8 @@ jobs:
           path: eezott            # this repository beside its dependencies: the workspace layout the mkfiles assume (../libeezo, ...)
       - uses: Levalicious/mk@8b33eaa94d5ae53a70b0f3b2cfd9fb1432f8cc9e
       - uses: Levalicious/mkroot@f7addbfe0a8b91de9ef1e0247453f058e3d3fc3a
+      - name: no frame field is stored across a nested machine run (ci/frame_lint.py)
+        run: cd eezott && python3 ci/frame_lint.py *.c
       - name: dependencies at the commits deps.lock pins
         run: sh eezott/ci/deps.sh
       - name: build, dependencies first
